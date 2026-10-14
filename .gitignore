@@ -1,0 +1,19 @@
+# 运行时数据 —— 每台机器自己生成，不入库
+data/
+uploads/
+
+# 打包产物（含内置 Node 运行时，约 31MB）
+package/
+
+# 系统与编辑器
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*~
+
+# 日志与临时文件
+*.log
+npm-debug.log*
+*.tmp

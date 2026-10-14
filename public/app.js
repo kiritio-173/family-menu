@@ -1,0 +1,2668 @@
+/* =========================================================
+   家庭菜单 · 前端
+   ========================================================= */
+
+'use strict';
+
+/* ---------------- 状态 ---------------- */
+
+const S = {
+  view: 'menu',
+  category: '全部',
+  keyword: '',
+  orderStatus: 'pending',
+  groupByMember: true,
+  memberFilter: '',
+  pantryCat: '全部',
+  pantryFilter: 'all', // all | soon | expired
+  planWeek: '', // 正在看的周（周一日期），空 = 本周
+  authed: false,
+  householdId: '', // 当前家庭，存在本机 localStorage：每台设备各选各的
+  data: {
+    categories: [], dishes: [], orders: [], settings: {},
+    households: [], pantry: [], plans: [],
+  },
+  presets: null, // 食材预设，按需从 /api/ingredient-presets 拉一次
+  draft: null, // 菜品编辑草稿
+  draftOrder: null, // 点餐草稿
+  shoppingChecked: new Set(),
+  loading: true,
+};
+
+/** 老的 households.json 还没建时，历史数据都落在 h_home 上 */
+const FALLBACK_HOUSE = 'h_home';
+const LS_HOUSE = 'familyMenu.householdId';
+
+/* ---------------- 工具 ---------------- */
+
+const $ = (sel, root = document) => root.querySelector(sel);
+
+function esc(v) {
+  return String(v === null || v === undefined ? '' : v)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function toast(msg, ms = 1900) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => (t.hidden = true), ms);
+}
+
+const EMOJI = ['🍚', '🍜', '🍲', '🍛', '🍳', '🥘', '🍤', '🥗', '🍖', '🐟', '🥟', '🍤', '🥦', '🍠', '🌽'];
+
+/** 库存分类图标：预设接口没拉到时也要有兜底 */
+const PANTRY_EMOJI = {
+  肉类: '🥩', 蛋类: '🥚', 奶制品: '🥛', 蔬菜: '🥬', 水果: '🍎', 主食粮油: '🍚',
+  豆制品: '🫘', 水产海鲜: '🐟', 冷冻食品: '🧊', 饮料: '🥤', 调味干货: '🧂',
+  零食: '🍪', 其他: '📦',
+};
+const PANTRY_ORDER = Object.keys(PANTRY_EMOJI);
+
+const catEmoji = (name) => PANTRY_EMOJI[name] || '📦';
+
+/** 按菜名取一个稳定的 emoji 占位图 */
+function dishEmoji(name) {
+  let h = 0;
+  for (let i = 0; i < String(name).length; i++) h = (h * 31 + String(name).charCodeAt(i)) >>> 0;
+  return EMOJI[h % EMOJI.length];
+}
+
+function dishById(id) {
+  return S.data.dishes.find((d) => d.id === id) || null;
+}
+
+function sortedCategories() {
+  return [...S.data.categories].sort((a, b) => (a.order || 0) - (b.order || 0));
+}
+
+/* ---------------- 日期 ---------------- */
+
+function parseDay(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''));
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+}
+
+function fmtDay(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function todayStr(d = new Date()) {
+  return fmtDay(d);
+}
+
+function dayOffset(n) {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return fmtDay(d);
+}
+
+/** to - from，按整天算（不受时分秒影响） */
+function dayDiff(from, to) {
+  const a = parseDay(from);
+  const b = parseDay(to);
+  if (!a || !b) return null;
+  return Math.round((b.getTime() - a.getTime()) / 86400000);
+}
+
+/* ---------------- 周 ---------------- */
+
+/** 一律按「周一开始」归周，传今天传周三都会落到同一个周一 */
+function mondayOf(dateStr) {
+  const d = parseDay(dateStr) || new Date();
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return fmtDay(d);
+}
+
+function addDays(dateStr, n) {
+  const d = parseDay(dateStr);
+  if (!d) return dateStr;
+  d.setDate(d.getDate() + n);
+  return fmtDay(d);
+}
+
+/** 正在查看的那一周（周一日期） */
+function planWeek() {
+  return S.planWeek || mondayOf(todayStr());
+}
+
+function planLabel(weekOf) {
+  const from = parseDay(weekOf);
+  const to = parseDay(addDays(weekOf, 6));
+  const f = `${from.getMonth() + 1}月${from.getDate()}日`;
+  const t = `${to.getMonth() + 1}月${to.getDate()}日`;
+  const now = new Date();
+  const sameYear = from.getFullYear() === now.getFullYear();
+  return `${sameYear ? '' : from.getFullYear() + '年'}${f} - ${t}`;
+}
+
+/** 这一周相对今天的位置：-1 上周 / 0 本周 / 1 下周 */
+function planWeekOffset(weekOf) {
+  return Math.round((parseDay(weekOf) - parseDay(mondayOf(todayStr()))) / (7 * 86400000));
+}
+
+/* ---------------- 家庭 ---------------- */
+
+function households() {
+  return (S.data.households || []).filter((h) => h && h.name);
+}
+
+function currentHousehold() {
+  const list = households();
+  return list.find((h) => h.id === S.householdId) || list[0] || null;
+}
+
+function householdName(id) {
+  const h = households().find((x) => x.id === id);
+  return h ? h.name : '未知家庭';
+}
+
+/** 历史点餐可能没记家庭，统一算到默认家庭头上 */
+const orderHouse = (o) => o.householdId || FALLBACK_HOUSE;
+
+function householdOrders(id) {
+  const hid = id || S.householdId;
+  return S.data.orders.filter((o) => orderHouse(o) === hid);
+}
+
+function householdPantry(id) {
+  const hid = id || S.householdId;
+  return S.data.pantry.filter((p) => p.householdId === hid);
+}
+
+/** 当前家庭某一周的计划条目（找不到就是空数组） */
+function planItems(weekOf, id) {
+  const hid = id || S.householdId;
+  const wk = mondayOf(weekOf);
+  const plan = (S.data.plans || []).find((p) => p.householdId === hid && p.weekOf === wk);
+  return plan ? plan.items : [];
+}
+
+function planCount(weekOf) {
+  return planItems(weekOf).length;
+}
+
+/** 保质期状态：过期 / 今天 / 临期(3 天内) / 正常 */
+function shelfStatus(item) {
+  if (!item.expireAt) return { key: 'none', label: '没填保质期', days: null };
+  const today = todayStr();
+  const left = dayDiff(today, item.expireAt);
+  if (left === null) return { key: 'none', label: '', days: null };
+  if (left < 0) return { key: 'expired', label: `已过期 ${-left} 天`, days: left };
+  if (left === 0) return { key: 'today', label: '今天到期', days: 0 };
+  if (left <= 3) return { key: 'soon', label: `还剩 ${left} 天`, days: left };
+  return { key: 'ok', label: `还剩 ${left} 天`, days: left };
+}
+
+function pendingOrders() {
+  return householdOrders().filter((o) => o.status === 'pending' || o.status === 'cooking');
+}
+
+function relTime(iso) {
+  if (!iso) return '';
+  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+  if (diff < 86400 * 7) return `${Math.floor(diff / 86400)} 天前`;
+  return new Date(iso).toLocaleDateString('zh-CN');
+}
+
+/* ---------------- 家庭成员（每个家庭各管各的） ---------------- */
+
+/** 当前家庭登记的成员；兼容老数据里 members 是字符串数组的情况 */
+function memberList() {
+  const h = currentHousehold();
+  const raw = (h && h.members) || [];
+  return raw
+    .map((m, i) =>
+      typeof m === 'string'
+        ? { id: 'legacy_' + i, name: m, emoji: ['🙋', '👩', '👨', '👧', '👦'][i % 5] }
+        : { id: m.id || 'm_' + i, name: m.name, emoji: m.emoji || '🙋' }
+    )
+    .filter((m) => m.name);
+}
+
+function memberByName(name) {
+  return memberList().find((m) => m.name === name) || null;
+}
+
+function memberEmoji(name) {
+  const m = memberByName(name);
+  return m ? m.emoji : '👤';
+}
+
+/** 某人点过多少次、总共几份（只算当前家庭） */
+function memberStats(name) {
+  const list = householdOrders().filter((o) => o.requester === name);
+  return { count: list.length, people: list.reduce((s, o) => s + (o.people || 1), 0), last: list[0] || null };
+}
+
+/* ---------------- API ---------------- */
+
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, opts);
+  const text = await res.text();
+  let json = {};
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch (_) {
+    throw new Error('服务器返回异常');
+  }
+  if (!res.ok || json.ok === false) throw new Error(json.error || `请求失败(${res.status})`);
+  return json.data;
+}
+
+async function loadState(silent) {
+  try {
+    const data = await api('GET', '/api/state');
+    S.data = data;
+    S.shoppingChecked = new Set(data.settings.shoppingChecked || []);
+    // 当前家庭记在这台设备上：A 家选 301、B 家选 502，互不影响
+    const list = households();
+    const saved = localStorage.getItem(LS_HOUSE);
+    if (saved && list.some((h) => h.id === saved)) S.householdId = saved;
+    else S.householdId = (list[0] && list[0].id) || '';
+    if (S.householdId !== saved) {
+      if (S.householdId) localStorage.setItem(LS_HOUSE, S.householdId);
+      else localStorage.removeItem(LS_HOUSE);
+    }
+    S.loading = false;
+    if (!silent) render();
+  } catch (err) {
+    S.loading = false;
+    if (!silent) {
+      $('#view').innerHTML = `<div class="empty">
+        <span class="empty-emoji">😵</span>
+        <p class="empty-title">连不上服务</p>
+        <p class="empty-text">${esc(err.message)}<br/>请确认家庭菜单服务还在运行，然后刷新页面。</p>
+        <button class="btn soft" style="margin-top:16px" data-act="reload">重新连接</button>
+      </div>`;
+    }
+  }
+}
+
+/* ---------------- 弹层 ---------------- */
+
+let sheetOnMount = null;
+
+function openSheet({ title, body, foot, onMount }) {
+  const root = $('#modalRoot');
+  root.innerHTML = `
+    <div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+      <div class="sheet-head">
+        <h2 class="sheet-title">${esc(title)}</h2>
+        <button class="sheet-close" data-act="close-sheet" aria-label="关闭">✕</button>
+      </div>
+      <div class="sheet-body">${body}</div>
+      ${foot ? `<div class="sheet-foot">${foot}</div>` : ''}
+    </div>`;
+  root.hidden = false;
+  document.body.style.overflow = 'hidden';
+  sheetOnMount = onMount || null;
+  if (sheetOnMount) sheetOnMount(root);
+}
+
+function closeSheet() {
+  const root = $('#modalRoot');
+  root.hidden = true;
+  root.innerHTML = '';
+  document.body.style.overflow = '';
+  sheetOnMount = null;
+}
+
+document.addEventListener('click', (e) => {
+  if (e.target === $('#modalRoot')) closeSheet();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('#modalRoot').hidden) closeSheet();
+});
+
+/* =========================================================
+   视图 1：菜单
+   ========================================================= */
+
+function matchKeyword(dish, kw) {
+  if (!kw) return true;
+  const k = kw.toLowerCase();
+  const hay = [
+    dish.name,
+    dish.description,
+    dish.category,
+    (dish.tags || []).join(' '),
+    (dish.seasonings || []).map((s) => s.name).join(' '),
+    (dish.methods || []).map((m) => m.steps.join(' ')).join(' '),
+    dish.notes,
+  ]
+    .join(' ')
+    .toLowerCase();
+  return hay.includes(k);
+}
+
+function visibleDishes() {
+  return S.data.dishes.filter((d) => {
+    const inCat = S.category === '全部' || d.category === S.category;
+    return inCat && matchKeyword(d, S.keyword);
+  });
+}
+
+function dishCard(d) {
+  const cover = d.images && d.images[0];
+  const img = cover
+    ? `<img src="${esc(cover)}" alt="${esc(d.name)}" loading="lazy" />`
+    : `<span>${dishEmoji(d.name)}</span>`;
+  const meta = [];
+  if (d.duration) meta.push(`<span class="tag">⏱ ${d.duration}′</span>`);
+  if (d.servings) meta.push(`<span class="tag">👥 ${esc(d.servings)}</span>`);
+  if ((d.tags || []).length) meta.push(`<span class="tag hot">${esc(d.tags[0])}</span>`);
+
+  return `<article class="card" role="button" tabindex="0" aria-label="查看 ${esc(d.name)} 做法"
+    data-act="open-dish" data-id="${esc(d.id)}">
+    <div class="card-cover">
+      ${img}
+      ${d.isFavorite ? `<span class="card-fav">⭐</span>` : ''}
+      ${d.category ? `<span class="card-badge">${esc(d.category)}</span>` : ''}
+    </div>
+    <div class="card-body">
+      <div class="card-title">${esc(d.name)}</div>
+      ${d.description ? `<div class="card-desc">${esc(d.description)}</div>` : ''}
+      <div class="card-meta">${meta.join('')}</div>
+    </div>
+  </article>`;
+}
+
+function viewMenu() {
+  const cats = sortedCategories();
+  const list = visibleDishes();
+  const activeCount = pendingOrders().length;
+  const week = planWeek();
+  const planned = planItems(week).length;
+  const plannedNames = planItems(week).map((it) => it.name).join('、');
+
+  const planCard = `<div class="plan-entry ${planned ? 'on' : ''}" role="button" tabindex="0" data-act="nav" data-view="plan">
+      <span class="plan-entry-icon">🗓️</span>
+      <span class="plan-entry-main">
+        <span class="plan-entry-title">${planned ? `本周计划 · ${planned} 道菜` : '本周计划'}</span>
+        <span class="plan-entry-sub">${
+          planned ? esc(plannedNames) : '把想做的菜先排上，一次买齐食材'
+        }</span>
+      </span>
+      <span class="plan-entry-go">›</span>
+    </div>`;
+
+  const chips = [{ name: '全部', count: S.data.dishes.length }]
+    .concat(
+      cats.map((c) => ({
+        name: c.name,
+        count: S.data.dishes.filter((d) => d.category === c.name).length,
+      }))
+    )
+    .map(
+      (c) => `<button class="chip" data-act="filter-cat" data-cat="${esc(c.name)}"
+        aria-pressed="${S.category === c.name}">${esc(c.name)}<span class="chip-count">${c.count}</span></button>`
+    )
+    .join('');
+
+  let body;
+  if (S.loading) {
+    body = `<div class="grid">${'<div class="skeleton"></div>'.repeat(4)}</div>`;
+  } else if (!list.length) {
+    body = `<div class="empty">
+      <span class="empty-emoji">${S.keyword ? '🔍' : '🍳'}</span>
+      <p class="empty-title">${S.keyword ? '没找到这道菜' : '还没有菜'}</p>
+      <p class="empty-text">${S.keyword ? '换个词试试' : '点右下角「记一道菜」，把家里常做的录进来'}</p>
+    </div>`;
+  } else {
+    body = `<div class="grid">${list.map(dishCard).join('')}</div>`;
+  }
+
+  return `
+    ${planCard}
+    <div class="chip-row">${chips}</div>
+    ${
+      activeCount
+        ? `<div class="section-head">
+             <h2 class="section-title">今晚 ${activeCount} 道待做</h2>
+             <button class="btn soft sm" data-act="nav" data-view="order">去点餐单 →</button>
+           </div>`
+        : ''
+    }
+    ${body}
+    <button class="fab" data-act="new-dish">＋ 记一道菜</button>`;
+}
+
+/* ---------------- 菜品详情 ---------------- */
+
+/* =========================================================
+   菜品详情
+   ========================================================= */
+
+/** 往某一周的计划里加一道菜；after 用来让调用方刷新自己的界面 */
+async function addToPlan(entry, weekOf, after) {
+  const week = mondayOf(weekOf);
+  try {
+    await api('POST', '/api/plans/items', { householdId: S.householdId, weekOf: week, ...entry });
+    await loadState(true);
+    if (after) after();
+    else closeSheet();
+    render();
+    toast(`已加到${planWeekTitle(week)}`);
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+/** 复制文本，剪贴板不可用时退回弹层让人自己拷 */
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('已复制，去备忘录粘贴吧');
+  } catch (_) {
+    openSheet({
+      title: '清单',
+      body: `<textarea class="textarea" style="min-height:260px">${esc(text)}</textarea>`,
+    });
+  }
+}
+
+function openDish(id) {
+  const d = dishById(id);
+  if (!d) return;
+
+  const cover = d.images && d.images[0];
+  const hero = cover
+    ? `<div class="hero"><img src="${esc(cover)}" alt="${esc(d.name)}" /></div>`
+    : `<div class="hero"><div class="hero-empty">${dishEmoji(d.name)}</div></div>`;
+
+  const meta = [];
+  if (d.category) meta.push(`<span class="tag">${esc(d.category)}</span>`);
+  if (d.servings) meta.push(`<span class="tag">👥 ${esc(d.servings)}</span>`);
+  if (d.duration) meta.push(`<span class="tag">⏱ ${esc(d.duration)} 分钟</span>`);
+  if (d.difficulty) meta.push(`<span class="tag">${esc(d.difficulty)}</span>`);
+  (d.tags || []).forEach((t) => meta.push(`<span class="tag hot">${esc(t)}</span>`));
+
+  const seasoningHtml = (d.seasonings || []).length
+    ? `<div class="block">
+         <h3 class="block-title">调料用量</h3>
+         <div class="panel">
+           ${d.seasonings
+             .map(
+               (s) => `<div class="seasoning-row">
+                 <span class="seasoning-name">${esc(s.name)}</span>
+                 <span class="seasoning-dots"></span>
+                 <span class="seasoning-amt">${esc(s.amount)}</span>
+               </div>`
+             )
+             .join('')}
+         </div>
+       </div>`
+    : '';
+
+  const methodsHtml = (d.methods || []).length
+    ? `<div class="block">
+         <h3 class="block-title">做法步骤</h3>
+         ${d.methods
+           .map(
+             (m) => `<div class="method-head">👩‍🍳 ${esc(m.name)}</div>
+                     <div class="panel"><ol class="steps">
+                       ${m.steps.map((s) => `<li>${esc(s)}</li>`).join('')}
+                     </ol></div>`
+           )
+           .join('')}
+       </div>`
+    : '';
+
+  const notesHtml = d.notes
+    ? `<div class="block"><h3 class="block-title">备注</h3><div class="note-box">${esc(d.notes)}</div></div>`
+    : '';
+
+  const shots = (d.images || []).length > 1
+    ? `<div class="block"><h3 class="block-title">成品图</h3><div class="img-grid">
+         ${d.images.map((u) => `<div class="img-thumb"><img src="${esc(u)}" alt="" loading="lazy" /></div>`).join('')}
+       </div></div>`
+    : '';
+
+  const inPlan = planItems(planWeek()).some((it) => it.dishId === d.id);
+
+  openSheet({
+    title: d.name,
+    body: `${hero}
+      <h2 class="detail-name">${esc(d.name)}</h2>
+      ${d.description ? `<p class="detail-desc">${esc(d.description)}</p>` : ''}
+      <div class="meta-row">${meta.join('')}</div>
+      ${seasoningHtml}
+      ${methodsHtml}
+      ${notesHtml}
+      ${shots}`,
+    foot: `
+      <button class="btn ghost" data-act="edit-dish" data-id="${esc(d.id)}">编辑</button>
+      <button class="btn soft" data-act="toggle-plan-dish" data-id="${esc(d.id)}" data-week="${esc(planWeek())}">
+        ${inPlan ? '✓ 已在计划里' : '＋ 加入计划'}
+      </button>
+      <button class="btn" data-act="order-dish" data-id="${esc(d.id)}">今天想吃这个</button>`,
+  });
+}
+
+/* =========================================================
+   视图 2：点餐
+   ========================================================= */
+
+const STATUS_TEXT = { pending: '待做', cooking: '制作中', done: '已完成', cancelled: '已取消' };
+
+function orderItem(o) {
+  const d = o.dishId ? dishById(o.dishId) : null;
+  const thumb = d && d.images && d.images[0]
+    ? `<img src="${esc(d.images[0])}" alt="" loading="lazy" />`
+    : (d ? dishEmoji(d.name) : '✍️');
+
+  let actions = '';
+  if (o.status === 'pending') {
+    actions = `<button class="btn soft sm" data-act="set-status" data-id="${esc(o.id)}" data-status="cooking">开做</button>`;
+  } else if (o.status === 'cooking') {
+    actions = `<button class="btn green sm" data-act="set-status" data-id="${esc(o.id)}" data-status="done">完成</button>`;
+  } else {
+    actions = `<button class="btn ghost sm" data-act="del-order" data-id="${esc(o.id)}">删除</button>`;
+  }
+
+  return `<div class="order-item">
+    <div class="order-thumb">${thumb}</div>
+    <div class="order-main">
+      <div class="order-name">${esc(o.dishName)}</div>
+      <div class="order-meta">${esc(o.requester)} · ${o.people} 人份 · ${relTime(o.createdAt)}</div>
+      ${o.note ? `<div class="order-note">📝 ${esc(o.note)}</div>` : ''}
+    </div>
+    <div style="text-align:right">
+      <span class="status-pill status-${o.status}">${STATUS_TEXT[o.status]}</span>
+      <div style="margin-top:6px">${actions}</div>
+    </div>
+  </div>`;
+}
+
+/** 从「番茄炒蛋 2 个」这类用量里猜出数量和单位，用来一键入库 */
+function guessAmount(parts) {
+  for (const p of parts) {
+    const m = /([0-9]+(?:\.[0-9]+)?)\s*(.*)/.exec(p);
+    if (m && Number(m[1]) > 0) {
+      const unit = m[2].trim();
+      return { quantity: Number(m[1]), unit: unit && unit.length <= 4 ? unit : '份' };
+    }
+  }
+  return { quantity: 1, unit: '份' };
+}
+
+/** 在当前家庭库存里找同名（或名字互相包含）的食材 */
+function findStock(name) {
+  const list = householdPantry();
+  const exact = list.filter((p) => p.name === name);
+  if (exact.length) return exact;
+  return list.filter((p) => p.name && (p.name.includes(name) || name.includes(p.name)));
+}
+
+/** 采购清单：把一批菜品的调料合并，并标出家里已经有的 */
+function shoppingFromDishIds(dishIds) {
+  const map = new Map();
+  dishIds.forEach((id) => {
+    const d = dishById(id);
+    if (!d) return;
+    (d.seasonings || []).forEach((s) => {
+      if (!s.name) return;
+      if (!map.has(s.name)) map.set(s.name, []);
+      const parts = map.get(s.name);
+      const tag = `${d.name} ${s.amount}`;
+      if (!parts.includes(tag)) parts.push(tag);
+    });
+  });
+  return [...map.entries()].map(([name, parts]) => {
+    const stock = findStock(name);
+    return {
+      name,
+      parts,
+      stock,
+      stockQty: stock.reduce((s, p) => s + (p.quantity || 0), 0),
+      // 多条同名但单位不同的时候就不显示数字，免得误导
+      stockUnit:
+        stock.length === 1
+          ? stock[0].unit
+          : stock.map((p) => p.unit).filter((v, i, a) => a.indexOf(v) === i).join('/'),
+    };
+  });
+}
+
+/** 采购清单：当前家庭待做菜品的调料 */
+function buildShoppingList() {
+  const map = new Map();
+  pendingOrders()
+    .filter((o) => !S.memberFilter || o.requester === S.memberFilter)
+    .forEach((o) => {
+      const d = o.dishId ? dishById(o.dishId) : null;
+      if (!d) return;
+      (d.seasonings || []).forEach((s) => {
+        if (!map.has(s.name)) map.set(s.name, []);
+        const parts = map.get(s.name);
+        const tag = `${d.name} ${s.amount}`;
+        if (!parts.includes(tag)) parts.push(tag);
+      });
+    });
+  return [...map.entries()].map(([name, parts]) => {
+    const stock = findStock(name);
+    return {
+      name,
+      parts,
+      stock,
+      stockQty: stock.reduce((s, p) => s + (p.quantity || 0), 0),
+      stockUnit: stock.length === 1 ? stock[0].unit : stock.map((p) => p.unit).filter((v, i, a) => a.indexOf(v) === i).join('/'),
+    };
+  });
+}
+
+/**
+ * 采购清单的通用渲染：点餐页和计划页共用
+ * opts: { title, sub, hint, bare（不画标题行，直接接在别的小标题下面） }
+ */
+function shopListHtml(list, opts) {
+  const o = opts || {};
+  if (!list.length) {
+    return o.bare
+      ? ''
+      : `<div class="section-head">
+        <h2 class="section-title">${esc(o.title || '买菜清单')}</h2>
+      </div>
+      <div class="empty" style="padding:30px 20px">
+        <p class="empty-text">${esc(o.empty || '暂时没有需要买菜的东西')}</p>
+      </div>`;
+  }
+  const head = o.bare
+    ? ''
+    : `<div class="section-head">
+      <h2 class="section-title">${esc(o.title || '买菜清单')}</h2>
+      <span class="section-sub">${esc(o.sub || `${list.length} 样待买`)}</span>
+      <button class="btn ghost sm" style="margin-left:auto" data-act="copy-shopping" data-scope="${esc(o.scope || '')}">复制</button>
+    </div>`;
+  return `${head}
+    ${list
+      .map((it) => {
+        const done = S.shoppingChecked.has(it.name);
+        const stockHtml = it.stock.length
+          ? `<span class="shop-stock" title="家里已经有 ${esc(
+              it.stock.map((p) => p.name + ' ' + p.quantity + p.unit).join('、')
+            )}">🏠 家里有 ${esc(String(it.stockQty))}${esc(it.stockUnit)}</span>`
+          : '';
+        const restockHtml = it.stock.length
+          ? ''
+          : `<button class="btn soft sm" data-act="stock-it" data-name="${esc(it.name)}"
+               data-parts="${esc(it.parts.join('|'))}">入库</button>`;
+        return `<div class="shop-item ${done ? 'done' : ''}">
+          <div class="shop-check" role="checkbox" tabindex="0" aria-checked="${done}"
+            aria-label="${esc(it.name)} 是否已买" data-act="toggle-shop" data-name="${esc(it.name)}">✓</div>
+          <div class="shop-main">
+            <div class="shop-name">${esc(it.name)}</div>
+            <div class="shop-from">${esc(it.parts.join(' · '))}</div>
+          </div>
+          <div class="shop-side">${stockHtml}${restockHtml}</div>
+        </div>`;
+      })
+      .join('')}
+    ${o.hint ? `<p class="section-sub" style="margin-top:6px">${esc(o.hint)}</p>` : ''}`;
+}
+
+function viewOrder() {
+  const all = householdOrders();
+  const today = todayStr();
+  const house = currentHousehold();
+
+  const tabs = [
+    ['pending', '待做 ' + all.filter((o) => o.status === 'pending').length],
+    ['cooking', '制作中 ' + all.filter((o) => o.status === 'cooking').length],
+    ['done', '已完成 ' + all.filter((o) => o.status === 'done').length],
+  ]
+    .map(
+      ([k, label]) =>
+        `<button class="chip" data-act="filter-status" data-status="${k}" aria-pressed="${S.orderStatus === k}">${label}</button>`
+    )
+    .join('');
+
+  let listHtml;
+  const list = all.filter(
+    (o) => o.status === S.orderStatus && (!S.memberFilter || o.requester === S.memberFilter)
+  );
+  if (!list.length) {
+    listHtml = `<div class="empty">
+      <span class="empty-emoji">🍽️</span>
+      <p class="empty-title">这里空空的</p>
+      <p class="empty-text">${S.orderStatus === 'pending' ? '去菜单里点几道想吃的吧' : '暂时没有记录'}</p>
+    </div>`;
+  } else if (S.groupByMember) {
+    listHtml = groupOrdersByMember(list);
+  } else {
+    listHtml = list.map(orderItem).join('');
+  }
+
+  // 成员筛选：只在有家人时出现，超过 1 人才有意义
+  const members = memberList();
+  const activeMembers = [...new Set(all.map((o) => o.requester))];
+  const memberFilterHtml =
+    members.length > 1 || activeMembers.length > 1
+      ? `<div class="chip-row member-filter">
+          <button class="chip" data-act="filter-member" data-name="" aria-pressed="${!S.memberFilter}">
+            全部 ${esc(String(members.length || activeMembers.length))}人
+          </button>
+          ${(members.length ? members : activeMembers.map((n) => ({ name: n, emoji: '👤' })))
+            .map(
+              (m) =>
+                `<button class="chip member-chip" data-act="filter-member" data-name="${esc(m.name)}"
+                  aria-pressed="${S.memberFilter === m.name}">${esc(m.emoji)} ${esc(m.name)}</button>`
+            )
+            .join('')}
+        </div>`
+      : '';
+
+  const shop = buildShoppingList();
+  const shopScope = pendingOrders().filter((o) => !S.memberFilter || o.requester === S.memberFilter);
+  const shopHtml = shopListHtml(shop, {
+    sub: `${S.memberFilter ? S.memberFilter + '的 ' : ''}${shopScope.length} 道待做菜自动汇总`,
+    hint: '标了「家里有」的不用买；买回来的点「入库」记进库存。',
+  });
+
+  const doneCount = all.filter((o) => o.status === 'done').length;
+
+  return `
+    ${shopHtml}
+    <div class="section-head">
+      <h2 class="section-title">点餐单</h2>
+      <span class="section-sub">${esc(house ? house.emoji + ' ' + house.name : '点餐单')} · ${today}</span>
+      ${
+        S.orderStatus === 'done' && doneCount
+          ? `<button class="btn ghost sm" style="margin-left:auto" data-act="clear-done">清空已完成</button>`
+          : ''
+      }
+    </div>
+    <div class="status-tabs">${tabs}</div>
+    ${memberFilterHtml}
+    ${
+      list.length
+        ? `<div class="list-toolbar">
+             <span class="section-sub">${S.groupByMember ? '按家人分组' : '按时间排序'}</span>
+             <button class="btn ghost sm" data-act="toggle-group">
+               ${S.groupByMember ? '⇅ 改成按时间' : '👨‍👩‍👧‍👦 按家人分组'}
+             </button>
+           </div>`
+        : ''
+    }
+    ${listHtml}
+    <button class="fab" data-act="new-order">＋ 我要点餐</button>`;
+}
+
+/** 按点餐人分组：一眼看清谁要吃什么、共几份 */
+function groupOrdersByMember(list) {
+  const groups = new Map();
+  list.forEach((o) => {
+    const k = o.requester || '匿名';
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(o);
+  });
+
+  // 有登记成员的排前面，其余按名字排
+  const known = new Set(memberList().map((m) => m.name));
+  const keys = [...groups.keys()].sort((a, b) => {
+    const ka = known.has(a) ? 0 : 1;
+    const kb = known.has(b) ? 0 : 1;
+    return ka - kb || a.localeCompare(b, 'zh');
+  });
+
+  return keys
+    .map((name) => {
+      const items = groups.get(name);
+      const people = items.reduce((s, o) => s + (o.people || 1), 0);
+      const dishes = [...new Set(items.map((o) => o.dishName))].join('、');
+      return `<div class="member-group">
+        <div class="member-group-head">
+          <span class="member-avatar">${esc(memberEmoji(name))}</span>
+          <span class="member-name">${esc(name)}</span>
+          <span class="member-sum">${items.length} 道 · 共 ${people} 份</span>
+        </div>
+        <div class="member-dishes">${esc(dishes)}</div>
+        ${items.map(orderItem).join('')}
+      </div>`;
+    })
+    .join('');
+}
+
+/* ---------------- 点餐表单 ---------------- */
+
+/** 提示这一单会记到哪个家庭名下 */
+function houseOrderNote() {
+  const h = currentHousehold();
+  if (!h) return '';
+  return `<div class="order-house">
+    <span>记到 <b>${esc(h.emoji)} ${esc(h.name)}</b></span>
+    ${
+      households().length > 1
+        ? '<button class="btn ghost sm" data-act="close-sheet">换一个家庭</button>'
+        : ''
+    }
+  </div>`;
+}
+
+function openOrderForm(dish) {
+  const members = memberList();
+  const d = dish || null;
+  S.draftOrder = {
+    dishId: d ? d.id : null,
+    dishName: d ? d.name : '',
+    householdId: S.householdId,
+    requester: members[0] ? members[0].name : '',
+    people: 2,
+    note: '',
+  };
+
+  const picker = S.data.dishes
+    .map((x) => {
+      const on = d && x.id === d.id;
+      const t = x.images && x.images[0] ? `<img src="${esc(x.images[0])}" alt="" />` : dishEmoji(x.name);
+      return `<button class="picker-item" data-act="pick-dish" data-id="${esc(x.id)}" aria-pressed="${!!on}">
+        <span class="picker-thumb">${t}</span>
+        <span style="flex:1;min-width:0">
+          <span class="picker-name">${esc(x.name)}</span>
+          ${x.category ? `<span class="tag">${esc(x.category)}</span>` : ''}
+        </span>
+      </button>`;
+    })
+    .join('');
+
+  const memberCards = members.length
+    ? `<div class="member-cards">
+        ${members
+          .map(
+            (m) => `<button class="member-card" data-act="pick-member" data-name="${esc(m.name)}"
+              aria-pressed="${S.draftOrder.requester === m.name}">
+              <span class="member-card-emoji">${esc(m.emoji)}</span>
+              <span>${esc(m.name)}</span>
+            </button>`
+          )
+          .join('')}
+      </div>`
+    : '';
+
+  openSheet({
+    title: d ? `点「${d.name}」` : '我要点餐',
+    body: `
+      ${houseOrderNote()}
+      <div class="field">
+        <label class="field-label">选一道菜</label>
+        <div class="picker-list">${picker}</div>
+      </div>
+      <div class="field">
+        <label class="field-label">或者自己写<span class="field-hint">不在菜单里的也可以</span></label>
+        <input class="input" id="ordName" value="${esc(S.draftOrder.dishName)}" placeholder="例如：妈，我想吃红烧排骨" />
+      </div>
+      <div class="field">
+        <label class="field-label">谁点的</label>
+        ${memberCards}
+        <input class="input" id="ordWho" value="${esc(S.draftOrder.requester)}" placeholder="名字，或直接输入" style="margin-top:8px" />
+      </div>
+      <div class="field">
+        <label class="field-label">几个人吃</label>
+        <input class="input" id="ordPeople" type="number" min="1" max="20" value="${S.draftOrder.people}" />
+      </div>
+      <div class="field">
+        <label class="field-label">备注<span class="field-hint">少放辣、不要香菜…</span></label>
+        <textarea class="textarea" id="ordNote" placeholder="有什么要求写这里">${esc(S.draftOrder.note)}</textarea>
+      </div>`,
+    foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
+           <button class="btn" data-act="submit-order">提交点餐</button>`,
+  });
+
+  const name = $('#ordName');
+  if (name && !d) name.focus();
+}
+
+function collectOrder() {
+  const el = (id) => $('#' + id);
+  S.draftOrder.householdId = S.householdId;
+  S.draftOrder.dishName = (el('ordName').value || '').trim();
+  S.draftOrder.requester = (el('ordWho').value || '').trim() || '匿名';
+  S.draftOrder.people = Number(el('ordPeople').value) || 2;
+  S.draftOrder.note = (el('ordNote').value || '').trim();
+  return S.draftOrder;
+}
+
+/* =========================================================
+   视图 3：本周计划
+   ========================================================= */
+
+function planRow(it) {
+  const d = it.dishId ? dishById(it.dishId) : null;
+  const cover = d && d.images && d.images[0];
+  const thumb = cover
+    ? `<img src="${esc(cover)}" alt="" loading="lazy" />`
+    : d
+    ? dishEmoji(d.name)
+    : '✍️';
+  const meta = [];
+  if (it.servings) meta.push(esc(it.servings));
+  if (d && d.duration) meta.push(`⏱ ${d.duration}′`);
+  if (it.note) meta.push(esc(it.note));
+
+  return `<div class="plan-item">
+    <div class="plan-thumb">${thumb}</div>
+    <div class="plan-main" role="button" tabindex="0" ${d ? `data-act="open-dish" data-id="${esc(d.id)}"` : ''}
+      ${d ? `aria-label="查看 ${esc(it.name)} 做法"` : ''}>
+      <div class="plan-name">${esc(it.name)}</div>
+      ${meta.length ? `<div class="plan-meta">${meta.join(' · ')}</div>` : ''}
+    </div>
+    <button class="icon-mini" data-act="rm-plan" data-id="${esc(it.id)}" aria-label="从计划里拿掉 ${esc(it.name)}">✕</button>
+  </div>`;
+}
+
+function viewPlan() {
+  const week = planWeek();
+  const offset = planWeekOffset(week);
+  const house = currentHousehold();
+  const items = planItems(week);
+  const names = items.map((it) => it.name).join('、');
+
+  // 只有能查到调料的菜才进采购汇总（自己随手写的那道不算）
+  const dishIds = items.map((it) => it.dishId).filter(Boolean);
+  const shop = shoppingFromDishIds(dishIds);
+  const missing = shop.filter((it) => !it.stock.length);
+
+  const weekNav = `<div class="week-nav">
+      <button class="week-btn" data-act="week-shift" data-n="-1" aria-label="上一周">‹</button>
+      <div class="week-label">
+        <div class="week-range">${esc(planLabel(week))}</div>
+        <div class="week-tag">${
+          offset === 0 ? '本周' : offset === 1 ? '下周' : offset === -1 ? '上周' : (offset > 0 ? offset + ' 周后' : -offset + ' 周前')
+        } · ${esc(house ? house.emoji + ' ' + house.name : '')}</div>
+      </div>
+      <button class="week-btn" data-act="week-shift" data-n="1" aria-label="下一周">›</button>
+    </div>`;
+
+  let listHtml;
+  if (!items.length) {
+    listHtml = `<div class="empty">
+      <span class="empty-emoji">🗓️</span>
+      <p class="empty-title">${offset === 0 ? '这周还没安排' : '这一周还没安排'}</p>
+      <p class="empty-text">把想做的菜加进来，点「一次买齐」就能照着单子采购</p>
+    </div>`;
+  } else {
+    listHtml = `<div class="section-head">
+        <h2 class="section-title">计划做 ${items.length} 道</h2>
+        <button class="btn ghost sm" style="margin-left:auto" data-act="clear-plan">清空这一周</button>
+      </div>
+      ${items.map(planRow).join('')}`;
+  }
+
+  const shopSection = items.length
+    ? `<div class="section-head">
+        <h2 class="section-title">一次买齐</h2>
+        <span class="section-sub">${
+          shop.length
+            ? `${shop.length} 样待买${missing.length ? ` · ${missing.length} 样家里没有` : ' · 家里都有'}`
+            : '计划里的菜没写调料用量'
+        }</span>
+        ${shop.length ? `<button class="btn soft sm" style="margin-left:auto" data-act="copy-plan-shopping">复制清单</button>` : ''}
+      </div>
+      ${
+        shop.length
+          ? shopListHtml(shop, {
+              bare: true,
+              hint: '照着这张单子一次买回来，买完点「入库」记进库存。',
+            })
+          : '<p class="section-sub">给计划里的菜补上「调料用量」，这里就会自动汇总成采购清单。</p>'
+      }`
+    : '';
+
+  return `
+    ${weekNav}
+    ${listHtml}
+    ${shopSection}
+    <button class="fab" data-act="add-plan-dish">＋ 加一道菜</button>`;
+}
+
+/** 加菜：先选菜谱里的，也能自己写一道临时的 */
+function openPlanPicker(weekOf) {
+  const week = weekOf || planWeek();
+  const planned = new Set(planItems(week).map((it) => it.name));
+
+  const picker = S.data.dishes
+    .map((x) => {
+      const on = planned.has(x.name);
+      const t = x.images && x.images[0] ? `<img src="${esc(x.images[0])}" alt="" />` : dishEmoji(x.name);
+      return `<button class="picker-item" data-act="pick-plan-dish" data-id="${esc(x.id)}" aria-pressed="${on}"
+        ${on ? 'disabled style="opacity:.45"' : ''}>
+        <span class="picker-thumb">${t}</span>
+        <span style="flex:1;min-width:0">
+          <span class="picker-name">${esc(x.name)}${on ? ' · 已加入' : ''}</span>
+          ${x.category ? `<span class="tag">${esc(x.category)}</span>` : ''}
+        </span>
+      </button>`;
+    })
+    .join('');
+
+  openSheet({
+    title: `加到${planWeekTitle(week)}`,
+    body: `
+      <div class="field">
+        <label class="field-label">从菜单里选</label>
+        <div class="picker-list">${picker}</div>
+      </div>
+      <div class="field">
+        <label class="field-label">或者自己写一道<span class="field-hint">菜单里没有的，比如「楼下那家的烤鸭」</span></label>
+        <input class="input" id="planName" placeholder="例如：红烧排骨" />
+      </div>`,
+    foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
+           <button class="btn" data-act="save-plan-custom" data-week="${esc(week)}">加进去</button>`,
+  });
+  $('#planName').focus();
+}
+
+/** 「本周」「下周」「10月20日 那周」 */
+function planWeekTitle(weekOf) {
+  const off = planWeekOffset(weekOf);
+  if (off === 0) return '本周计划';
+  if (off === 1) return '下周计划';
+  if (off === -1) return '上周计划';
+  return `${planLabel(weekOf)} 那周`;
+}
+
+/* =========================================================
+   视图 4：库存
+   ========================================================= */
+
+/** 数量显示：整数不带小数点，1.5 这种保留 */
+function fmtQty(n) {
+  const v = Number(n) || 0;
+  return Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100);
+}
+
+/** 加减步长：称重的按大份走，论个的按 1 走 */
+function qtyStep(unit) {
+  const u = String(unit || '').trim();
+  if (u === 'g') return 50;
+  if (u === 'ml') return 100;
+  if (u === 'kg' || u === 'L' || u === '斤') return 0.5;
+  return 1;
+}
+
+function foodRow(p) {
+  const st = shelfStatus(p);
+  const flagText =
+    st.key === 'none' ? (p.expireAt || '未填保质期') : st.label;
+  return `<div class="food-row">
+    <span class="food-emoji">${catEmoji(p.category)}</span>
+    <div class="food-main" role="button" tabindex="0" data-act="edit-food" data-id="${esc(p.id)}"
+      aria-label="编辑 ${esc(p.name)}">
+      <div class="food-name">${esc(p.name)}
+        <span class="food-qty-inline">${esc(fmtQty(p.quantity))}${esc(p.unit)}</span>
+      </div>
+      <div class="food-sub">${esc(p.category)}${p.note ? ' · ' + esc(p.note) : ''}</div>
+    </div>
+    <div class="food-ops">
+      <span class="food-flag flag-${st.key}">${esc(flagText)}</span>
+      <div class="stepper">
+        <button class="step-btn" data-act="qty-dec" data-id="${esc(p.id)}" aria-label="减少 ${esc(p.name)}">−</button>
+        <span class="step-val">${esc(fmtQty(p.quantity))}</span>
+        <button class="step-btn" data-act="qty-inc" data-id="${esc(p.id)}"
+          aria-label="增加 ${esc(p.name)}">${qtyStep(p.unit) === 1 ? '＋' : `+${esc(fmtQty(qtyStep(p.unit)))}`}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/** 库存数量加减；不会减到负数 */
+async function bumpQty(id, delta) {
+  const p = householdPantry().find((x) => x.id === id);
+  if (!p) return;
+  const step = qtyStep(p.unit);
+  const next = Math.max(0, Math.round((p.quantity + delta * step) * 1000) / 1000);
+  if (next === p.quantity) return toast(delta < 0 ? '已经没有更多了' : '');
+  await api('PUT', `/api/pantry/${p.id}`, { ...p, quantity: next });
+  await loadState(true);
+  render();
+}
+
+function viewPantry() {
+  const all = householdPantry();
+  const house = currentHousehold();
+  const statusOf = (p) => shelfStatus(p).key;
+  const expired = all.filter((p) => statusOf(p) === 'expired');
+  const soon = all.filter((p) => statusOf(p) === 'soon' || statusOf(p) === 'today');
+
+  const alertHtml =
+    expired.length || soon.length
+      ? `<div class="alert ${expired.length ? 'danger' : 'warn'}">
+          <span class="alert-emoji">${expired.length ? '🚨' : '⏰'}</span>
+          <div class="alert-text">
+            <b>${esc(house ? house.name : '本家庭')}</b>
+            ${expired.length ? `有 ${expired.length} 样已经过期` : `有 ${soon.length} 样快到保质期`}${expired.length && soon.length ? `，另有 ${soon.length} 样 3 天内到期` : ''}
+          </div>
+          <div class="alert-ops">
+            <button class="btn ghost sm" data-act="filter-pantry" data-filter="${expired.length ? 'expired' : 'soon'}">看看</button>
+            <button class="btn danger sm" data-act="purge-pantry" data-scope="${expired.length ? 'expired' : 'soon'}">清理</button>
+          </div>
+        </div>`
+      : '';
+
+  const filterChips = [
+    ['all', '全部', all.length],
+    ['soon', '临期', soon.length],
+    ['expired', '过期', expired.length],
+  ]
+    .map(
+      ([k, label, n]) =>
+        `<button class="chip" data-act="filter-pantry" data-filter="${k}" aria-pressed="${S.pantryFilter === k}"
+          ${n === 0 && k !== 'all' ? 'disabled' : ''}>${label}<span class="chip-count">${n}</span></button>`
+    )
+    .join('');
+
+  const catChips = [{ name: '全部', count: all.length }]
+    .concat(
+      PANTRY_ORDER.map((c) => ({ name: c, count: all.filter((p) => p.category === c).length })).filter(
+        (c) => c.count
+      )
+    )
+    .map(
+      (c) => `<button class="chip" data-act="filter-pcat" data-cat="${esc(c.name)}"
+        aria-pressed="${S.pantryCat === c.name}">${catEmoji(c.name)} ${esc(c.name)}<span class="chip-count">${c.count}</span></button>`
+    )
+    .join('');
+
+  let list = all;
+  if (S.pantryFilter === 'soon') list = soon;
+  else if (S.pantryFilter === 'expired') list = expired;
+  if (S.pantryCat !== '全部') list = list.filter((p) => p.category === S.pantryCat);
+
+  let body;
+  if (S.loading) {
+    body = `<div class="skeleton" style="height:120px"></div>`;
+  } else if (!list.length) {
+    const reason =
+      all.length && S.pantryFilter !== 'all'
+        ? '这个筛选下暂时没有东西'
+        : S.pantryCat !== '全部'
+        ? '这个分类还是空的'
+        : '还没记过库存';
+    body = `<div class="empty">
+      <span class="empty-emoji">🧊</span>
+      <p class="empty-title">${reason}</p>
+      <p class="empty-text">点右下角「记一样食材」，把家里现有的东西录进来</p>
+    </div>`;
+  } else {
+    // 按分类分组，分类按固定顺序（肉类→蛋类→奶制品→蔬菜…），同分类内快过期的排前面
+    const groups = new Map();
+    list.forEach((p) => {
+      if (!groups.has(p.category)) groups.set(p.category, []);
+      groups.get(p.category).push(p);
+    });
+    const rank = { expired: 0, today: 1, soon: 2, ok: 3, none: 4 };
+    const catRank = (c) => {
+      const i = PANTRY_ORDER.indexOf(c);
+      return i < 0 ? PANTRY_ORDER.length : i;
+    };
+    body = [...groups.entries()]
+      .sort((a, b) => catRank(a[0]) - catRank(b[0]))
+      .map(([cat, items]) => {
+        items.sort(
+          (a, b) =>
+            rank[shelfStatus(a).key] - rank[shelfStatus(b).key] ||
+            a.name.localeCompare(b.name, 'zh')
+        );
+        return `<div class="section-head">
+            <h2 class="section-title">${catEmoji(cat)} ${esc(cat)}</h2>
+            <span class="section-sub">${items.length} 样</span>
+          </div>
+          ${items.map(foodRow).join('')}`;
+      })
+      .join('');
+  }
+
+  return `
+    ${alertHtml}
+    <div class="stat-row">
+      <div class="stat"><div class="stat-num">${all.length}</div><div class="stat-label">样食材</div></div>
+      <div class="stat${soon.length ? ' warn' : ''}"><div class="stat-num">${soon.length}</div><div class="stat-label">快过期</div></div>
+      <div class="stat${expired.length ? ' bad' : ''}"><div class="stat-num">${expired.length}</div><div class="stat-label">已过期</div></div>
+    </div>
+    <div class="chip-row">${filterChips}</div>
+    <div class="chip-row">${catChips}</div>
+    ${body}
+    <button class="fab" data-act="new-food">＋ 记一样食材</button>`;
+}
+
+/* ---------------- 食材录入 / 编辑 ---------------- */
+
+const UNITS = ['g', 'kg', '斤', '个', '根', '颗', '把', '块', '片', '袋', '包', '盒', '瓶', '罐', '杯', '只', '条', 'ml', 'L', '份'];
+
+async function ensurePresets() {
+  if (S.presets) return S.presets;
+  try {
+    S.presets = await api('GET', '/api/ingredient-presets');
+  } catch (_) {
+    S.presets = { categories: [], presets: [] };
+  }
+  return S.presets;
+}
+
+/** 常见食材快选：跟着上面的分类和搜索词变 */
+function renderPresetGrid() {
+  const box = $('#fPresets');
+  if (!box) return;
+  const kw = (($('#fPresetSearch') || {}).value || '').trim();
+  const catEl = $('#fFoodCat');
+  const cat = catEl ? catEl.value : '';
+  const all = (S.presets && S.presets.presets) || [];
+  const list = all
+    .filter((p) => (kw ? p.name.indexOf(kw) >= 0 : p.category === cat))
+    .slice(0, 48);
+  box.innerHTML = list.length
+    ? list
+        .map(
+          (p) => `<button class="preset-opt" data-act="pick-preset"
+            data-name="${esc(p.name)}" data-cat="${esc(p.category)}"
+            data-unit="${esc(p.unit)}" data-exp="${esc(p.expireAt)}">${esc(p.name)}</button>`
+        )
+        .join('')
+    : '<p class="section-sub">没有匹配的，直接在上面输入名字也行</p>';
+}
+
+async function openFoodEditor(item) {
+  await ensurePresets();
+  const p = item || {
+    id: null,
+    name: '',
+    category: '蔬菜',
+    quantity: 1,
+    unit: '份',
+    expireAt: '',
+    note: '',
+  };
+
+  const catOptions = PANTRY_ORDER.map(
+    (c) => `<option value="${esc(c)}" ${p.category === c ? 'selected' : ''}>${catEmoji(c)} ${esc(c)}</option>`
+  ).join('');
+
+  openSheet({
+    title: item ? '编辑食材' : '记一样食材',
+    body: `
+      <div class="field">
+        <label class="field-label">食材名 *</label>
+        <input class="input" id="fFoodName" value="${esc(p.name)}" placeholder="例如：鸡蛋" />
+      </div>
+      <div class="field">
+        <label class="field-label">常见食材<span class="field-hint">点一下自动填分类、单位、保质期</span></label>
+        <input class="input" id="fPresetSearch" type="search" placeholder="搜食材名…" autocomplete="off" />
+        <div class="preset-grid" id="fPresets"></div>
+      </div>
+      <div class="field">
+        <label class="field-label">分类</label>
+        <select class="select" id="fFoodCat">${catOptions}</select>
+      </div>
+      <div class="field">
+        <label class="field-label">家里还有多少</label>
+        <div class="row-2">
+          <input class="input" id="fFoodQty" type="number" min="0" step="0.01" value="${esc(fmtQty(p.quantity))}" />
+          <input class="input" id="fFoodUnit" value="${esc(p.unit)}" list="unitList" placeholder="单位" />
+        </div>
+        <datalist id="unitList">${UNITS.map((u) => `<option value="${esc(u)}"></option>`).join('')}</datalist>
+      </div>
+      <div class="field">
+        <label class="field-label">保质期到哪天<span class="field-hint">超过或快到 3 天会自动标红提醒</span></label>
+        <input class="input" id="fFoodExp" type="date" value="${esc(p.expireAt)}" />
+        <div class="quick-dates">
+          <button class="btn ghost sm" data-act="exp-preset" data-days="1">明天</button>
+          <button class="btn ghost sm" data-act="exp-preset" data-days="3">3 天</button>
+          <button class="btn ghost sm" data-act="exp-preset" data-days="7">一周</button>
+          <button class="btn ghost sm" data-act="exp-preset" data-days="30">一个月</button>
+          <button class="btn ghost sm" data-act="exp-preset" data-days="0">不填</button>
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">备注</label>
+        <input class="input" id="fFoodNote" value="${esc(p.note)}" placeholder="放冰箱第二层 / 已开封…" />
+      </div>`,
+    foot: `<button class="btn danger" data-act="del-food" data-id="${esc(item ? item.id : '')}"
+        ${item ? '' : 'disabled style="visibility:hidden"'}>删除</button>
+           <button class="btn" data-act="save-food" data-id="${item ? esc(item.id) : ''}">保存</button>`,
+  });
+
+  renderPresetGrid();
+  const name = $('#fFoodName');
+  if (name) name.focus();
+}
+
+/* =========================================================
+   视图 4：管理
+   ========================================================= */
+
+function viewManage() {
+  const pin = S.data.settings.adminPin;
+  if (pin && !S.authed) {
+    return `<div class="empty">
+      <span class="empty-emoji">🔒</span>
+      <p class="empty-title">管理区已加锁</p>
+      <p class="empty-text">需要家庭口令才能修改菜单</p>
+      <button class="btn" style="margin-top:16px" data-act="unlock">输入口令</button>
+    </div>`;
+  }
+
+  const s = S.data.settings;
+  const d = S.data.dishes;
+
+  const dishRows = d
+    .slice()
+    .sort((a, b) => String(a.category).localeCompare(String(b.category), 'zh'))
+    .map(
+      (x) => `<div class="list-row">
+        <span class="icon-mini act">${x.images && x.images[0] ? '🖼️' : dishEmoji(x.name)}</span>
+        <span class="list-row-main">
+          <span class="list-row-title">${esc(x.name)}</span>
+          <span class="list-row-sub">${esc(x.category)} · ${(x.methods || []).length} 种做法 · ${(x.seasonings || []).length} 样调料</span>
+        </span>
+        <button class="icon-mini" data-act="edit-dish" data-id="${esc(x.id)}" title="编辑">✏️</button>
+        <button class="icon-mini" data-act="dup-dish" data-id="${esc(x.id)}" title="复制">⧉</button>
+        <button class="icon-mini" data-act="del-dish" data-id="${esc(x.id)}" title="删除">🗑️</button>
+      </div>`
+    )
+    .join('');
+
+  const catRows = sortedCategories()
+    .map(
+      (c) => `<div class="list-row">
+        <span class="list-row-main">
+          <span class="list-row-title">${esc(c.name)}</span>
+          <span class="list-row-sub">${d.filter((x) => x.category === c.name).length} 道菜</span>
+        </span>
+        <button class="icon-mini" data-act="edit-cat" data-id="${esc(c.id)}">✏️</button>
+        <button class="icon-mini" data-act="del-cat" data-id="${esc(c.id)}">🗑️</button>
+      </div>`
+    )
+    .join('');
+
+  const houseRows = households()
+    .map(
+      (h) => `<div class="list-row ${h.id === S.householdId ? 'on' : ''}">
+        <span class="member-avatar">${esc(h.emoji)}</span>
+        <span class="list-row-main">
+          <span class="list-row-title">${esc(h.name)}${h.id === S.householdId ? ' <span class="pill-now">当前</span>' : ''}</span>
+          <span class="list-row-sub">${(h.members || []).length} 位家人 · ${householdOrders(h.id).filter((o) => o.status === 'pending' || o.status === 'cooking').length} 道待做 · ${householdPantry(h.id).length} 样库存${h.note ? ' · ' + esc(h.note) : ''}</span>
+        </span>
+        ${
+          h.id === S.householdId
+            ? ''
+            : `<button class="icon-mini act" data-act="pick-house" data-id="${esc(h.id)}" title="切到这个家庭">→</button>`
+        }
+        <button class="icon-mini" data-act="edit-household" data-id="${esc(h.id)}" title="重命名">✏️</button>
+        <button class="icon-mini" data-act="del-household" data-id="${esc(h.id)}" title="删除">🗑️</button>
+      </div>`
+    )
+    .join('');
+
+  return `
+    <div class="section-head">
+      <h2 class="section-title">家庭</h2>
+      <button class="btn soft sm" style="margin-left:auto" data-act="new-household">＋ 添加家庭</button>
+    </div>
+    <p class="section-sub" style="margin:-6px 0 12px">菜谱所有家庭共享；点餐和库存各记各的。</p>
+    ${houseRows}
+
+    <div class="stat-row">
+      <div class="stat"><div class="stat-num">${d.length}</div><div class="stat-label">道菜</div></div>
+      <div class="stat"><div class="stat-num">${S.data.categories.length}</div><div class="stat-label">个分类</div></div>
+      <div class="stat"><div class="stat-num">${pendingOrders().length}</div><div class="stat-label">道待做</div></div>
+    </div>
+
+    <div class="section-head">
+      <h2 class="section-title">菜品管理</h2>
+      <button class="btn soft sm" style="margin-left:auto" data-act="new-dish">＋ 新增</button>
+    </div>
+    ${dishRows || '<div class="empty"><p class="empty-text">还没有菜</p></div>'}
+
+    <div class="section-head">
+      <h2 class="section-title">家庭成员<span class="section-sub" style="margin-left:8px">${esc(currentHousehold() ? currentHousehold().name : '')}</span></h2>
+      <button class="btn soft sm" style="margin-left:auto" data-act="new-member">＋ 添加</button>
+    </div>
+    ${
+      memberList().length
+        ? memberList()
+            .map((m) => {
+              const st = memberStats(m.name);
+              const sub = st.count
+                ? `点过 ${st.count} 次 · 共 ${st.people} 份`
+                : '还没点过';
+              return `<div class="list-row">
+                <span class="member-avatar">${esc(m.emoji)}</span>
+                <span class="list-row-main">
+                  <span class="list-row-title">${esc(m.name)}</span>
+                  <span class="list-row-sub">${esc(sub)}</span>
+                </span>
+                <button class="icon-mini" data-act="edit-member" data-id="${esc(m.id)}" title="编辑">✏️</button>
+                <button class="icon-mini" data-act="del-member" data-id="${esc(m.id)}" title="删除">🗑️</button>
+              </div>`;
+            })
+            .join('')
+        : '<div class="empty" style="padding:28px"><p class="empty-text">还没有登记成员，点右上角添加</p></div>'
+    }
+
+    <div class="section-head">
+      <h2 class="section-title">分类管理</h2>
+      <button class="btn soft sm" style="margin-left:auto" data-act="new-cat">＋ 新增</button>
+    </div>
+    ${catRows}
+
+    <div class="section-head"><h2 class="section-title">家庭设置</h2></div>
+    <div class="list-row"><span class="icon-mini">🍽️</span><span class="list-row-main">
+      <span class="list-row-title">店名与欢迎语</span>
+      <span class="list-row-sub">${esc(s.shopName)} · 共 ${households().length} 个家庭</span>
+    </span><button class="icon-mini" data-act="edit-settings">✏️</button></div>
+    <div class="list-row"><span class="icon-mini">🔐</span><span class="list-row-main">
+      <span class="list-row-title">管理口令</span>
+      <span class="list-row-sub">${s.adminPin ? '已开启' : '未开启'}</span>
+    </span><button class="icon-mini" data-act="edit-settings">✏️</button></div>
+
+    <div class="section-head"><h2 class="section-title">数据</h2></div>
+    <div class="row-2">
+      <button class="btn ghost" data-act="export-data">⬇ 导出备份</button>
+      <button class="btn ghost" data-act="import-data">⬆ 恢复备份</button>
+    </div>
+    <p class="section-sub" style="margin-top:10px;line-height:1.6">
+      数据保存在本机 <code>data/</code> 目录，图片在 <code>uploads/</code>。
+      换电脑或重装系统前，记得导出一份备份。
+    </p>
+    <input type="file" id="importFile" accept="application/json,.json" hidden />`;
+}
+
+/* =========================================================
+   家庭增删改
+   ========================================================= */
+
+const HOUSE_EMOJI = ['🏠', '🏡', '🏘️', '🏢', '🚪', '🛏️', '🍀', '🌷', '⭐', '🌙'];
+
+function openHouseholdEditor(house) {
+  const h = house || {
+    id: null,
+    name: '',
+    emoji: HOUSE_EMOJI[households().length % HOUSE_EMOJI.length],
+    note: '',
+  };
+  openSheet({
+    title: house ? `编辑「${house.name}」` : '添加家庭',
+    body: `
+      <div class="field">
+        <label class="field-label">名字或房号 *<span class="field-hint">例如：301、外婆家、单身公寓</span></label>
+        <input class="input" id="hName" value="${esc(h.name)}" placeholder="例如：302" />
+      </div>
+      <div class="field">
+        <label class="field-label">图标</label>
+        <div class="emoji-grid">
+          ${HOUSE_EMOJI.map(
+            (e) =>
+              `<button class="emoji-opt ${e === h.emoji ? 'on' : ''}" data-act="pick-house-emoji" data-e="${e}">${e}</button>`
+          ).join('')}
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">备注<span class="field-hint">住哪、几口人，随你写</span></label>
+        <input class="input" id="hNote" value="${esc(h.note)}" placeholder="例如：3 号楼 502" />
+      </div>
+      <p class="section-sub">
+        新建的家庭从零开始：没有点餐记录、库存是空的。菜谱是所有家庭共享的，不用重复录。
+      </p>`,
+    foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
+           <button class="btn" data-act="save-household" data-id="${house ? esc(house.id) : ''}">保存</button>`,
+  });
+  $('#hName').focus();
+}
+
+/* =========================================================
+   菜品编辑
+   ========================================================= */
+
+function openDishEditor(dish) {
+  const d =
+    dish ||
+    {
+      id: null,
+      name: '',
+      category: sortedCategories()[0] ? sortedCategories()[0].name : '家常菜',
+      description: '',
+      images: [],
+      servings: '',
+      duration: '',
+      difficulty: '简单',
+      tags: [],
+      seasonings: [],
+      methods: [],
+      notes: '',
+      isFavorite: false,
+    };
+
+  S.draft = {
+    id: d.id,
+    isNew: !d.id,
+    dish: {
+      ...d,
+      images: [...(d.images || [])],
+      tags: [...(d.tags || [])],
+      seasonings: (d.seasonings || []).map((s) => ({ ...s })),
+      methods: (d.methods || []).map((m) => ({ name: m.name, steps: [...(m.steps || [])] })),
+    },
+  };
+
+  const catOptions = sortedCategories()
+    .map(
+      (c) =>
+        `<option value="${esc(c.name)}" ${d.category === c.name ? 'selected' : ''}>${esc(c.name)}</option>`
+    )
+    .join('');
+
+  openSheet({
+    title: dish ? '编辑菜品' : '记一道菜',
+    body: `
+      <div class="field">
+        <label class="field-label">菜名 *</label>
+        <input class="input" id="fName" value="${esc(d.name)}" placeholder="例如：红烧排骨" />
+      </div>
+      <div class="field">
+        <label class="field-label">分类</label>
+        <select class="select" id="fCat">${catOptions}<option value="其他">其他</option></select>
+      </div>
+      <div class="field">
+        <label class="field-label">一句话介绍<span class="field-hint">家人一看就知道是什么</span></label>
+        <input class="input" id="fDesc" value="${esc(d.description)}" placeholder="酸甜开胃，零失败" />
+      </div>
+
+      <div class="field">
+        <label class="field-label">图片<span class="field-hint">第一张作为封面，最多 9 张</span></label>
+        <div class="img-grid" id="fImgs">
+          ${d.images
+            .map(
+              (u, i) => `<div class="img-thumb">
+                <img src="${esc(u)}" alt="" />
+                ${i === 0 ? '<span class="cover-tag">封面</span>' : ''}
+                <button class="img-del" data-act="rm-img" data-idx="${i}">✕</button>
+              </div>`
+            )
+            .join('')}
+          <label class="img-add" title="添加图片">＋
+            <input type="file" id="fImgFile" accept="image/*" multiple class="img-input" />
+          </label>
+        </div>
+      </div>
+
+      <div class="row-2">
+        <div class="field"><label class="field-label">份量</label>
+          <input class="input" id="fServ" value="${esc(d.servings)}" placeholder="2-3 人份" /></div>
+        <div class="field"><label class="field-label">耗时（分钟）</label>
+          <input class="input" id="fDur" type="number" min="0" value="${esc(d.duration) || ''}" placeholder="30" /></div>
+      </div>
+      <div class="field">
+        <label class="field-label">难度</label>
+        <select class="select" id="fDiff">
+          ${['简单', '中等', '有点难']
+            .map((v) => `<option ${d.difficulty === v ? 'selected' : ''}>${v}</option>`)
+            .join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label class="field-label">标签<span class="field-hint">逗号分隔，如：下饭, 快手</span></label>
+        <input class="input" id="fTags" value="${esc((d.tags || []).join(', '))}" />
+      </div>
+
+      <div class="field">
+        <label class="field-label">调料用量</label>
+        <div id="fSeasons">
+          ${d.seasonings
+            .map(
+              (s, i) => `<div class="row-2" style="margin-bottom:8px">
+                <input class="mini-input" data-act="season-name" data-i="${i}" value="${esc(s.name)}" placeholder="调料名" />
+                <input class="mini-input" data-act="season-amt" data-i="${i}" value="${esc(s.amount)}" placeholder="用量" />
+                <button class="del-btn" data-act="rm-season" data-i="${i}">✕</button>
+              </div>`
+            )
+            .join('')}
+        </div>
+        <button class="btn ghost sm" data-act="add-season">＋ 加一味调料</button>
+      </div>
+
+      <div class="field">
+        <label class="field-label">做法步骤<span class="field-hint">可以写多种做法</span></label>
+        <div id="fMethods">
+          ${d.methods
+            .map(
+              (m, i) => `<div class="sub-card">
+                <div class="sub-card-head">
+                  <input class="mini-input" data-act="method-name" data-i="${i}" value="${esc(m.name)}" placeholder="做法名称" />
+                  <button class="del-btn" data-act="rm-method" data-i="${i}">✕</button>
+                </div>
+                <textarea class="textarea" data-act="method-steps" data-i="${i}"
+                  placeholder="一行一步">${esc(m.steps.join('\n'))}</textarea>
+              </div>`
+            )
+            .join('')}
+        </div>
+        <button class="btn ghost sm" data-act="add-method">＋ 加一种做法</button>
+      </div>
+
+      <div class="field">
+        <label class="field-label">备注<span class="field-hint">经验、禁忌、替换方案…</span></label>
+        <textarea class="textarea" id="fNotes" placeholder="例如：花生一定最后放，久炒会软">${esc(d.notes)}</textarea>
+      </div>
+      <div class="field">
+        <label class="field-label" style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="fFav" ${d.isFavorite ? 'checked' : ''} style="width:18px;height:18px" />
+          标记为拿手菜（显示星标）
+        </label>
+      </div>`,
+    foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
+           <button class="btn" data-act="save-dish">${dish ? '保存' : '添加'}</button>`,
+  });
+
+  $('#fName').focus();
+}
+
+function collectDish() {
+  const g = (id) => $('#' + id);
+  const d = S.draft.dish;
+  d.name = g('fName').value.trim();
+  d.category = g('fCat').value;
+  d.description = g('fDesc').value.trim();
+  d.servings = g('fServ').value.trim();
+  d.duration = Number(g('fDur').value) || 0;
+  d.difficulty = g('fDiff').value;
+  d.tags = g('fTags').value.split(/[,，\s]+/).filter(Boolean);
+  d.notes = g('fNotes').value.trim();
+  d.isFavorite = g('fFav').checked;
+  d.seasonings = d.seasonings.filter((s) => s.name.trim());
+  d.methods = d.methods
+    .map((m) => ({
+      name: m.name.trim() || '做法',
+      steps: m.steps.map((s) => s.trim()).filter(Boolean),
+    }))
+    .filter((m) => m.steps.length);
+  return d;
+}
+
+/** 局部重绘调料/做法区，保留其它字段 */
+function redrawSeasons() {
+  $('#fSeasons').innerHTML = S.draft.dish.seasonings
+    .map(
+      (s, i) => `<div class="row-2" style="margin-bottom:8px">
+        <input class="mini-input" data-act="season-name" data-i="${i}" value="${esc(s.name)}" placeholder="调料名" />
+        <input class="mini-input" data-act="season-amt" data-i="${i}" value="${esc(s.amount)}" placeholder="用量" />
+        <button class="del-btn" data-act="rm-season" data-i="${i}">✕</button>
+      </div>`
+    )
+    .join('');
+}
+
+function redrawMethods() {
+  $('#fMethods').innerHTML = S.draft.dish.methods
+    .map(
+      (m, i) => `<div class="sub-card">
+        <div class="sub-card-head">
+          <input class="mini-input" data-act="method-name" data-i="${i}" value="${esc(m.name)}" placeholder="做法名称" />
+          <button class="del-btn" data-act="rm-method" data-i="${i}">✕</button>
+        </div>
+        <textarea class="textarea" data-act="method-steps" data-i="${i}"
+          placeholder="一行一步">${esc(m.steps.join('\n'))}</textarea>
+      </div>`
+    )
+    .join('');
+}
+
+function redrawImages() {
+  const imgs = S.draft.dish.images;
+  $('#fImgs').innerHTML =
+    imgs
+      .map(
+        (u, i) => `<div class="img-thumb">
+          <img src="${esc(u)}" alt="" />
+          ${i === 0 ? '<span class="cover-tag">封面</span>' : ''}
+          <button class="img-del" data-act="rm-img" data-idx="${i}">✕</button>
+        </div>`
+      )
+      .join('') +
+    '<label class="img-add" title="添加图片">＋' +
+    '<input type="file" id="fImgFile" accept="image/*" multiple class="img-input" />' +
+    '</label>';
+}
+
+/* ---------------- 图片压缩上传 ---------------- */
+
+function compressImage(file, maxSize = 1400, quality = 0.82) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('读取图片失败'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('图片格式不支持'));
+      img.onload = () => {
+        let { width, height } = img;
+        const scale = Math.min(1, maxSize / Math.max(width, height));
+        width = Math.max(1, Math.round(width * scale));
+        height = Math.max(1, Math.round(height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff'; // 透明 PNG 转 JPG 不会变黑
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/* =========================================================
+   分类 / 设置
+   ========================================================= */
+
+function openCatEditor(cat) {
+  openSheet({
+    title: cat ? '重命名分类' : '新增分类',
+    body: `<div class="field">
+      <label class="field-label">分类名称</label>
+      <input class="input" id="catName" value="${cat ? esc(cat.name) : ''}" placeholder="例如：夜宵" />
+    </div>
+    ${cat ? '' : '<p class="section-sub">新分类会自动出现在菜单顶部的筛选条上。</p>'}`,
+    foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
+           <button class="btn" data-act="save-cat" data-id="${cat ? esc(cat.id) : ''}">保存</button>`,
+  });
+  $('#catName').focus();
+}
+
+function openSettings() {
+  const s = S.data.settings;
+  openSheet({
+    title: '家庭设置',
+    body: `
+      <div class="field"><label class="field-label">店名<span class="field-hint">所有家庭共用</span></label>
+        <input class="input" id="setName" value="${esc(s.shopName)}" /></div>
+      <div class="field"><label class="field-label">欢迎语</label>
+        <input class="input" id="setWelcome" value="${esc(s.welcome || '')}" /></div>
+      <div class="field"><label class="field-label">管理口令<span class="field-hint">留空表示不锁；开启后只有知道口令的人能改菜谱和家庭</span></label>
+        <input class="input" id="setPin" value="${esc(s.adminPin || '')}" placeholder="例如 1234" /></div>
+      <p class="section-sub">每个家庭的成员在「管理 → 家庭成员」里单独维护。</p>`,
+    foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
+           <button class="btn" data-act="save-settings">保存</button>`,
+  });
+}
+
+/* =========================================================
+ * 家庭成员管理
+ * ========================================================= */
+
+const QUICK_EMOJI = ['🙋', '👩', '👨', '👧', '👦', '🧒', '👵', '👴', '🐱', '🐶', '😋', '🧑‍🍳'];
+
+function openMemberEditor(member) {
+  const m =
+    member || { id: null, name: '', emoji: QUICK_EMOJI[memberList().length % QUICK_EMOJI.length] };
+  openSheet({
+    title: member ? '编辑成员' : '添加成员',
+    body: `
+      <div class="field">
+        <label class="field-label">称呼<span class="field-hint">点餐时会显示这个名字</span></label>
+        <input class="input" id="mName" value="${esc(m.name)}" placeholder="例如：外婆" />
+      </div>
+      <div class="field">
+        <label class="field-label">头像</label>
+        <div class="emoji-grid">
+          ${QUICK_EMOJI.map(
+            (e) =>
+              `<button class="emoji-opt ${e === m.emoji ? 'on' : ''}" data-act="pick-emoji" data-e="${e}">${e}</button>`
+          ).join('')}
+        </div>
+        <input class="input" id="mEmoji" value="${esc(m.emoji)}" placeholder="也可以直接输入任意表情" style="margin-top:8px" />
+      </div>
+      ${
+        member && memberStats(m.name).count
+          ? `<p class="section-sub">${esc(m.name)} 已点过 ${memberStats(m.name).count} 次。删除成员不会删掉 TA 的历史点餐记录。</p>`
+          : ''
+      }`,
+    foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
+           <button class="btn" data-act="save-member" data-id="${member ? esc(member.id) : ''}">保存</button>`,
+  });
+  $('#mName').focus();
+}
+
+async function saveMembers(list) {
+  const h = currentHousehold();
+  if (!h) return toast('还没有家庭');
+  await api('PUT', `/api/households/${h.id}`, { members: list });
+  await loadState(true);
+  render();
+}
+
+/* =========================================================
+ * 渲染主循环
+ * ========================================================= */
+
+function render() {
+  const s = S.data.settings || {};
+  document.title = s.shopName || '家庭菜单';
+  $('#brandName').textContent = s.shopName || '家庭菜单';
+  $('#brandSub').textContent = s.welcome || '今天想吃点什么？';
+
+  renderHouseBtn();
+
+  document.querySelectorAll('.tab').forEach((t) => {
+    const on = t.dataset.view === S.view;
+    t.setAttribute('aria-current', on ? 'page' : 'false');
+  });
+
+  const badge = $('#orderBadge');
+  const n = pendingOrders().length;
+  badge.hidden = n === 0;
+  badge.textContent = n;
+
+  // 计划页签角标 = 本周（和下周）排了几道菜
+  const planBadge = $('#planBadge');
+  const planN = planItems(planWeek()).length + planItems(addDays(planWeek(), 7)).length;
+  planBadge.hidden = planN === 0;
+  planBadge.textContent = planN;
+
+  // 库存角标只报「该处理」的：过期 + 临期
+  const pb = $('#pantryBadge');
+  const pantryList = householdPantry();
+  const urgent = pantryList.filter((p) => {
+    const k = shelfStatus(p).key;
+    return k === 'expired' || k === 'soon' || k === 'today';
+  }).length;
+  pb.hidden = urgent === 0;
+  pb.textContent = urgent;
+  pb.classList.toggle('warn', pantryList.some((p) => shelfStatus(p).key === 'expired'));
+
+  const view = $('#view');
+  if (S.view === 'menu') view.innerHTML = viewMenu();
+  else if (S.view === 'plan') view.innerHTML = viewPlan();
+  else if (S.view === 'order') view.innerHTML = viewOrder();
+  else if (S.view === 'pantry') view.innerHTML = viewPantry();
+  else view.innerHTML = viewManage();
+}
+
+/** 顶栏上的「当前家庭」按钮 */
+function renderHouseBtn() {
+  const emoji = $('#houseEmoji');
+  const name = $('#houseName');
+  if (!emoji || !name) return;
+  const h = currentHousehold();
+  emoji.textContent = h ? h.emoji : '🏠';
+  name.textContent = h ? h.name : '家庭';
+  const pending = pendingOrders().length;
+  const urgent = householdPantry().filter((p) => {
+    const k = shelfStatus(p).key;
+    return k === 'expired' || k === 'soon' || k === 'today';
+  }).length;
+  const badge = householdBadge();
+  const btn = emoji.closest('.house-btn');
+  if (btn) {
+    btn.title = [h ? h.name : '', pending ? `${pending} 道待做` : '', urgent ? `${urgent} 样要处理` : '']
+      .filter(Boolean)
+      .join(' · ');
+  }
+  // 角标显示在顶栏按钮的后面
+  let dot = btn && btn.parentElement.querySelector('.house-btn-badge');
+  if (!pending && !urgent) {
+    if (dot) dot.remove();
+    return;
+  }
+  if (!dot && btn) {
+    dot = document.createElement('span');
+    dot.className = 'house-btn-badge';
+    btn.parentElement.insertBefore(dot, btn);
+  }
+  if (dot) {
+    dot.textContent = urgent ? `${pending}/${urgent}` : `${pending}`;
+    dot.title = urgent ? `${pending} 道待做 / ${urgent} 样食材临期或过期` : `${pending} 道待做`;
+    dot.classList.toggle('cold', urgent > 0);
+  }
+}
+
+function householdBadge() {
+  const pending = pendingOrders().length;
+  const urgent = householdPantry().filter((p) => {
+    const k = shelfStatus(p).key;
+    return k === 'expired' || k === 'soon' || k === 'today';
+  }).length;
+  return { pending, urgent };
+}
+
+/** 家庭选择弹层：一眼看到每家的待做和库存状况 */
+function openHouseholdPicker() {
+  const list = households();
+  const body = `
+    <p class="section-sub" style="margin:-2px 0 14px">
+      菜谱所有家庭共享，点餐和库存各记各的。选一个切过去。
+    </p>
+    ${list
+      .map((h) => {
+        const orders = householdOrders(h.id);
+        const pending = orders.filter((o) => o.status === 'pending' || o.status === 'cooking').length;
+        const food = householdPantry(h.id);
+        const urgent = food.filter((p) => {
+          const k = shelfStatus(p).key;
+          return k === 'expired' || k === 'soon' || k === 'today';
+        }).length;
+        const bits = [`${h.members.length} 位家人`, `${pending} 道待做`, `${food.length} 样库存`];
+        return `<button class="house-pick" data-act="pick-house" data-id="${esc(h.id)}"
+          aria-pressed="${h.id === S.householdId}">
+          <span class="house-pick-emoji">${esc(h.emoji)}</span>
+          <span class="house-pick-main">
+            <span class="house-pick-name">${esc(h.name)}</span>
+            <span class="house-pick-sub">${esc(bits.join(' · '))}${urgent ? ` · ⚠ ${urgent} 样要处理` : ''}${h.note ? ` · ${esc(h.note)}` : ''}</span>
+          </span>
+          ${h.id === S.householdId ? '<span class="house-pick-tag">✓</span>' : ''}
+        </button>`;
+      })
+      .join('')}`;
+  openSheet({
+    title: '切换家庭',
+    body,
+    foot: `<button class="btn soft" data-act="new-household">＋ 添加家庭</button>
+           <button class="btn ghost" data-act="edit-settings">服务设置</button>`,
+  });
+}
+
+/* =========================================================
+   事件
+   ========================================================= */
+
+const ACTIONS = {
+  /* 导航 */
+  nav(el) {
+    const v = el.dataset.view;
+    if (v === 'manage' && S.data.settings.adminPin && !S.authed) {
+      S.view = 'manage';
+      render();
+      promptPin();
+      return;
+    }
+    S.view = v;
+    closeSheet();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    render();
+  },
+  reload() {
+    S.loading = true;
+    render();
+    loadState();
+  },
+
+  /* 搜索 */
+  'open-search'() {
+    $('#searchbar').hidden = false;
+    $('#searchInput').focus();
+  },
+  'close-search'() {
+    $('#searchbar').hidden = true;
+    S.keyword = '';
+    $('#searchInput').value = '';
+    render();
+  },
+
+  /* 菜单 */
+  'filter-cat'(el) {
+    S.category = el.dataset.cat;
+    render();
+  },
+  'filter-status'(el) {
+    S.orderStatus = el.dataset.status;
+    render();
+  },
+  'filter-member'(el) {
+    S.memberFilter = el.dataset.name || '';
+    render();
+  },
+  'toggle-group'() {
+    S.groupByMember = !S.groupByMember;
+    render();
+  },
+  'open-dish'(el) {
+    openDish(el.dataset.id);
+  },
+  async random() {
+    const list = S.data.dishes;
+    if (!list.length) return toast('还没有菜可以抽哦');
+    openDish(list[Math.floor(Math.random() * list.length)].id);
+  },
+
+  /* 菜品编辑 */
+  'new-dish'() {
+    openDishEditor(null);
+  },
+  'edit-dish'(el) {
+    const d = dishById(el.dataset.id);
+    if (d) openDishEditor(d);
+  },
+  async 'dup-dish'(el) {
+    const d = await api('POST', `/api/dishes/${el.dataset.id}/duplicate`, {});
+    await loadState(true);
+    toast(`已复制「${d.name}」`);
+    render();
+  },
+  async 'del-dish'(el) {
+    const d = dishById(el.dataset.id);
+    if (!d) return;
+    if (!confirm(`确定删除「${d.name}」？\n相关的待做点餐也会一起删掉，此操作不可撤销。`)) return;
+    await api('DELETE', `/api/dishes/${el.dataset.id}`);
+    await loadState(true);
+    toast('已删除');
+    render();
+  },
+  'rm-img'(el) {
+    S.draft.dish.images.splice(Number(el.dataset.idx), 1);
+    redrawImages();
+  },
+  'add-season'() {
+    collectDish();
+    S.draft.dish.seasonings.push({ name: '', amount: '' });
+    redrawSeasons();
+  },
+  'rm-season'(el) {
+    collectDish();
+    S.draft.dish.seasonings.splice(Number(el.dataset.i), 1);
+    redrawSeasons();
+  },
+  'add-method'() {
+    collectDish();
+    S.draft.dish.methods.push({ name: `做法 ${S.draft.dish.methods.length + 1}`, steps: [] });
+    redrawMethods();
+  },
+  'rm-method'(el) {
+    collectDish();
+    S.draft.dish.methods.splice(Number(el.dataset.i), 1);
+    redrawMethods();
+  },
+  async 'save-dish'() {
+    const d = collectDish();
+    if (!d.name) return toast('先给这道菜起个名字吧');
+    try {
+      if (S.draft.isNew) {
+        await api('POST', '/api/dishes', d);
+        toast(`「${d.name}」已加入菜单`);
+      } else {
+        await api('PUT', `/api/dishes/${S.draft.id}`, d);
+        toast('已保存');
+      }
+      closeSheet();
+      await loadState(true);
+      render();
+    } catch (err) {
+      toast('保存失败：' + err.message);
+    }
+  },
+
+  /* 点餐 */
+  'order-dish'(el) {
+    openOrderForm(dishById(el.dataset.id));
+  },
+  'new-order'() {
+    openOrderForm(null);
+  },
+  'pick-dish'(el) {
+    collectOrder();
+    const d = dishById(el.dataset.id);
+    if (!d) return;
+    S.draftOrder.dishId = d.id;
+    S.draftOrder.dishName = d.name;
+    $('#ordName').value = d.name;
+    document.querySelectorAll('.picker-item').forEach((b) => {
+      b.setAttribute('aria-pressed', b.dataset.id === d.id);
+    });
+  },
+  'pick-member'(el) {
+    $('#ordWho').value = el.dataset.name;
+    const card = el.closest('.member-cards');
+    if (card) {
+      card.querySelectorAll('.member-card').forEach((b) => {
+        b.setAttribute('aria-pressed', b.dataset.name === el.dataset.name);
+      });
+    }
+  },
+  async 'submit-order'() {
+    const o = collectOrder();
+    if (!o.dishName) return toast('先选一道菜，或者写上想吃的名字');
+    try {
+      await api('POST', '/api/orders', o);
+      closeSheet();
+      await loadState(true);
+      S.view = 'order';
+      S.orderStatus = 'pending';
+      render();
+      toast(`🔔 已下单：${o.dishName}`);
+    } catch (err) {
+      toast('提交失败：' + err.message);
+    }
+  },
+  async 'set-status'(el) {
+    await api('PATCH', `/api/orders/${el.dataset.id}`, { status: el.dataset.status });
+    await loadState(true);
+    toast(el.dataset.status === 'done' ? '开吃！🍚' : '开始做菜了');
+    render();
+  },
+  async 'del-order'(el) {
+    if (!confirm('删除这条点餐？')) return;
+    await api('DELETE', `/api/orders/${el.dataset.id}`);
+    await loadState(true);
+    render();
+  },
+  async 'clear-done'() {
+    const h = currentHousehold();
+    if (!confirm(`清空「${h ? h.name : ''}」所有已完成的点餐记录？`)) return;
+    await api('DELETE', `/api/orders/done?householdId=${encodeURIComponent(S.householdId)}`);
+    await loadState(true);
+    render();
+  },
+  async 'toggle-shop'(el) {
+    const name = el.dataset.name;
+    if (S.shoppingChecked.has(name)) S.shoppingChecked.delete(name);
+    else S.shoppingChecked.add(name);
+    await api('PUT', '/api/settings', { shoppingChecked: [...S.shoppingChecked] });
+    S.data.settings.shoppingChecked = [...S.shoppingChecked];
+    render();
+  },
+  async 'copy-shopping'() {
+    const text = buildShoppingList()
+      .map((i) => `□ ${i.name}（${i.parts.join(' + ')}）`)
+      .join('\n');
+    if (!text) return toast('暂时没有要买的东西');
+    await copyText(text);
+  },
+
+  /* 家庭成员 */
+  'new-member'() {
+    openMemberEditor(null);
+  },
+  'edit-member'(el) {
+    openMemberEditor(memberList().find((m) => m.id === el.dataset.id));
+  },
+  'pick-emoji'(el) {
+    $('#mEmoji').value = el.dataset.e;
+    el.closest('.emoji-grid')
+      .querySelectorAll('.emoji-opt')
+      .forEach((b) => b.classList.toggle('on', b.dataset.e === el.dataset.e));
+  },
+  async 'save-member'(el) {
+    const name = $('#mName').value.trim();
+    if (!name) return toast('给家人起个称呼');
+    const emoji = $('#mEmoji').value.trim() || '🙋';
+    const list = memberList().map((m) => ({ id: m.id, name: m.name, emoji: m.emoji }));
+    const id = el.dataset.id;
+    const hit = list.find((m) => m.id === id);
+    if (hit) {
+      hit.name = name;
+      hit.emoji = emoji;
+    } else {
+      if (list.some((m) => m.name === name)) return toast(`已经有叫「${name}」的成员了`);
+      list.push({ id: 'm_' + Date.now().toString(36), name, emoji });
+    }
+    await saveMembers(list);
+    closeSheet();
+    toast(hit ? '已保存' : `已添加 ${name}`);
+  },
+  async 'del-member'(el) {
+    const m = memberList().find((x) => x.id === el.dataset.id);
+    if (!m) return;
+    const st = memberStats(m.name);
+    const msg = st.count
+      ? `删除成员「${m.name}」？\nTA 的 ${st.count} 条历史点餐记录会保留，但分组显示时不再带头像。`
+      : `删除成员「${m.name}」？`;
+    if (!confirm(msg)) return;
+    await saveMembers(
+      memberList()
+        .filter((x) => x.id !== el.dataset.id)
+        .map((x) => ({ id: x.id, name: x.name, emoji: x.emoji }))
+    );
+    if (S.memberFilter === m.name) S.memberFilter = '';
+    render();
+    toast('已删除');
+  },
+
+  /* 分类 */
+  'new-cat'() {
+    openCatEditor(null);
+  },
+  'edit-cat'(el) {
+    openCatEditor(S.data.categories.find((c) => c.id === el.dataset.id));
+  },
+  async 'save-cat'(el) {
+    const name = $('#catName').value.trim();
+    if (!name) return toast('给分类起个名字');
+    const id = el.dataset.id;
+    await (id ? api('PUT', `/api/categories/${id}`, { name }) : api('POST', '/api/categories', { name }));
+    closeSheet();
+    await loadState(true);
+    render();
+    toast('已保存');
+  },
+  async 'del-cat'(el) {
+    const c = S.data.categories.find((x) => x.id === el.dataset.id);
+    if (!c) return;
+    const n = S.data.dishes.filter((d) => d.category === c.name).length;
+    const msg = n
+      ? `删除分类「${c.name}」？\n该分类下 ${n} 道菜会移到「其他」，菜品不会丢。`
+      : `删除分类「${c.name}」？`;
+    if (!confirm(msg)) return;
+    await api('DELETE', `/api/categories/${el.dataset.id}`);
+    if (S.category === c.name) S.category = '全部';
+    await loadState(true);
+    render();
+  },
+
+  /* 家庭 */
+  'open-houses'() {
+    openHouseholdPicker();
+  },
+  'pick-house'(el) {
+    const id = el.dataset.id;
+    if (id === S.householdId) return;
+    S.householdId = id;
+    localStorage.setItem(LS_HOUSE, id);
+    // 换家庭后原来的筛选多半没意义了，清掉免得看着空
+    S.memberFilter = '';
+    S.pantryCat = '全部';
+    S.pantryFilter = 'all';
+    closeSheet();
+    render();
+    const h = currentHousehold();
+    if (h) toast(`已切到 ${h.emoji} ${h.name}`);
+  },
+  'new-household'() {
+    openHouseholdEditor(null);
+  },
+  'edit-household'(el) {
+    openHouseholdEditor(households().find((h) => h.id === el.dataset.id));
+  },
+  'pick-house-emoji'(el) {
+    $('#hName').dataset.emoji = el.dataset.e;
+    el.closest('.emoji-grid')
+      .querySelectorAll('.emoji-opt')
+      .forEach((b) => b.classList.toggle('on', b.dataset.e === el.dataset.e));
+  },
+  async 'save-household'(el) {
+    const name = $('#hName').value.trim();
+    if (!name) return toast('给家庭起个名字或填个房号');
+    const emoji =
+      $('#hName').dataset.emoji ||
+      ($('#hEmoji') && $('#hEmoji').value.trim()) ||
+      HOUSE_EMOJI[households().length % HOUSE_EMOJI.length];
+    const body = { name, emoji, note: $('#hNote').value.trim() };
+    const id = el.dataset.id;
+    const saved = await (id
+      ? api('PUT', `/api/households/${id}`, body)
+      : api('POST', '/api/households', body));
+    closeSheet();
+    await loadState(true);
+    if (!id) {
+      S.householdId = saved.id;
+      localStorage.setItem(LS_HOUSE, saved.id);
+      S.memberFilter = '';
+      render();
+      toast(`已添加 ${saved.name}`);
+    } else {
+      render();
+      toast('已保存');
+    }
+  },
+  async 'del-household'(el) {
+    const h = households().find((x) => x.id === el.dataset.id);
+    if (!h) return;
+    if (households().length <= 1) return toast('至少要保留一个家庭');
+    const nOrder = householdOrders(h.id).length;
+    const nFood = householdPantry(h.id).length;
+    const extra = nOrder || nFood ? `\n它名下的 ${nOrder} 条点餐、${nFood} 样库存会一起删掉，` : '';
+    if (!confirm(`删除家庭「${h.name}」？${extra}删了找不回来。`)) return;
+    await api('DELETE', `/api/households/${h.id}`);
+    if (S.householdId === h.id) {
+      S.householdId = '';
+      localStorage.removeItem(LS_HOUSE);
+      S.memberFilter = '';
+    }
+    await loadState(true);
+    render();
+    toast('已删除');
+  },
+
+  /* 本周计划 */
+  'week-shift'(el) {
+    const n = Number(el.dataset.n) || 0;
+    S.planWeek = addDays(planWeek(), n * 7);
+    render();
+  },
+  'add-plan-dish'() {
+    openPlanPicker(planWeek());
+  },
+  async 'pick-plan-dish'(el) {
+    const dish = dishById(el.dataset.id);
+    if (!dish) return;
+    await addToPlan({ dishId: dish.id, name: dish.name, servings: dish.servings }, planWeek());
+  },
+  async 'toggle-plan-dish'(el) {
+    const dish = dishById(el.dataset.id);
+    if (!dish) return;
+    const week = el.dataset.week || planWeek();
+    const hit = planItems(week).find((it) => it.dishId === dish.id);
+    if (hit) {
+      await api('DELETE', `/api/plans/items/${hit.id}`);
+      await loadState(true);
+      // 详情弹层还开着，重开一次让按钮状态跟上
+      openDish(dish.id);
+      render();
+      toast(`已从${planWeekTitle(week)}拿掉`);
+    } else {
+      await addToPlan({ dishId: dish.id, name: dish.name, servings: dish.servings }, week, () =>
+        openDish(dish.id)
+      );
+    }
+  },
+  async 'save-plan-custom'(el) {
+    const name = ($('#planName').value || '').trim();
+    if (!name) return toast('写上想做的菜名');
+    await addToPlan({ name }, el.dataset.week || planWeek());
+  },
+  async 'rm-plan'(el) {
+    await api('DELETE', `/api/plans/items/${el.dataset.id}`);
+    await loadState(true);
+    render();
+  },
+  async 'clear-plan'() {
+    const week = planWeek();
+    const n = planItems(week).length;
+    if (!n) return;
+    if (!confirm(`清空${planWeekTitle(week)}里的 ${n} 道菜？`)) return;
+    await api(
+      'DELETE',
+      `/api/plans?householdId=${encodeURIComponent(S.householdId)}&weekOf=${encodeURIComponent(week)}`
+    );
+    await loadState(true);
+    render();
+    toast('已清空');
+  },
+  async 'copy-plan-shopping'() {
+    const dishIds = planItems(planWeek()).map((it) => it.dishId).filter(Boolean);
+    const list = shoppingFromDishIds(dishIds);
+    if (!list.length) return toast('计划里的菜还没写调料用量');
+    await copyText(list.map((i) => `□ ${i.name}（${i.parts.join(' + ')}）`).join('\n'));
+  },
+
+  /* 库存 */
+  'new-food'() {
+    openFoodEditor(null);
+  },
+  'edit-food'(el) {
+    openFoodEditor(householdPantry().find((p) => p.id === el.dataset.id));
+  },
+  'filter-pantry'(el) {
+    S.pantryFilter = el.dataset.filter || 'all';
+    S.pantryCat = '全部';
+    render();
+  },
+  'filter-pcat'(el) {
+    S.pantryCat = el.dataset.cat || '全部';
+    render();
+  },
+  'pick-preset'(el) {
+    const { name, cat, unit, exp } = el.dataset;
+    $('#fFoodName').value = name;
+    if (cat) $('#fFoodCat').value = cat;
+    if (unit) $('#fFoodUnit').value = unit;
+    if (exp) $('#fFoodExp').value = exp;
+    if (!$('#fFoodNote').value.trim()) $('#fFoodNote').value = '';
+    toast(`已填入「${name}」`);
+  },
+  'exp-preset'(el) {
+    const d = Number(el.dataset.days) || 0;
+    $('#fFoodExp').value = d > 0 ? dayOffset(d) : '';
+  },
+  async 'save-food'(el) {
+    const name = $('#fFoodName').value.trim();
+    if (!name) return toast('先写上食材名');
+    const body = {
+      householdId: S.householdId,
+      name,
+      category: $('#fFoodCat').value,
+      quantity: Number($('#fFoodQty').value) || 0,
+      unit: $('#fFoodUnit').value.trim() || '份',
+      expireAt: $('#fFoodExp').value || '',
+      note: $('#fFoodNote').value.trim(),
+    };
+    const id = el.dataset.id;
+    await (id ? api('PUT', `/api/pantry/${id}`, body) : api('POST', '/api/pantry', body));
+    closeSheet();
+    await loadState(true);
+    render();
+    toast(id ? '已保存' : `已记下 ${name}`);
+  },
+  async 'del-food'(el) {
+    const p = householdPantry().find((x) => x.id === el.dataset.id);
+    if (!p) return;
+    if (!confirm(`从「${currentHousehold() ? currentHousehold().name : ''}」的库存里删掉「${p.name}」？`)) return;
+    await api('DELETE', `/api/pantry/${p.id}`);
+    await loadState(true);
+    render();
+    toast('已删除');
+  },
+  async 'qty-inc'(el) {
+    await bumpQty(el.dataset.id, 1);
+  },
+  async 'qty-dec'(el) {
+    await bumpQty(el.dataset.id, -1);
+  },
+  async 'purge-pantry'(el) {
+    const scope = el.dataset.scope || 'expired';
+    const label = scope === 'expired' ? '已过期' : '临期（3 天内到期）';
+    if (!confirm(`清理「${currentHousehold() ? currentHousehold().name : ''}」库存里${label}的食材？`)) return;
+    const r = await api(
+      'DELETE',
+      `/api/pantry?householdId=${encodeURIComponent(S.householdId)}&scope=${scope}`
+    );
+    await loadState(true);
+    render();
+    toast(r.removed ? `已清理 ${r.removed} 样` : '没有需要清理的');
+  },
+  /** 买菜清单里「入库」：把买回来的东西记进当前家庭库存 */
+  async 'stock-it'(el) {
+    const name = el.dataset.name;
+    const parts = (el.dataset.parts || '').split('|').filter(Boolean);
+    const { quantity, unit } = guessAmount(parts);
+    let category = '其他';
+    if (S.presets && S.presets.presets) {
+      const hit = S.presets.presets.find((p) => p.name === name);
+      if (hit) category = hit.category;
+    }
+    await api('POST', '/api/pantry', {
+      householdId: S.householdId,
+      name,
+      category,
+      quantity,
+      unit,
+      expireAt: '',
+      note: '从买菜清单入库',
+    });
+    await loadState(true);
+    render();
+    toast(`已入库：${name} ${fmtQty(quantity)}${unit}`);
+  },
+
+  /* 设置 */
+  'edit-settings'() {
+    openSettings();
+  },
+  async 'save-settings'() {
+    const v = (id) => $('#' + id).value.trim();
+    const body = {
+      shopName: v('setName'),
+      welcome: v('setWelcome'),
+      adminPin: v('setPin'),
+    };
+    await api('PUT', '/api/settings', body);
+    S.authed = !body.adminPin ? true : S.authed;
+    closeSheet();
+    await loadState(true);
+    render();
+    toast('设置已保存');
+  },
+  unlock() {
+    promptPin();
+  },
+
+  /* 数据 */
+  'export-data'() {
+    window.open('/api/export', '_blank');
+  },
+  'import-data'() {
+    $('#importFile').click();
+  },
+
+  'close-sheet'() {
+    closeSheet();
+  },
+};
+
+/* 口令 */
+function promptPin() {
+  openSheet({
+    title: '请输入管理口令',
+    body: `<input class="input" id="pinInput" type="password" inputmode="numeric" placeholder="口令" />`,
+    foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
+           <button class="btn" data-act="check-pin">进入</button>`,
+  });
+  $('#pinInput').focus();
+}
+
+ACTIONS['check-pin'] = function () {
+  const v = $('#pinInput').value.trim();
+  if (v === (S.data.settings.adminPin || '')) {
+    S.authed = true;
+    closeSheet();
+    render();
+    toast('已解锁');
+  } else {
+    toast('口令不对');
+  }
+};
+
+/* 事件绑定 */
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-act]');
+  if (!el) return;
+  const fn = ACTIONS[el.dataset.act];
+  if (!fn) return;
+  e.preventDefault();
+  Promise.resolve(fn(el)).catch((err) => toast('出错了：' + err.message));
+});
+
+/* 编辑器里的输入同步 */
+document.addEventListener('input', (e) => {
+  const el = e.target;
+  const act = el.dataset && el.dataset.act;
+  if (!act || !S.draft) return;
+  const i = Number(el.dataset.i);
+  if (act === 'season-name') S.draft.dish.seasonings[i].name = el.value;
+  else if (act === 'season-amt') S.draft.dish.seasonings[i].amount = el.value;
+  else if (act === 'method-name') S.draft.dish.methods[i].name = el.value;
+  else if (act === 'method-steps')
+    S.draft.dish.methods[i].steps = el.value.split('\n').map((s) => s.trim()).filter(Boolean);
+});
+
+/* 搜索输入 */
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'searchInput') {
+    S.keyword = e.target.value.trim();
+    render();
+  }
+  if (e.target.id === 'fPresetSearch') renderPresetGrid();
+});
+
+/* 改分类时，常见食材快选跟着换 */
+document.addEventListener('change', (e) => {
+  if (e.target.id === 'fFoodCat') renderPresetGrid();
+});
+
+/* 图片选择 */
+document.addEventListener('change', async (e) => {
+  if (e.target.id === 'fImgFile') {
+    const files = [...e.target.files];
+    e.target.value = ''; // 清空，方便再次选择同一个文件
+    if (!files.length || !S.draft) return;
+    toast('图片处理中…', 6000);
+    for (const f of files) {
+      try {
+        const dataUrl = await compressImage(f);
+        const { url } = await api('POST', '/api/upload', { dataUrl });
+        S.draft.dish.images.push(url);
+      } catch (err) {
+        toast('图片上传失败：' + err.message);
+      }
+    }
+    redrawImages();
+    toast('图片已添加');
+  }
+
+  if (e.target.id === 'importFile') {
+    const f = e.target.files[0];
+    if (!f) return;
+    if (!confirm('恢复备份会覆盖当前全部菜单、分类和点餐记录，确定继续？')) {
+      e.target.value = '';
+      return;
+    }
+    try {
+      const text = await f.text();
+      await api('POST', '/api/import', JSON.parse(text));
+      S.authed = true;
+      await loadState(true);
+      S.view = 'menu';
+      render();
+      toast('备份已恢复');
+    } catch (err) {
+      toast('恢复失败：' + err.message);
+    }
+    e.target.value = '';
+  }
+});
+
+/* 菜品卡片可用键盘回车打开 */
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const card =
+    (e.target.closest && e.target.closest('.card[data-act="open-dish"]')) ||
+    (e.target.closest && e.target.closest('.food-main[data-act="edit-food"]'));
+  if (!card) return;
+  e.preventDefault();
+  if (card.dataset.act === 'open-dish') openDish(card.dataset.id);
+  else ACTIONS['edit-food'](card);
+});
+
+/* 滚动方向控制悬浮按钮显隐 */
+let lastScrollY = 0;
+window.addEventListener(
+  'scroll',
+  () => {
+    const fab = $('.fab');
+    if (!fab) return;
+    const y = window.scrollY;
+    const down = y > lastScrollY && y > 90;
+    const up = y < lastScrollY - 4 || y < 40;
+    if (down) fab.classList.add('fab-hide');
+    else if (up) fab.classList.remove('fab-hide');
+    lastScrollY = y;
+  },
+  { passive: true }
+);
+
+/* 启动 */
+loadState();

@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+<meta name="theme-color" content="#faf6f0" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<title>家庭菜单</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍚</text></svg>" />
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+
+<div id="app" class="app">
+  <header class="topbar">
+    <div class="topbar-main">
+      <h1 class="brand" id="brandName">家庭菜单</h1>
+      <p class="brand-sub" id="brandSub">今天想吃点什么？</p>
+    </div>
+    <div class="topbar-actions">
+      <button class="house-btn" data-act="open-houses" aria-label="切换家庭">
+        <span class="house-btn-emoji" id="houseEmoji">🏠</span>
+        <span class="house-btn-name" id="houseName">我家</span>
+        <span class="house-btn-caret" aria-hidden="true">⌄</span>
+      </button>
+      <button class="icon-btn" data-act="random" title="随机来一道" aria-label="随机来一道">🎲</button>
+      <button class="icon-btn" data-act="open-search" title="搜索" aria-label="搜索">🔍</button>
+    </div>
+  </header>
+
+  <div id="searchbar" class="searchbar" hidden>
+    <input id="searchInput" class="search-input" type="search" placeholder="搜菜名、调料、标签…" autocomplete="off" />
+    <button class="search-clear" data-act="close-search" aria-label="关闭搜索">✕</button>
+  </div>
+
+  <main id="view" class="view" aria-live="polite"></main>
+
+  <nav class="tabbar" id="tabbar">
+    <button class="tab" data-act="nav" data-view="menu">
+      <span class="tab-icon">🍽️</span><span class="tab-label">菜单</span>
+    </button>
+    <button class="tab" data-act="nav" data-view="plan">
+      <span class="tab-icon">🗓️</span><span class="tab-label">计划</span>
+      <span class="badge" id="planBadge" hidden>0</span>
+    </button>
+    <button class="tab" data-act="nav" data-view="order">
+      <span class="tab-icon">🔔</span><span class="tab-label">点餐</span>
+      <span class="badge" id="orderBadge" hidden>0</span>
+    </button>
+    <button class="tab" data-act="nav" data-view="pantry">
+      <span class="tab-icon">🧊</span><span class="tab-label">库存</span>
+      <span class="badge warn" id="pantryBadge" hidden>0</span>
+    </button>
+    <button class="tab" data-act="nav" data-view="manage">
+      <span class="tab-icon">🧺</span><span class="tab-label">管理</span>
+    </button>
+  </nav>
+</div>
+
+<!-- 弹层 -->
+<div id="modalRoot" class="modal-root" hidden></div>
+<div id="toast" class="toast" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
