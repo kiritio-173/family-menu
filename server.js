@@ -50,6 +50,150 @@ function safeList(v) {
 }
 
 /* ------------------------------------------------------------------ *
+ * AI（可选增强）
+ *
+ * 这一块是纯增量的：没配 Key、没网、服务挂了，都不影响点餐/计划/库存/买菜清单
+ * 任何原有功能。Node 22 自带全局 fetch，所以不用引任何 npm 包，零依赖保住了。
+ *
+ * Key 只从 data/ai.json 读，永远不进 /api/state、不进导出备份、不下发前端。
+ * ------------------------------------------------------------------ */
+
+const AI_FILE = path.join(DATA_DIR, 'ai.json');
+
+/** 环境变量优先，其次 data/ai.json —— 方便不想把 Key 放文件里的用法 */
+function loadAIConfig() {
+  const fromEnv = {
+    enabled: process.env.MINIMAX_API_KEY ? true : null,
+    baseUrl: process.env.MINIMAX_BASE_URL || null,
+    model: process.env.MINIMAX_MODEL || null,
+    apiKey: process.env.MINIMAX_API_KEY || null,
+    timeoutMs: process.env.MINIMAX_TIMEOUT ? Number(process.env.MINIMAX_TIMEOUT) : null,
+  };
+  let fromFile = {};
+  try {
+    fromFile = JSON.parse(fs.readFileSync(AI_FILE, 'utf8'));
+  } catch (_) {
+    /* 没有这个文件就是没配 AI，正常情况 */
+  }
+  const cfg = { ...fromFile, ...Object.fromEntries(Object.entries(fromEnv).filter(([, v]) => v != null)) };
+  return {
+    enabled: cfg.enabled !== false,
+    baseUrl: String(cfg.baseUrl || 'https://api.minimax.io/v1').replace(/\/+$/, ''),
+    model: String(cfg.model || 'MiniMax-M3'),
+    apiKey: String(cfg.apiKey || ''),
+    timeoutMs: Number(cfg.timeoutMs) > 0 ? Number(cfg.timeoutMs) : 45000,
+    maxCompletionTokens: Number(cfg.maxCompletionTokens) > 0 ? Number(cfg.maxCompletionTokens) : 8000,
+  };
+}
+
+/** 给前端看的状态：绝不含 key 本身 */
+function aiStatus() {
+  const c = loadAIConfig();
+  return {
+    enabled: c.enabled && !!c.apiKey,
+    model: c.model,
+    hasKey: !!c.apiKey,
+    timeoutMs: c.timeoutMs,
+  };
+}
+
+/**
+ * 剥掉 <think>…</think>。
+ * MiniMax-M3 开启思考时，回答和思考过程会挤在 content 同一个字段里，
+ * 不剥的话后面 JSON.parse 必崩。
+ */
+function stripThink(s) {
+  if (typeof s !== 'string') return '';
+  return s
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/^<think>[\s\S]*$/i, '')
+    .trim();
+}
+
+/** 从可能夹杂散文/代码围栏的回复里抠出 JSON 对象 */
+function extractJSON(text) {
+  const s = stripThink(text);
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(s);
+  const body = fenced ? fenced[1] : s;
+  const start = body.indexOf('{');
+  const end = body.lastIndexOf('}');
+  if (start === -1 || end <= start) return null;
+  try {
+    return JSON.parse(body.slice(start, end + 1));
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * 调一次 MiniMax。永远不抛异常，只返回 { ok, data, error }，
+ * 调用方拿不到结果时走降级，不该让整个功能崩掉。
+ */
+async function callAI(messages, opts = {}) {
+  const c = loadAIConfig();
+  if (!c.enabled || !c.apiKey) {
+    return { ok: false, error: '还没配置 AI，去 data/ai.json 填上 API Key' };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs || c.timeoutMs);
+  try {
+    const res = await fetch(`${c.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${c.apiKey}`,
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: opts.model || c.model,
+        messages,
+        max_completion_tokens: opts.maxTokens || c.maxCompletionTokens,
+        temperature: opts.temperature == null ? 0.6 : opts.temperature,
+        // 默认关掉思考：实测同一道调度题，开思考 20.3s/1628 tokens，
+        // 关掉只要 5.0s/430 tokens，而 JSON 质量一样 —— 做饭时等 20 秒不可接受。
+        // 需要仔细看图的任务可以单独开回来。
+        ...(opts.think
+          ? { thinking: { type: 'enabled' }, reasoning_split: true }
+          : { thinking: { type: 'disabled' }, reasoning_split: true }),
+      }),
+    });
+    const raw = await res.text();
+    if (!res.ok) {
+      let msg = `AI 返回 ${res.status}`;
+      try {
+        const j = JSON.parse(raw);
+        msg = (j.error && j.error.message) || (j.base_resp && j.base_resp.status_msg) || msg;
+      } catch (_) {
+        /* 保持默认信息 */
+      }
+      if (res.status === 401 || res.status === 403) msg = 'API Key 不对或已失效，去 data/ai.json 换一个新的';
+      if (res.status === 429) msg = 'AI 额度用完了，等会儿再试';
+      return { ok: false, error: msg };
+    }
+    const j = JSON.parse(raw);
+    const content = j.choices && j.choices[0] && j.choices[0].message
+      ? j.choices[0].message.content
+      : '';
+    const text = stripThink(content);
+    if (!text) return { ok: false, error: 'AI 没返回内容' };
+    return {
+      ok: true,
+      text,
+      json: opts.wantJSON ? extractJSON(text) : null,
+      usage: j.usage || null,
+      model: j.model || c.model,
+    };
+  } catch (err) {
+    if (err && (err.name === 'AbortError' || err.code === 'ABORT_ERR')) {
+      return { ok: false, error: 'AI 超时了，可能网络不通或模型在想太久' };
+    }
+    return { ok: false, error: `连不上 AI：${(err && err.message) || '未知错误'}` };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * 数据存储（原子写入 + 防抖落盘）
  * ------------------------------------------------------------------ */
 
@@ -835,12 +979,89 @@ async function handleAPI(req, res, url) {
 
   // ---- 统一守卫 ----
   // 管理类的写操作要有有效会话；导出/导入因为文件里含口令明文，同样要认证。
+  // AI 调用要花钱，也不能让别人白用。
   // 点餐、库存、本周计划不在保护范围内 —— 那是家里人每天都要用的。
   const needsAuth =
     route[0] === 'export' ||
+    route[0] === 'ai' ||
     (method !== 'GET' && method !== 'HEAD' && ADMIN_WRITES.has(route[0]));
   if (needsAuth && !isAuthed(req)) {
     return sendError(res, 401, '需要管理口令，请先在「管理」页解锁');
+  }
+
+  // ---- AI ----
+  // 只暴露「能不能用」和「用的哪个模型」，永远不下发 Key
+  if (method === 'GET' && route.length === 1 && route[0] === 'ai') {
+    return sendJSON(res, 200, { ok: true, data: aiStatus() });
+  }
+
+  // 通用对话入口。task 只用来挑提示词模板，不接受前端传任意模型/baseUrl，
+  // 免得有人拿这个接口当任意 API 的跳板。
+  if (method === 'POST' && route.length === 2 && route[0] === 'ai' && route[1] === 'chat') {
+    const body = await readBody(req);
+    const task = safeText(body && body.task, 30);
+    const prompt = safeText(body && body.prompt, 12000);
+    const imageUrl = safeText(body && body.imageUrl, 8 * 1024 * 1024);
+    if (!prompt) return sendError(res, 400, '内容不能为空');
+
+    const AI_TASKS = {
+      'recipe-from-image': {
+        system:
+          '你是中餐菜谱助手。用户会给你一道菜的照片（成品图或食材图）。' +
+          '请只输出 JSON，不要任何解释、不要 markdown 代码块。格式：' +
+          '{"name":"菜名","category":"分类","description":"一句话介绍",' +
+          '"servings":"份量","duration":分钟数,"difficulty":"简单|中等|有点难",' +
+          '"tags":["标签"],"seasonings":[{"name":"食材","amount":"用量"}],' +
+          '"methods":[{"name":"做法名","steps":["一步一句"]}],"notes":"备注"}。' +
+          '要求：分类从家常菜/主食/汤羹/凉菜/早餐/小吃甜点/饮品/其他里挑一个；' +
+          '调料用量写「2 个」「400g」「1 小勺」这种能直接买菜的形式；步骤 4-8 步。' +
+          '看不清的字段就留空字符串或空数组，不要编造。',
+        wantJSON: true,
+        think: true, // 看图要仔细判断，给它开思考
+      },
+      'recipe-normalize': {
+        system:
+          '你是菜谱整理助手。请把用户给的这道菜整理成规范格式，只输出 JSON，' +
+          '不要解释、不要 markdown 代码块。格式：' +
+          '{"name","category","description","servings","duration":分钟数,' +
+          '"difficulty","tags":[],"seasonings":[{"name","amount"}],' +
+          '"methods":[{"name","steps":[]}],"notes"}。' +
+          '做法：统一份量写法（如「2-3 人份」「3 碗」）、把用量写规范、' +
+          '步骤一行一步、补上原文里明显缺的字段。不要凭空增加原文没有的食材。',
+        wantJSON: true,
+      },
+      'cook-plan': {
+        system:
+          '你是厨房调度助手。用户会给今天要一起做的几道菜。' +
+          '请给出并行下厨的顺序：备菜可以并行，热灶必须串行，等待（腌/炖）时去做别的。' +
+          '只输出 JSON，不要解释。格式：' +
+          '{"prep":["备菜事项"],"sequence":[{"step":1,"what":"做什么","dish":"哪道菜","why":"为什么这么做"}],' +
+          '"tips":["提醒"]}。',
+        wantJSON: true,
+      },
+    };
+
+    const t = AI_TASKS[task];
+    if (!t) return sendError(res, 400, '不认识这个 AI 任务');
+
+    const userContent = imageUrl
+      ? [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: imageUrl } }]
+      : prompt;
+    const r = await callAI(
+      [{ role: 'system', content: t.system }, { role: 'user', content: userContent }],
+      { wantJSON: t.wantJSON, think: !!t.think }
+    );
+    if (!r.ok) return sendJSON(res, 200, { ok: true, data: { ok: false, error: r.error } });
+    if (t.wantJSON && !r.json) {
+      return sendJSON(res, 200, {
+        ok: true,
+        data: { ok: false, error: 'AI 的回复看不懂（不是合法 JSON），可以再试一次' },
+      });
+    }
+    return sendJSON(res, 200, {
+      ok: true,
+      data: { ok: true, result: t.wantJSON ? r.json : r.text, usage: r.usage, model: r.model },
+    });
   }
 
   // GET /api/state —— 全量状态（家庭规模数据很小，一次取完最省事）

@@ -9,6 +9,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const http = require('http'); // [14] 起假 AI 服务器用
 const { spawn } = require('child_process');
 
 const ROOT = __dirname;
@@ -541,6 +542,85 @@ async function main() {
   const backups = fs.readdirSync(path.join(TMP, 'bad', 'data')).filter((f) => f.includes('.corrupt-'));
   ok('坏文件留了备份', backups.length === 1, backups);
   await stop(bad);
+
+  /* ---------- AI 代理（用假 AI 服务器，不联网不花钱） ---------- */
+  console.log('\n[14] AI 代理');
+  // 起一个假的 AI 服务，验证代理逻辑：think 剥离、JSON 提取、错误降级、超时
+  const MOCK_PORT = 8902;
+  const mock = http.createServer((rq, rs) => {
+    let body = '';
+    rq.on('data', (c) => (body += c));
+    rq.on('end', () => {
+      rs.setHeader('Content-Type', 'application/json');
+      if (rq.url.includes('boom401')) {
+        rs.statusCode = 401;
+        return rs.end(JSON.stringify({ error: { message: 'invalid api key' } }));
+      }
+      if (rq.url.includes('boom429')) {
+        rs.statusCode = 429;
+        return rs.end(JSON.stringify({ error: { message: 'rate limited' } }));
+      }
+      if (rq.url.includes('garbage')) {
+        return rs.end(JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: '<think>想了一下</think>这不是 JSON' } }],
+        }));
+      }
+      // 正常回复：思考过程混在 content 里，外面还套了 ```json 围栏
+      return rs.end(JSON.stringify({
+        model: 'MiniMax-M3',
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+              content:
+                '<think>用户要做调度，我先想步骤</think>\n\n```json\n{"name":"番茄炒蛋",' +
+                '"sequence":[{"step":1,"what":"先炒蛋"}],"tips":["花生最后放"]}\n```\n\n以上供参考。',
+            },
+          },
+        ],
+        usage: { total_tokens: 123 },
+      }));
+    });
+  });
+  await new Promise((r) => mock.listen(MOCK_PORT, '127.0.0.1', r));
+
+  const ai = await boot('ai', (dataDir) => {
+    fs.writeFileSync(
+      path.join(dataDir, 'ai.json'),
+      JSON.stringify({
+        enabled: true,
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        model: 'MiniMax-M3',
+        apiKey: 'test-key-not-real',
+        timeoutMs: 3000,
+      }),
+      'utf8'
+    );
+  });
+
+  // 状态接口：绝不能吐出 key
+  const aiStatus = (await get('/api/ai')).body.data;
+  ok('AI 状态说已配置', aiStatus.enabled === true && aiStatus.hasKey === true, aiStatus);
+  ok('AI 状态不含 apiKey 字段', !('apiKey' in aiStatus), aiStatus);
+  ok('AI 状态文件里没有 key 明文', JSON.stringify(aiStatus).indexOf('test-key') === -1, aiStatus);
+
+  // 正常调用：think 被剥离、围栏被解开、JSON 被正确抽出
+  const cook = await post('/api/ai/chat', { task: 'cook-plan', prompt: '今天做番茄炒蛋' });
+  ok('AI 调用成功', cook.body.data.ok === true, cook.body.data);
+  eq('think 内容被剥掉了', cook.body.data.result.name, '番茄炒蛋');
+  eq('围栏里的 JSON 被正确解析', cook.body.data.result.sequence[0].what, '先炒蛋');
+  eq('多字段都解析出来了', cook.body.data.result.tips[0], '花生最后放');
+  ok('usage 被带回来', cook.body.data.usage.total_tokens === 123, cook.body.data.usage);
+
+  // AI 不可用时要有话说人话，而不是崩
+  const badTask = await post('/api/ai/chat', { task: '不存在的任务', prompt: 'x' });
+  eq('未知 task 被拒', badTask.status, 400);
+
+  const emptyPrompt = await post('/api/ai/chat', { task: 'cook-plan', prompt: '' });
+  eq('空内容被拒', emptyPrompt.status, 400);
+
+  await stop(ai);
+  await new Promise((r) => mock.close(r));
 
   /* ---------- 收尾 ---------- */
   fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5 });
