@@ -297,7 +297,87 @@ async function loadState(silent) {
 
 let sheetOnMount = null;
 
-function openSheet({ title, body, foot, onMount }) {
+/**
+ * 表单草稿：填到一半被误关掉不该白填。
+ * key = 菜品 id（新菜用 __new__），值是打开时的表单基线。
+ * 关掉时如果内容变了，存进 dishDrafts，下次打开同一条自动恢复。
+ */
+const dishDrafts = new Map();
+let sheetBaseline = null; // 打开时的表单快照；null = 不做脏检查
+let sheetDraftKey = null; // 这次草稿归属谁
+
+/**
+ * 抓当前弹层里所有可编辑控件的值，用来判断「有没有改过」和存草稿。
+ * 用 id 区分普通字段，用 data-act+data-i 区分调料行/做法行（它们没有 id）。
+ */
+function snapshotSheetInputs() {
+  const out = {};
+  const root = $('#modalRoot');
+  if (!root) return out;
+  root
+    .querySelectorAll(
+      'input[id], textarea[id], select[id], input[data-act="season-name"], input[data-act="season-amt"], input[data-act="method-name"], textarea[data-act="method-steps"]'
+    )
+    .forEach((el) => {
+      const k = el.id || `${el.dataset.act}:${el.dataset.i || ''}`;
+      out[k] = el.type === 'checkbox' ? el.checked : el.value;
+    });
+  return out;
+}
+
+function sheetIsDirty() {
+  if (!sheetBaseline) return false;
+  return JSON.stringify(snapshotSheetInputs()) !== JSON.stringify(sheetBaseline);
+}
+
+/** 把草稿值盖回表单控件（用于恢复上次没保存的内容） */
+function applySheetInputs(snap) {
+  const root = $('#modalRoot');
+  if (!root || !snap) return;
+  root
+    .querySelectorAll(
+      'input[id], textarea[id], select[id], input[data-act="season-name"], input[data-act="season-amt"], input[data-act="method-name"], textarea[data-act="method-steps"]'
+    )
+    .forEach((el) => {
+      const k = el.id || `${el.dataset.act}:${el.dataset.i || ''}`;
+      if (!(k in snap)) return;
+      if (el.type === 'checkbox') el.checked = !!snap[k];
+      // 文件框的 value 只能置空，赋别的值浏览器会抛异常并中断后面的恢复
+      else if (el.type === 'file') { /* 跳过 */ }
+      else el.value = snap[k];
+    });
+}
+
+/** 存草稿（只在真正关闭、且确实改过内容时调用） */
+function stashSheetDraft() {
+  if (!sheetDraftKey || !sheetBaseline) return;
+  if (!sheetIsDirty()) {
+    // 内容和打开时一样，不用留草稿
+    dishDrafts.delete(sheetDraftKey);
+    return;
+  }
+  dishDrafts.set(sheetDraftKey, snapshotSheetInputs());
+}
+
+/**
+ * 用户主动关闭弹层。
+ *
+ * 这里刻意不弹「确定放弃吗」——录菜是高频操作，填到一半被模态框打断很烦，
+ * 而用户真正的诉求只是「别把我填的弄丢」。所以改成：
+ * 静默存草稿 + 一句提示，内容一定能捞回来，也不用他做决定。
+ */
+function requestCloseSheet() {
+  if (!sheetBaseline) return closeSheet();
+  if (sheetIsDirty()) {
+    stashSheetDraft();
+    toast('已存成草稿，下次打开这道菜自动接着填');
+  } else {
+    dishDrafts.delete(sheetDraftKey);
+  }
+  closeSheet();
+}
+
+function openSheet({ title, body, foot, onMount, draftKey }) {
   const root = $('#modalRoot');
   root.innerHTML = `
     <div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(title)}">
@@ -312,6 +392,20 @@ function openSheet({ title, body, foot, onMount }) {
   document.body.style.overflow = 'hidden';
   sheetOnMount = onMount || null;
   if (sheetOnMount) sheetOnMount(root);
+
+  // 草稿恢复：有上次没保存的内容就盖回表单，并提示一声
+  sheetDraftKey = draftKey || null;
+  const saved = sheetDraftKey ? dishDrafts.get(sheetDraftKey) : null;
+  // 存草稿那一刻可能一个字段都没填（打开就手滑关掉），
+  // 这种空草稿直接丢掉，别下次开门就弹「已恢复」吓人
+  const worthRestoring =
+    saved && Object.values(saved).some((v) => (typeof v === 'string' ? v.trim() : v === true));
+  if (worthRestoring) {
+    applySheetInputs(saved);
+    toast('已恢复上次没保存的内容');
+  }
+  // 基线必须在恢复之后取：草稿已经落袋，就不该再警告「有未保存内容」
+  sheetBaseline = sheetDraftKey ? snapshotSheetInputs() : null;
 }
 
 function closeSheet() {
@@ -320,13 +414,15 @@ function closeSheet() {
   root.innerHTML = '';
   document.body.style.overflow = '';
   sheetOnMount = null;
+  sheetBaseline = null;
+  sheetDraftKey = null;
 }
 
 document.addEventListener('click', (e) => {
-  if (e.target === $('#modalRoot')) closeSheet();
+  if (e.target === $('#modalRoot')) requestCloseSheet();
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('#modalRoot').hidden) closeSheet();
+  if (e.key === 'Escape' && !$('#modalRoot').hidden) requestCloseSheet();
 });
 
 /* =========================================================
@@ -1666,6 +1762,8 @@ function openDishEditor(dish) {
       </div>`,
     foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
            <button class="btn" data-act="save-dish">${dish ? '保存' : '添加'}</button>`,
+    // 填到一半被误关掉不该白填：内容变了会拦一下，并留草稿
+    draftKey: dish ? dish.id : '__new__',
   });
 
   $('#fName').focus();
@@ -2094,9 +2192,13 @@ const ACTIONS = {
       if (S.draft.isNew) {
         await api('POST', '/api/dishes', d);
         toast(`「${d.name}」已加入菜单`);
+        // 新菜已经有自己的 id 了，__new__ 草稿顺手清掉，
+        // 否则下次「记一道菜」会捞出刚存进去的那份
+        dishDrafts.delete('__new__');
       } else {
         await api('PUT', `/api/dishes/${S.draft.id}`, d);
         toast('已保存');
+        dishDrafts.delete(S.draft.id);
       }
       closeSheet();
       await loadState(true);
@@ -2529,7 +2631,8 @@ const ACTIONS = {
   },
 
   'close-sheet'() {
-    closeSheet();
+    // 走守卫：填了一半也走这里，草稿照样存下来
+    requestCloseSheet();
   },
 };
 

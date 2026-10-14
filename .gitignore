@@ -2,6 +2,13 @@
 data/
 uploads/
 
+# ⚠️ 本地 AI 配置，含 API Key —— 绝对不能提交
+# 下面 data/ 已经涵盖了这条，这里再单独写一遍是双保险：
+# 万一以后有人调整了上面的规则，这个文件也不会漏出去。
+data/ai.json
+*.ai.json
+ai.local.json
+
 # 打包产物（含内置 Node 运行时，约 31MB）
 package/
 
