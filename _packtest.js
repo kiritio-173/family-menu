@@ -32,10 +32,31 @@ async function main() {
 
   const APP = path.join(TMP, '家庭菜单-便携版');
   const NODE = path.join(APP, 'runtime', 'node.exe');
+
+  // 包有两种形态，断言要分开写：
+  //   full  —— 默认打包，带了当前菜单数据
+  //   empty —— build-package.js --empty，只带分类骨架，首次启动由 server.js 生成示例菜
+  const isEmpty = !fs.existsSync(path.join(APP, 'data', 'dishes.json'));
+
   ok('包内有自带 runtime/node.exe', fs.existsSync(NODE));
   ok('没有分发 orders.json', !fs.existsSync(path.join(APP, 'data', 'orders.json')));
   ok('没有分发 pantry.json', !fs.existsSync(path.join(APP, 'data', 'pantry.json')));
-  ok('分发了 households.json', fs.existsSync(path.join(APP, 'data', 'households.json')));
+  ok(
+    isEmpty ? 'empty 包不分发 households.json' : 'full 包分发 households.json',
+    isEmpty
+      ? !fs.existsSync(path.join(APP, 'data', 'households.json'))
+      : fs.existsSync(path.join(APP, 'data', 'households.json'))
+  );
+  if (isEmpty) {
+    // 干净包只允许有分类骨架，不能夹带打包者的任何数据文件。
+    // 必须在冷启动之前查：server.js 一跑起来就会把这些文件生成出来。
+    // 另外别用菜名判断泄漏：server.js 自带的默认示例菜和用户可能录入的菜重名，
+    // 靠名字判断会误报。
+    const shipped = fs.readdirSync(path.join(APP, 'data'));
+    ok('empty 包只分发分类骨架', JSON.stringify(shipped) === '["categories.json"]', shipped);
+  } else {
+    ok('full 包带上了 dishes.json', fs.existsSync(path.join(APP, 'data', 'dishes.json')));
+  }
   ok('分发了 4 个启动文件',
     ['启动家庭菜单.bat', '安装到电脑.bat', '使用说明.txt', '创建快捷方式.ps1'].every((f) =>
       fs.existsSync(path.join(APP, f))
@@ -64,7 +85,11 @@ async function main() {
   };
 
   let st = (await api('GET', '/api/state')).body.data;
-  ok('首页能拿到菜谱', st.dishes.length === 5, st.dishes.length);
+  if (isEmpty) {
+    ok('empty 包首启由 server.js 生成示例菜', st.dishes.length > 0, st.dishes.map((d) => d.name));
+  } else {
+    ok('首页能拿到菜谱', st.dishes.length === 5, st.dishes.length);
+  }
   ok('默认带 1 个家庭', st.households.length === 1, st.households);
   ok('默认家庭成员还在', st.households[0].members[0].name === '我', st.households[0].members);
   ok('库存初始为空', st.pantry.length === 0);

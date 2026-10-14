@@ -355,6 +355,11 @@ function main() {
   const uploadSrc = path.join(ROOT, 'uploads');
   const upCount = fs.existsSync(uploadSrc) ? fs.readdirSync(uploadSrc).length : 0;
 
+  // 先清空包内 data 目录：就地覆盖时（上一份便携版还在运行，目录删不掉）
+  // 上一次残留的文件不会自动消失，不显式清掉的话，
+  // 后面打 --empty 会把上一份的私人菜谱一起打进要公开发布的包里。
+  rmrf(path.join(APP, 'data'));
+
   if (includeData) {
     // 当前菜单数据 + 菜品照片一起带走
     copyDir(path.join(ROOT, 'data'), path.join(APP, 'data'));
