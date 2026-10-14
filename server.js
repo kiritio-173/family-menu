@@ -724,6 +724,54 @@ function sendError(res, code, message) {
   sendJSON(res, code, { ok: false, error: message });
 }
 
+/* ------------------------------------------------------------------ *
+ * 管理口令
+ *
+ * 口令是拦「乱改菜谱」的，不是拦网络攻击者的 —— 威胁模型是同一个
+ * 局域网里手欠的家里人。所以没必要上完整的账号体系，一个口令换一枚
+ * 会话 token 就够：口令不落前端，token 走请求头，服务端自己判定。
+ *
+ * 没设口令时一律放行，保持「装了就能用」的默认状态。
+ * ------------------------------------------------------------------ */
+
+const SESSION_TTL = 12 * 60 * 60 * 1000; // 12 小时
+const sessions = new Map(); // token -> 过期时间戳
+
+function pruneSessions() {
+  const now = Date.now();
+  for (const [t, exp] of sessions) if (exp <= now) sessions.delete(t);
+}
+
+function issueSession() {
+  if (sessions.size > 200) pruneSessions();
+  const token = crypto.randomBytes(24).toString('hex');
+  sessions.set(token, Date.now() + SESSION_TTL);
+  return token;
+}
+
+/** 没设口令 → 放行；设了 → 必须带有效 token */
+function isAuthed(req) {
+  const pin = state.settings.adminPin;
+  if (!pin) return true;
+  const token = req.headers['x-auth-token'];
+  if (!token || typeof token !== 'string') return false;
+  const exp = sessions.get(token);
+  if (!exp) return false;
+  if (Date.now() > exp) {
+    sessions.delete(token);
+    return false;
+  }
+  sessions.set(token, Date.now() + SESSION_TTL); // 滑动续期
+  return true;
+}
+
+/**
+ * 需要管理权限的写操作。
+ * 点餐、库存、本周计划**不在列** —— 那是家里人每天都要用的，
+ * 口令不该挡着他们正常吃饭。
+ */
+const ADMIN_WRITES = new Set(['households', 'dishes', 'categories', 'settings', 'import', 'upload']);
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -775,15 +823,38 @@ async function handleAPI(req, res, url) {
   const route = seg.slice(1);
   const method = req.method;
 
+  // ---- 登录换会话 token ----
+  if (method === 'POST' && route.length === 1 && route[0] === 'auth') {
+    const body = await readBody(req);
+    const pin = state.settings.adminPin || '';
+    const given = typeof body.pin === 'string' ? body.pin.trim() : '';
+    if (!pin) return sendJSON(res, 200, { ok: true, data: { token: '', hasPin: false } });
+    if (given !== pin) return sendError(res, 401, '口令不对');
+    return sendJSON(res, 200, { ok: true, data: { token: issueSession(), hasPin: true } });
+  }
+
+  // ---- 统一守卫 ----
+  // 管理类的写操作要有有效会话；导出/导入因为文件里含口令明文，同样要认证。
+  // 点餐、库存、本周计划不在保护范围内 —— 那是家里人每天都要用的。
+  const needsAuth =
+    route[0] === 'export' ||
+    (method !== 'GET' && method !== 'HEAD' && ADMIN_WRITES.has(route[0]));
+  if (needsAuth && !isAuthed(req)) {
+    return sendError(res, 401, '需要管理口令，请先在「管理」页解锁');
+  }
+
   // GET /api/state —— 全量状态（家庭规模数据很小，一次取完最省事）
   if (method === 'GET' && route.length === 1 && route[0] === 'state') {
+    // 口令绝不能跟着 state 一起发出去：否则局域网里任何人按 F12
+    // 就能在返回的 JSON 里读到明文，管理口令形同虚设。
+    const { adminPin, ...pubSettings } = state.settings;
     return sendJSON(res, 200, {
       ok: true,
       data: {
         categories: state.categories,
         dishes: state.dishes,
         orders: state.orders,
-        settings: state.settings,
+        settings: { ...pubSettings, hasPin: !!adminPin },
         households: state.households,
         pantry: state.pantry,
         plans: state.plans,
@@ -1126,7 +1197,16 @@ async function handleAPI(req, res, url) {
     const s = state.settings;
     if (typeof body.shopName === 'string') s.shopName = safeText(body.shopName, 30).trim() || '家庭菜单';
     if (typeof body.welcome === 'string') s.welcome = safeText(body.welcome, 120);
-    if (typeof body.adminPin === 'string') s.adminPin = safeText(body.adminPin, 12).trim();
+    // 口令三态：不传 = 不动；传空串 = 取消；传非空 = 改新值。
+    // 前端拿不到旧口令明文了，所以「清除」必须靠显式标记，不能靠留空猜。
+    if (body.clearAdminPin === true) {
+      s.adminPin = '';
+      sessions.clear(); // 口令没了，所有会话作废
+    } else if (typeof body.adminPin === 'string' && body.adminPin.trim()) {
+      const next = safeText(body.adminPin, 12).trim();
+      if (next !== s.adminPin) sessions.clear(); // 换口令了，旧会话全部失效
+      s.adminPin = next;
+    }
     if (typeof body.currentHouseholdId === 'string') {
       const id = safeText(body.currentHouseholdId, 40);
       // 只认存在的家庭，防止前端写进脏 id
@@ -1139,7 +1219,12 @@ async function handleAPI(req, res, url) {
         .slice(0, 400);
     }
     scheduleSave('settings');
-    return sendJSON(res, 200, { ok: true, data: s });
+    // 响应里同样不能带口令明文
+    const { adminPin, ...safeSettings } = s;
+    return sendJSON(res, 200, {
+      ok: true,
+      data: { ...safeSettings, hasPin: !!adminPin },
+    });
   }
 
   // ---- 导入 / 导出 ----
@@ -1200,7 +1285,12 @@ async function handleAPI(req, res, url) {
         .filter((pl) => (seen.has(pl.id) ? false : (seen.add(pl.id), true)));
     }
     if (src.settings && typeof src.settings === 'object') {
-      state.settings = { ...defaultState().settings, ...src.settings };
+      // hasPin 是给前端的派生标记，不是真配置，别让它进磁盘
+      const { hasPin: _ignored, ...incoming } = src.settings;
+      const prevPin = state.settings.adminPin;
+      state.settings = { ...defaultState().settings, ...incoming };
+      // 备份可能把口令换了或取消了，旧会话全部作废
+      if (state.settings.adminPin !== prevPin) sessions.clear();
     }
     // 兜底：任何指向已删除家庭的记录拉回第一个家庭
     const hhIds = new Set(state.households.map((h) => h.id));

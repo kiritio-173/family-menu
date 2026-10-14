@@ -33,12 +33,13 @@ function ok(name, cond, extra) {
 
 const eq = (name, got, want) => ok(name, JSON.stringify(got) === JSON.stringify(want), { got, want });
 
-async function req(method, p, body) {
+async function req(method, p, body, token) {
   const opt = { method, headers: {} };
   if (body !== undefined) {
     opt.headers['Content-Type'] = 'application/json';
     opt.body = JSON.stringify(body);
   }
+  if (token) opt.headers['X-Auth-Token'] = token;
   const res = await fetch(BASE + p, opt);
   const text = await res.text();
   let json = {};
@@ -50,10 +51,10 @@ async function req(method, p, body) {
   return { status: res.status, body: json };
 }
 
-const get = (p) => req('GET', p);
-const post = (p, b) => req('POST', p, b === undefined ? {} : b);
-const put = (p, b) => req('PUT', p, b);
-const del = (p) => req('DELETE', p);
+const get = (p, t) => req('GET', p, undefined, t);
+const post = (p, b, t) => req('POST', p, b === undefined ? {} : b, t);
+const put = (p, b, t) => req('PUT', p, b, t);
+const del = (p, t) => req('DELETE', p, undefined, t);
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -362,10 +363,93 @@ async function main() {
   eq('未知接口 404', (await get('/api/nothing')).status, 404);
   eq('路径穿越被拦', (await fetch(BASE + '/uploads/../../server.js')).status, 404);
 
+  /* ---------- 管理口令 ---------- */
+  console.log('\n[10] 管理口令');
+  // 得放在主实例还活着的时候跑：下面几组会反复停起子实例
+  const noPin = await post('/api/dishes', { name: '开放期新增', category: '其他' });
+  eq('没设口令时随便改', noPin.status, 200);
+  await del(`/api/dishes/${noPin.body.data.id}`);
+
+  // 首次设口令
+  const setPin = await put('/api/settings', { adminPin: '2468' });
+  eq('可以设置口令', setPin.status, 200);
+  ok('设置响应不回显口令明文', !('adminPin' in (setPin.body.data || {})), setPin.body.data);
+  eq('设置响应标记已加锁', setPin.body.data.hasPin, true);
+
+  // state 里也绝不能有明文
+  const stLocked = (await get('/api/state')).body.data;
+  ok('state 不下发口令明文', !('adminPin' in stLocked.settings), Object.keys(stLocked.settings));
+  eq('state 只告诉前端有没有锁', stLocked.settings.hasPin, true);
+  ok('整个 state 里搜不到口令值', JSON.stringify(stLocked).indexOf('2468') === -1, '泄漏');
+
+  // 没 token 的写操作要被拒
+  eq('没 token 改菜谱 401', (await post('/api/dishes', { name: '偷偷加的', category: '其他' })).status, 401);
+  eq('没 token 删家庭 401', (await del(`/api/households/${h301.id}`)).status, 401);
+  eq('没 token 改设置 401', (await put('/api/settings', { shopName: '被改了' })).status, 401);
+  eq('没 token 导出 401', (await get('/api/export')).status, 401);
+  eq('没 token 导入 401', (await post('/api/import', { dishes: [] })).status, 401);
+  const afterFail = (await get('/api/state')).body.data;
+  eq('被拒的操作没真的生效', afterFail.settings.shopName, stLocked.settings.shopName);
+  eq('被拒的加菜没进菜单', afterFail.dishes.length, stLocked.dishes.length);
+  eq('被拒的删家庭没生效', afterFail.households.length, stLocked.households.length);
+
+  // 口令不对
+  eq('口令不对 401', (await post('/api/auth', { pin: '0000' })).status, 401);
+
+  // 正常登录
+  const login = await post('/api/auth', { pin: '2468' });
+  eq('口令对就发 token', login.status, 200);
+  const TOKEN = login.body.data.token;
+  ok('拿到的是非空 token', typeof TOKEN === 'string' && TOKEN.length >= 32, TOKEN);
+  eq('登录响应标了 hasPin', login.body.data.hasPin, true);
+
+  // 带 token 就能改了
+  const withTok = await post('/api/dishes', { name: '解锁后新增', category: '其他' }, TOKEN);
+  eq('带 token 能加菜', withTok.status, 200);
+  eq('菜真的加进去了', withTok.body.data.name, '解锁后新增');
+  eq('带 token 能改设置', (await put('/api/settings', { shopName: '合法改名' }, TOKEN)).status, 200);
+  eq('带 token 能导出', (await get('/api/export', TOKEN)).status, 200);
+
+  // 乱 token 不行
+  eq('伪造 token 401', (await post('/api/dishes', { name: 'x', category: '其他' }, 'deadbeef')).status, 401);
+
+  // 家人的日常功能不该被口令挡住
+  eq('没 token 也能点餐', (await post('/api/orders', { dishName: '随便点点', householdId: h301.id })).status, 200);
+  eq('没 token 也能记库存', (await post('/api/pantry', { householdId: h301.id, name: '牛奶', category: '奶制品', quantity: 1, unit: '盒' })).status, 200);
+  eq('没 token 也能排本周计划', (await post('/api/plans/items', { householdId: h301.id, name: '随手加的' })).status, 200);
+
+  // 换口令 → 旧 token 作废
+  eq('换口令', (await put('/api/settings', { adminPin: '1111' }, TOKEN)).status, 200);
+  eq('旧 token 立刻失效', (await post('/api/dishes', { name: 'y', category: '其他' }, TOKEN)).status, 401);
+  const relogin = await post('/api/auth', { pin: '1111' });
+  eq('用新口令能重新登录', relogin.status, 200);
+  const T2 = relogin.body.data.token;
+  eq('新 token 可用', (await post('/api/dishes', { name: 'z', category: '其他' }, T2)).status, 200);
+
+  // 取消口令 → 全部恢复开放
+  eq('取消口令', (await put('/api/settings', { clearAdminPin: true }, T2)).status, 200);
+  eq('取消后 hasPin 为 false', (await get('/api/state')).body.data.settings.hasPin, false);
+  eq('取消后无需 token 也能改', (await post('/api/dishes', { name: '自由了', category: '其他' })).status, 200);
+  eq('取消后无需 token 也能导出', (await get('/api/export')).status, 200);
+
+  // 口令三态：不传 adminPin 不应误清空
+  await put('/api/settings', { adminPin: '9999' });
+  // 换过口令了，之前的会话都作废，得重新登录才动得了设置
+  const T3 = (await post('/api/auth', { pin: '9999' })).body.data.token || '';
+  const keep = await put('/api/settings', { shopName: '只改店名' }, T3);
+  eq('不传 adminPin 时口令不变', (await get('/api/state')).body.data.settings.hasPin, true);
+  eq('确实只改了店名', keep.body.data.shopName, '只改店名');
+
+  // 收拾干净：把测试留下的菜删掉、口令取消
+  for (const d of (await get('/api/state')).body.data.dishes) {
+    if (['解锁后新增', 'z', '自由了', '开放期新增'].includes(d.name)) await del(`/api/dishes/${d.id}`, T3);
+  }
+  await put('/api/settings', { clearAdminPin: true }, T3);
+
   await stop(child);
 
   /* ---------- 旧数据迁移 ---------- */
-  console.log('\n[10] 旧数据自动迁移');
+  console.log('\n[11] 旧数据自动迁移');
   const legacy = await boot('legacy', (dataDir) => {
     fs.writeFileSync(path.join(dataDir, 'categories.json'), JSON.stringify([{ id: 'c1', name: '家常菜', order: 1 }]), 'utf8');
     fs.writeFileSync(
@@ -412,7 +496,7 @@ async function main() {
   ok('pantry.json 已生成', savedPantry);
 
   /* ---------- 重复 id ---------- */
-  console.log('\n[11] 重复 id 去重');
+  console.log('\n[12] 重复 id 去重');
   const dup = await boot('dup', (dataDir) => {
     fs.writeFileSync(
       path.join(dataDir, 'households.json'),
@@ -448,7 +532,7 @@ async function main() {
   await stop(dup);
 
   /* ---------- 坏文件自动备份 ---------- */
-  console.log('\n[12] 坏文件不丢数据');
+  console.log('\n[13] 坏文件不丢数据');
   const bad = await boot('bad', (dataDir) => {
     fs.writeFileSync(path.join(dataDir, 'dishes.json'), '{ 这不是 JSON', 'utf8');
   });

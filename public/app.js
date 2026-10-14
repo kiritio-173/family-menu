@@ -16,7 +16,7 @@ const S = {
   pantryCat: '全部',
   pantryFilter: 'all', // all | soon | expired
   planWeek: '', // 正在看的周（周一日期），空 = 本周
-  authed: false,
+  authed: false, // 是否已解锁管理区（没设口令时恒为 true）
   householdId: '', // 当前家庭，存在本机 localStorage：每台设备各选各的
   data: {
     categories: [], dishes: [], orders: [], settings: {},
@@ -246,12 +246,23 @@ function memberStats(name) {
 
 /* ---------------- API ---------------- */
 
+// 管理口令换来的会话 token，存在本机。服务端不再把口令明文下发给前端，
+// 所以前端只能靠这个 token 证明「我已经解锁过」。
+const LS_AUTH = 'familyMenu.authToken';
+const authToken = () => localStorage.getItem(LS_AUTH) || '';
+function setAuthToken(t) {
+  if (t) localStorage.setItem(LS_AUTH, t);
+  else localStorage.removeItem(LS_AUTH);
+}
+
 async function api(method, path, body) {
   const opts = { method, headers: {} };
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
+  const t = authToken();
+  if (t) opts.headers['X-Auth-Token'] = t;
   const res = await fetch(path, opts);
   const text = await res.text();
   let json = {};
@@ -260,6 +271,8 @@ async function api(method, path, body) {
   } catch (_) {
     throw new Error('服务器返回异常');
   }
+  // 401 = 口令不对或会话过期，清掉本地 token 逼用户重新解锁
+  if (res.status === 401) setAuthToken('');
   if (!res.ok || json.ok === false) throw new Error(json.error || `请求失败(${res.status})`);
   return json.data;
 }
@@ -269,6 +282,9 @@ async function loadState(silent) {
     const data = await api('GET', '/api/state');
     S.data = data;
     S.shoppingChecked = new Set(data.settings.shoppingChecked || []);
+    // 没设口令 → 管理区本来就开着；设了 → 看本机有没有有效会话
+    if (!data.settings.hasPin) S.authed = true;
+    else if (!authToken()) S.authed = false;
     // 当前家庭记在这台设备上：A 家选 301、B 家选 502，互不影响
     const list = households();
     const saved = localStorage.getItem(LS_HOUSE);
@@ -1442,8 +1458,8 @@ async function openFoodEditor(item) {
    ========================================================= */
 
 function viewManage() {
-  const pin = S.data.settings.adminPin;
-  if (pin && !S.authed) {
+  // 前端拿不到口令明文了，改成看 hasPin 标记 + 本机有没有会话 token
+  if (S.data.settings.hasPin && !S.authed) {
     return `<div class="empty">
       <span class="empty-emoji">🔒</span>
       <p class="empty-title">管理区已加锁</p>
@@ -1892,8 +1908,22 @@ function openSettings() {
         <input class="input" id="setName" value="${esc(s.shopName)}" /></div>
       <div class="field"><label class="field-label">欢迎语</label>
         <input class="input" id="setWelcome" value="${esc(s.welcome || '')}" /></div>
-      <div class="field"><label class="field-label">管理口令<span class="field-hint">留空表示不锁；开启后只有知道口令的人能改菜谱和家庭</span></label>
-        <input class="input" id="setPin" value="${esc(s.adminPin || '')}" placeholder="例如 1234" /></div>
+      <div class="field"><label class="field-label">管理口令<span class="field-hint">${
+        s.hasPin
+          ? '已开启。填新口令即可更换；不知道旧口令的话找回来在 data/settings.json 里删掉 adminPin'
+          : '留空表示不锁；开启后只有知道口令的人能改菜谱和家庭'
+      }</span></label>
+        <input class="input" id="setPin" type="password" placeholder="${
+          s.hasPin ? '已设置口令，留空表示不修改' : '例如 1234'
+        }" />
+        ${
+          s.hasPin
+            ? `<label class="field-label" style="display:flex;align-items:center;gap:8px;margin-top:10px">
+                 <input type="checkbox" id="setPinClear" style="width:18px;height:18px" />
+                 取消口令保护（勾上后保存即刻生效）
+               </label>`
+            : ''
+        }</div>
       <p class="section-sub">每个家庭的成员在「管理 → 家庭成员」里单独维护。</p>`,
     foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
            <button class="btn" data-act="save-settings">保存</button>`,
@@ -2083,7 +2113,7 @@ const ACTIONS = {
   /* 导航 */
   nav(el) {
     const v = el.dataset.view;
-    if (v === 'manage' && S.data.settings.adminPin && !S.authed) {
+    if (v === 'manage' && S.data.settings.hasPin && !S.authed) {
       S.view = 'manage';
       render();
       promptPin();
@@ -2609,10 +2639,28 @@ const ACTIONS = {
     const body = {
       shopName: v('setName'),
       welcome: v('setWelcome'),
-      adminPin: v('setPin'),
     };
-    await api('PUT', '/api/settings', body);
-    S.authed = !body.adminPin ? true : S.authed;
+    // 口令只有两种改法：填了新值就换，或者勾「清除口令」彻底取消。
+    // 留空 = 什么都不做（服务端认这个三态）。
+    const pin = v('setPin');
+    const clear = $('#setPinClear') && $('#setPinClear').checked;
+    if (clear) body.clearAdminPin = true;
+    else if (pin) body.adminPin = pin;
+    try {
+      await api('PUT', '/api/settings', body);
+    } catch (err) {
+      toast('保存失败：' + err.message);
+      return;
+    }
+    // 换了口令服务端会作废所有会话，这里跟着重新解锁一次免得下一步就 401
+    if (clear) {
+      setAuthToken('');
+      S.authed = true;
+    } else if (pin) {
+      const r = await api('POST', '/api/auth', { pin }).catch(() => null);
+      setAuthToken(r && r.token ? r.token : '');
+      S.authed = !!(r && r.token);
+    }
     closeSheet();
     await loadState(true);
     render();
@@ -2623,8 +2671,34 @@ const ACTIONS = {
   },
 
   /* 数据 */
-  'export-data'() {
-    window.open('/api/export', '_blank');
+  async 'export-data'() {
+    // 备份文件里含口令明文，所以服务端要求认证。
+    // window.open 带不了自定义请求头，只能 fetch 下来再存。
+    try {
+      const t = authToken();
+      const res = await fetch('/api/export', t ? { headers: { 'X-Auth-Token': t } } : undefined);
+      if (res.status === 401) {
+        setAuthToken('');
+        S.authed = false;
+        toast('需要管理口令，请先解锁');
+        promptPin();
+        return;
+      }
+      if (!res.ok) throw new Error(`导出失败(${res.status})`);
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)
+        ? /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition'))[1]
+        : 'menu-backup.json';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      toast('备份已下载');
+    } catch (err) {
+      toast('导出失败：' + err.message);
+    }
   },
   'import-data'() {
     $('#importFile').click();
@@ -2647,15 +2721,21 @@ function promptPin() {
   $('#pinInput').focus();
 }
 
-ACTIONS['check-pin'] = function () {
-  const v = $('#pinInput').value.trim();
-  if (v === (S.data.settings.adminPin || '')) {
+ACTIONS['check-pin'] = async function () {
+  const el = $('#pinInput');
+  if (!el) return;
+  const v = el.value.trim();
+  try {
+    const r = await api('POST', '/api/auth', { pin: v });
+    setAuthToken(r.token || '');
     S.authed = true;
     closeSheet();
     render();
     toast('已解锁');
-  } else {
-    toast('口令不对');
+  } catch (err) {
+    toast(err.message || '口令不对');
+    el.value = '';
+    el.focus();
   }
 };
 
