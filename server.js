@@ -38,10 +38,29 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.8.0',
+    date: '2026-10-15',
+    title: '留言板 + 菜品互动区',
+    items: [
+      '底部多了第 6 个页签「💬 留言」：一家人在这儿说话 ——「今晚我做饭」「冰箱里还有排骨」「谁去买菜」',
+      '写的时候先点一下自己是谁（头像那一排），还能挑个贴纸 🍳🛒🌶️⚠️，一眼扫过去就知道是谁说的',
+      '每条留言都能 👍❤️😂😋🙏🔥，按一下就算回应了，不打字也行；再按一下取消',
+      '能「🙋 我来」认领：「今晚我做饭」「我去买菜」——认领了别人一眼就看到，也不会两个人都说「我来做」',
+      '能回复，一条留言底下能接一串话，接话不用另开一条',
+      '菜单页每张菜卡片底下多一排：**🍽 想吃 / 👩‍🍳 我来做 / 💬**，点「想吃」的人是谁、谁认领了下厨，一眼就清楚',
+      '每道菜也能单独留言：「这道糖放少一点」「上次太咸了」——点 💬 打开就是这道菜的专属留言',
+      '留言板也支持批量删：点「☑ 批量操作」勾上几条一起删',
+      '页签上的数字是「今天」家里说了几句，不是总数 —— 总数只会越滚越大，越滚越没意义',
+      '留言按家庭分开，A 家的话不会串到 B 家去；和家庭成员一样，不用管理口令就能写',
+      '删掉一道菜不会抹掉别人在它下面说的话：留言内容留着，退回留言板继续看得到',
+      '备份（zip）里也带上留言和投票，恢复回来是原样',
+    ],
+  },
   {
     version: '1.7.0',
     date: '2026-10-15',
@@ -322,6 +341,9 @@ const FILES = {
   households: 'households.json',
   pantry: 'pantry.json',
   plans: 'plans.json',
+  // 留言板 + 菜品互动（想吃 / 我来做）。合成一个文件：这两样都是
+  // 「家里人随手写的短内容」，拆成两个文件只会让备份/恢复多一条分支。
+  notes: 'notes.json',
 };
 
 const state = {};
@@ -489,6 +511,8 @@ function defaultState() {
     ],
     pantry: [],
     plans: [],
+    // 留言板留言 + 每道菜的「想吃 / 我来做」投票
+    notes: { notes: [], votes: {} },
     settings: {
       shopName: '家庭菜单',
       adminPin: '',
@@ -836,6 +860,28 @@ function loadState() {
     if (!hhIds.has(pl.householdId)) pl.householdId = fallbackH;
   });
 
+  // 留言板：老版本没这个文件，走默认空板；坏数据按 normBoard 兜回来
+  state.notes = normBoard(state.notes);
+  const seenN = new Set();
+  state.notes.notes = state.notes.notes.filter((n) =>
+    seenN.has(n.id) ? false : (seenN.add(n.id), true)
+  );
+  state.notes.notes.forEach((n) => {
+    if (!hhIds.has(n.householdId)) n.householdId = fallbackH;
+  });
+  // 留言挂的菜要是没了，整条退回成普通留言，别留一条谁也找不到的孤儿
+  const dishIds = new Set(state.dishes.map((d) => d.id));
+  state.notes.notes.forEach((n) => {
+    if (n.kind === 'dish' && !dishIds.has(n.dishId)) {
+      n.kind = 'board';
+      n.dishId = null;
+    }
+  });
+  // 投票挂在已删掉的菜上，纯垃圾，直接扔
+  Object.keys(state.notes.votes).forEach((id) => {
+    if (!dishIds.has(id)) delete state.notes.votes[id];
+  });
+
   if (!hhIds.has(state.settings.currentHouseholdId)) {
     state.settings.currentHouseholdId = fallbackH;
   }
@@ -1061,6 +1107,7 @@ function backupPayload() {
     households: state.households,
     pantry: state.pantry,
     plans: state.plans,
+    notes: state.notes,
   };
 }
 
@@ -1097,6 +1144,10 @@ function applyBackup(src) {
       .filter(Boolean)
       .filter((pl) => (seen.has(pl.id) ? false : (seen.add(pl.id), true)));
   }
+  // 家庭要先恢复，留言的 householdId 才有地方挂 —— 上一段已经恢复了
+  if (src.notes && typeof src.notes === 'object') {
+    state.notes = normBoard(src.notes);
+  }
   if (src.settings && typeof src.settings === 'object') {
     // hasPin 是给前端的派生标记，不是真配置，别让它进磁盘
     const { hasPin: _ignored, ...incoming } = src.settings;
@@ -1119,6 +1170,9 @@ function applyBackup(src) {
   state.plans.forEach((pl) => {
     if (!hhIds.has(pl.householdId)) pl.householdId = state.households[0].id;
   });
+  state.notes.notes.forEach((n) => {
+    if (!hhIds.has(n.householdId)) n.householdId = state.households[0].id;
+  });
 
   saveNow();
   return {
@@ -1126,6 +1180,7 @@ function applyBackup(src) {
     households: state.households.length,
     pantry: state.pantry.length,
     plans: state.plans.length,
+    notes: state.notes.notes.length,
   };
 }
 const PHOTO_RE = /\.(jpg|jpeg|png|gif|webp|avif)$/i;
@@ -1356,6 +1411,125 @@ function normOrder(input, prev, keepInputId) {
     date: safeText(input.date, 20) || base.date || todayStr(),
     createdAt: base.createdAt || input.createdAt || nowISO(),
     updatedAt: nowISO(),
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * 留言板 / 菜品互动
+ *
+ * 一条留言同时是三件事的载体：正文、别人的表情回应、楼中楼回复。
+ * 「我来认领」也挂在留言上（今晚我做饭 / 我去买菜），一条留言只能有
+ * 一个人认领 —— 两个人都说「我来做」不如没认领。
+ * ------------------------------------------------------------------ */
+
+// 能用的表情就这几个：够表达意思，又不至于把留言板变成表情包展销
+const REACT_EMOJI = ['👍', '❤️', '😂', '😋', '🙏', '🔥'];
+const STICKER_EMOJI = ['🍳', '🛒', '🌶️', '🍚', '🎉', '⚠️', '💤', '🧊'];
+const MAX_REACTIONS = 6; // 一条留言最多几种不同的表情，够表态也够看得清
+const MAX_REPLIES = 30;
+
+function normReactions(input) {
+  const out = {};
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return out;
+  for (const emoji of REACT_EMOJI) {
+    const list = input[emoji];
+    if (!Array.isArray(list) || !list.length) continue;
+    // 同一个人点两次只算一次；名字去重后限量，防止有人狂刷
+    const who = [...new Set(list.map((w) => safeText(w, 20).trim()).filter(Boolean))].slice(0, 20);
+    if (who.length) out[emoji] = who;
+  }
+  return out;
+}
+
+function normReplies(input) {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set();
+  return input
+    .map((r) => {
+      if (!r || typeof r !== 'object') return null;
+      const text = safeText(r.text, 300).trim();
+      if (!text) return null;
+      let id = safeText(r.id, 40);
+      if (!id || seen.has(id)) id = uid('r_');
+      seen.add(id);
+      return {
+        id,
+        author: safeText(r.author, 20).trim() || '匿名',
+        text,
+        createdAt: safeText(r.createdAt, 30) || nowISO(),
+      };
+    })
+    .filter(Boolean)
+    .slice(-MAX_REPLIES); // 只留最近的，多的丢掉
+}
+
+function normNote(input, prev, keepInputId) {
+  const base = prev || {};
+  const kind = input.kind === 'dish' ? 'dish' : 'board';
+  const text = safeText(input.text, 500).trim();
+  // 菜品留言必须挂着菜
+  const dishId = kind === 'dish' ? safeText(input.dishId ?? base.dishId, 40) || null : null;
+
+  let claim = base.claim && base.claim.by
+    ? { by: safeText(base.claim.by, 20).trim() || base.claim.by, at: base.claim.at || base.createdAt || nowISO() }
+    : null;
+  if (input.claim !== undefined) {
+    const by = safeText(input.claim && typeof input.claim === 'object' ? input.claim.by : input.claim, 20).trim();
+    // 传空字符串 = 取消认领
+    claim = by ? { by, at: nowISO() } : null;
+  }
+
+  const sticker = safeText(input.sticker, 8);
+  return {
+    id: base.id || (keepInputId && typeof input.id === 'string' && input.id ? input.id : uid('n_')),
+    householdId: resolveHouseholdId(input.householdId ?? base.householdId),
+    kind,
+    dishId,
+    author: safeText(input.author, 20).trim() || base.author || '匿名',
+    text: text || base.text || '',
+    sticker: STICKER_EMOJI.includes(sticker) ? sticker : '',
+    reactions: input.reactions !== undefined ? normReactions(input.reactions) : normReactions(base.reactions),
+    claim,
+    replies: input.replies !== undefined ? normReplies(input.replies) : normReplies(base.replies),
+    createdAt: base.createdAt || input.createdAt || nowISO(),
+    updatedAt: nowISO(),
+  };
+}
+
+/** 把 ?ids=a,b,c 解析成去重后的 Set，顺手把长度超限的挡掉 */
+function parseIds(raw) {
+  if (!raw) return new Set();
+  return new Set(
+    String(raw)
+      .split(',')
+      .map((s) => safeText(s, 40))
+      .filter(Boolean)
+  );
+}
+
+/** 菜品投票：{ 'd_xxx': { want: ['我','妈'], cook: ['爸'] } } */
+function normVotes(input) {
+  const out = {};
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return out;
+  for (const [dishId, v] of Object.entries(input)) {
+    if (!dishId || !v || typeof v !== 'object') continue;
+    const pick = (arr) =>
+      [...new Set((Array.isArray(arr) ? arr : []).map((w) => safeText(w, 20).trim()).filter(Boolean))].slice(0, 20);
+    const want = pick(v.want);
+    const cook = pick(v.cook);
+    if (want.length || cook.length) out[dishId] = { want, cook };
+  }
+  return out;
+}
+
+/** 老数据 / 坏数据兜底：notes 永远是 { notes: [], votes: {} } 这个形状 */
+function normBoard(input) {
+  return {
+    notes: (Array.isArray(input && input.notes) ? input.notes : [])
+      .map((n) => (n && typeof n === 'object' ? normNote(n, undefined, true) : null))
+      .filter(Boolean)
+      .filter((n) => n.text),
+    votes: normVotes(input && input.votes),
   };
 }
 
@@ -1733,6 +1907,7 @@ async function handleAPI(req, res, url) {
         households: state.households,
         pantry: state.pantry,
         plans: state.plans,
+        notes: state.notes,
       },
     });
   }
@@ -1787,9 +1962,11 @@ async function handleAPI(req, res, url) {
       // 家庭没了，它名下的点餐和库存也一并清掉，免得数据无处安放
       const removedOrders = state.orders.filter((o) => o.householdId === id).length;
       const removedPantry = state.pantry.filter((p) => p.householdId === id).length;
+      const removedNotes = state.notes.notes.filter((n) => n.householdId === id).length;
       state.orders = state.orders.filter((o) => o.householdId !== id);
       state.pantry = state.pantry.filter((p) => p.householdId !== id);
       state.plans = state.plans.filter((p) => p.householdId !== id);
+      state.notes.notes = state.notes.notes.filter((n) => n.householdId !== id);
       if (state.settings.currentHouseholdId === id) {
         state.settings.currentHouseholdId = state.households[0].id;
       }
@@ -1797,10 +1974,11 @@ async function handleAPI(req, res, url) {
       scheduleSave('orders');
       scheduleSave('pantry');
       scheduleSave('plans');
+      scheduleSave('notes');
       scheduleSave('settings');
       return sendJSON(res, 200, {
         ok: true,
-        data: { ...gone, removedOrders, removedPantry },
+        data: { ...gone, removedOrders, removedPantry, removedNotes },
       });
     }
   }
@@ -1923,12 +2101,7 @@ async function handleAPI(req, res, url) {
       // 两种都必须明确给参数：宁可报错，也不能「不传参数就当全选」。
       const idsRaw = url.searchParams.get('ids');
       if (idsRaw !== null) {
-        const ids = new Set(
-          idsRaw
-            .split(',')
-            .map((s) => safeText(s, 40))
-            .filter(Boolean)
-        );
+        const ids = parseIds(idsRaw);
         if (!ids.size) return sendError(res, 400, '没有选中任何一样');
         const before = state.pantry.length;
         // 一次过滤删完，而不是循环 splice：省掉「边删边比对」的坑
@@ -1959,6 +2132,144 @@ async function handleAPI(req, res, url) {
       scheduleSave('pantry');
       return sendJSON(res, 200, { ok: true, data: { removed: before - state.pantry.length } });
     }
+  }
+
+  // ---- 留言板 + 菜品互动 ----
+  // 这些接口**不要管理口令**：留言、点个想吃，是家里人随手就做的事，
+  // 跟点餐/库存/计划一个待遇。口令只挡改菜谱和导出。
+  if (route[0] === 'notes') {
+    const board = state.notes;
+    const findNote = (nid) => board.notes.find((n) => n.id === nid);
+
+    if (method === 'POST' && route.length === 1) {
+      const note = normNote(await readBody(req));
+      if (!note.text) return sendError(res, 400, '写点什么再发吧');
+      if (note.kind === 'dish' && !state.dishes.some((d) => d.id === note.dishId)) {
+        return sendError(res, 400, '这道菜不在菜单里了');
+      }
+      board.notes.unshift(note);
+      scheduleSave('notes');
+      return sendJSON(res, 200, { ok: true, data: note });
+    }
+
+    // 批量删留言（留言板多选模式）—— 必须显式给 ids
+    if (method === 'DELETE' && !route[1]) {
+      const ids = parseIds(url.searchParams.get('ids'));
+      if (!ids.size) return sendError(res, 400, '要删哪几条留言？');
+      const before = board.notes.length;
+      board.notes = board.notes.filter((n) => !ids.has(n.id));
+      scheduleSave('notes');
+      return sendJSON(res, 200, { ok: true, data: { removed: before - board.notes.length } });
+    }
+
+    if (route[1]) {
+      const note = findNote(route[1]);
+      if (!note) return sendError(res, 404, '留言不存在');
+
+      if (method === 'PUT' && route.length === 2) {
+        const next = normNote({ ...note, ...(await readBody(req)) }, note);
+        if (!next.text) return sendError(res, 400, '留言不能改成空的');
+        Object.assign(note, next);
+        scheduleSave('notes');
+        return sendJSON(res, 200, { ok: true, data: note });
+      }
+
+      if (method === 'DELETE' && route.length === 2) {
+        board.notes = board.notes.filter((n) => n.id !== note.id);
+        scheduleSave('notes');
+        return sendJSON(res, 200, { ok: true, data: note });
+      }
+
+      // 表情回应：同一个人对同一个表情只能出现一次，再点一次就是取消
+      if (method === 'POST' && route[2] === 'react') {
+        const body = await readBody(req);
+        const emoji = safeText(body.emoji, 8);
+        const who = safeText(body.who, 20).trim();
+        if (!REACT_EMOJI.includes(emoji)) return sendError(res, 400, '这个表情不在可选范围里');
+        if (!who) return sendError(res, 400, '得先告诉我是谁');
+        const list = (note.reactions[emoji] || []).filter((w) => w !== who);
+        const had = (note.reactions[emoji] || []).includes(who);
+        if (had) {
+          if (list.length) note.reactions[emoji] = list;
+          else delete note.reactions[emoji];
+        } else {
+          if (Object.keys(note.reactions).length >= MAX_REACTIONS) {
+            return sendError(res, 400, '这条留言的表情用满了，先取消一个再点');
+          }
+          note.reactions[emoji] = [...(note.reactions[emoji] || []), who].slice(0, 20);
+        }
+        note.updatedAt = nowISO();
+        scheduleSave('notes');
+        return sendJSON(res, 200, { ok: true, data: { reactions: note.reactions, on: !had } });
+      }
+
+      // 「我来」认领：一条留言只能有一个人认领，再点自己那个 = 取消
+      if (method === 'POST' && route[2] === 'claim') {
+        const body = await readBody(req);
+        const by = safeText(body.by, 20).trim();
+        if (!by) return sendError(res, 400, '得先告诉我是谁');
+        if (note.claim && note.claim.by !== by) {
+          return sendError(res, 409, `「${note.claim.by}」已经认领了这条`);
+        }
+        note.claim = note.claim ? null : { by, at: nowISO() };
+        note.updatedAt = nowISO();
+        scheduleSave('notes');
+        return sendJSON(res, 200, { ok: true, data: { claim: note.claim } });
+      }
+
+      if (method === 'POST' && route[2] === 'replies') {
+        const body = await readBody(req);
+        const text = safeText(body.text, 300).trim();
+        if (!text) return sendError(res, 400, '回复不能是空的');
+        const reply = {
+          id: uid('r_'),
+          author: safeText(body.author, 20).trim() || '匿名',
+          text,
+          createdAt: nowISO(),
+        };
+        note.replies = [...note.replies, reply].slice(-MAX_REPLIES);
+        note.updatedAt = nowISO();
+        scheduleSave('notes');
+        return sendJSON(res, 200, { ok: true, data: reply });
+      }
+
+      if (method === 'DELETE' && route[2] === 'replies' && route[3]) {
+        const before = note.replies.length;
+        note.replies = note.replies.filter((r) => r.id !== route[3]);
+        if (note.replies.length === before) return sendError(res, 404, '回复不存在');
+        note.updatedAt = nowISO();
+        scheduleSave('notes');
+        return sendJSON(res, 200, { ok: true, data: { removed: before - note.replies.length } });
+      }
+    }
+  }
+
+  // ---- 菜品互动投票 ----
+  // 单独一个端点，不挂在 /api/dishes 下面：dishes 在 ADMIN_WRITES 里
+  // 会要管理口令，而「我想吃这道」必须是家里任何人都能随手点的。
+  if (route[0] === 'dish-votes' && method === 'POST') {
+    const body = await readBody(req);
+    const dishId = safeText(body.dishId, 40);
+    const who = safeText(body.who, 20).trim();
+    const role = body.role === 'cook' ? 'cook' : 'want';
+    if (!state.dishes.some((d) => d.id === dishId)) return sendError(res, 404, '菜品不存在');
+    if (!who) return sendError(res, 400, '得先告诉我是谁');
+    const cur = state.notes.votes[dishId] || { want: [], cook: [] };
+    const list = cur[role] || [];
+    const had = list.includes(who);
+    // 「我来做」一道菜只认一个人：别人来认领直接拒，不能默默顶掉上一个
+    if (role === 'cook' && list.length && !had) {
+      return sendError(res, 409, `${list[0]} 已经认领了「${state.dishes.find((d) => d.id === dishId).name}」`);
+    }
+    state.notes.votes[dishId] = {
+      ...cur,
+      [role]: had ? list.filter((w) => w !== who) : [...list, who].slice(0, 20),
+    };
+    if (!state.notes.votes[dishId].want.length && !state.notes.votes[dishId].cook.length) {
+      delete state.notes.votes[dishId];
+    }
+    scheduleSave('notes');
+    return sendJSON(res, 200, { ok: true, data: state.notes.votes[dishId] || { want: [], cook: [] } });
   }
 
   // ---- 菜品 ----
@@ -2000,9 +2311,19 @@ async function handleAPI(req, res, url) {
       state.plans.forEach((p) => {
         p.items = p.items.filter((it) => it.dishId !== id);
       });
+      // 这道菜下面的留言降级成普通留言（内容留着，不因为删个菜就抹掉别人的话），
+      // 投票没人认领了，直接扔
+      state.notes.notes.forEach((n) => {
+        if (n.kind === 'dish' && n.dishId === id) {
+          n.kind = 'board';
+          n.dishId = null;
+        }
+      });
+      delete state.notes.votes[id];
       scheduleSave('dishes');
       scheduleSave('orders');
       scheduleSave('plans');
+      scheduleSave('notes');
       return sendJSON(res, 200, { ok: true, data: gone });
     }
   }

@@ -15,8 +15,9 @@ const S = {
   memberFilter: '',
   pantryCat: '全部',
   pantryFilter: 'all', // all | soon | expired
-  pick: '', // 正在多选哪个区域：'' | pantry | orders | plan | dishes
+  pick: '', // 正在多选哪个区域：'' | pantry | orders | plan | dishes | notes
   sel: {}, // 各区域勾中的 id：{ [区域]: Set }
+  noteSticker: '', // 写留言时挑的贴纸
   shopList: [], // 当前页面渲染出来的那张买菜清单，批量入库时要用
   orderPickSel: new Set(), // 点餐弹层里勾中的几道菜
   planPickSel: new Set(), // 计划弹层里勾中的几道菜
@@ -31,9 +32,12 @@ const S = {
   chatOpen: false, // 底部悬浮窗是展开还是收起
   chatDot: false, // 收起期间来了新回复，在 pill 上冒个红点
   householdId: '', // 当前家庭，存在本机 localStorage：每台设备各选各的
+  meName: '', // 留言板里「我是谁」，默认取当前家庭的第一个成员
+  noteReplyTo: '', // 正在回复哪条留言的 id（空 = 只是新建一条）
   data: {
     categories: [], dishes: [], orders: [], settings: {},
     households: [], pantry: [], plans: [],
+    notes: { notes: [], votes: {} },
   },
   presets: null, // 食材预设，按需从 /api/ingredient-presets 拉一次
   draft: null, // 菜品编辑草稿
@@ -249,6 +253,50 @@ function memberByName(name) {
 function memberEmoji(name) {
   const m = memberByName(name);
   return m ? m.emoji : '👤';
+}
+
+/* ---------------- 留言板 / 菜品互动 ---------------- */
+
+const REACT_EMOJI = ['👍', '❤️', '😂', '😋', '🙏', '🔥'];
+const STICKER_EMOJI = ['🍳', '🛒', '🌶️', '🍚', '🎉', '⚠️', '💤', '🧊'];
+
+function allNotes() {
+  const b = S.data.notes;
+  return (b && Array.isArray(b.notes) ? b.notes : []).slice();
+}
+
+/** 留言板上的留言：当前家庭、不是菜品留言 */
+function boardNotes() {
+  return allNotes().filter((n) => n.kind !== 'dish' && n.householdId === S.householdId);
+}
+
+/** 某道菜下面的留言 */
+function dishNotes(dishId) {
+  return allNotes().filter((n) => n.kind === 'dish' && n.dishId === dishId);
+}
+
+function noteById(id) {
+  return allNotes().find((n) => n.id === id) || null;
+}
+
+/** 这道菜的「想吃 / 我来做」投票 */
+function dishVote(dishId) {
+  const v = S.data.notes && S.data.notes.votes;
+  const hit = v && v[dishId];
+  return { want: (hit && hit.want) || [], cook: (hit && hit.cook) || [] };
+}
+
+/** 「我是谁」：默认跟着当前家庭的第一个成员走 */
+function meName() {
+  const list = memberList();
+  if (!list.some((m) => m.name === S.meName)) S.meName = list.length ? list[0].name : '我';
+  return S.meName;
+}
+
+/** 谁点过这个表情 —— 用来在 title 里念出来 */
+function reactWho(list) {
+  const names = (list || []).map((n) => memberByName(n) || { name: n, emoji: '👤' });
+  return names.map((m) => m.emoji + m.name).join('、');
 }
 
 /** 某人点过多少次、总共几份（只算当前家庭） */
@@ -1051,7 +1099,7 @@ document.addEventListener('keydown', (e) => {
    ========================================================= */
 
 /** 各区域量词，用于确认弹窗里念名字（「删掉哪几样」） */
-const PICK_UNIT = { pantry: '样', orders: '条', plan: '道', dishes: '道' };
+const PICK_UNIT = { pantry: '样', orders: '条', plan: '道', dishes: '道', notes: '条' };
 
 function pickSel(key) {
   return S.sel[key] || (S.sel[key] = new Set());
@@ -1100,6 +1148,7 @@ function pickVisibleIds(key) {
   if (key === 'orders') return visibleOrders().map((o) => o.id);
   if (key === 'plan') return planItems(planWeek()).map((it) => it.id);
   if (key === 'dishes') return manageDishRows().map((x) => x.id);
+  if (key === 'notes') return boardNotes().map((n) => n.id);
   return [];
 }
 
@@ -1174,9 +1223,11 @@ function PICK_LABEL_OF(key, id) {
       ? planItems(planWeek())
       : key === 'dishes'
       ? S.data.dishes || []
+      : key === 'notes'
+      ? allNotes()
       : [];
   const hit = src.find((x) => x.id === id);
-  return hit ? hit.name || hit.dishName || '' : '';
+  return hit ? hit.name || hit.dishName || hit.text || '' : '';
 }
 
 /** 确认弹窗里念名字：只念前三个，别刷屏 */
@@ -1246,6 +1297,94 @@ function visibleDishes() {
   });
 }
 
+/**
+ * 一条留言。
+ *
+ * 留言板页和「某道菜的留言」弹层用的是同一个渲染器 —— 两边的数据
+ * 结构一样（正文 + 表情 + 认领 + 楼中楼），没必要写两套。
+ * opts.pick   多选模式下整行变成勾选框（跟 v1.7 的通用多选一致）
+ * opts.compact 菜品弹层里用，标题栏已经写了菜名，省掉重复信息
+ */
+function noteCard(n, opts) {
+  const o = opts || {};
+  const me = meName();
+  const reacs = n.reactions || {};
+  const claimedBy = n.claim && n.claim.by;
+  const isMine = claimedBy === me;
+  const dish = n.kind === 'dish' ? dishById(n.dishId) : null;
+
+  const head = `<div class="note-head">
+      <span class="note-who">${memberEmoji(n.author)} <b>${esc(n.author)}</b></span>
+      ${dish ? `<span class="note-where">在「${esc(dish.name)}」</span>` : ''}
+      <span class="note-time">${esc(relTime(n.createdAt))}</span>
+    </div>`;
+
+  const body = `<div class="note-text">${n.sticker ? `<span class="note-sticker">${n.sticker}</span>` : ''}${esc(n.text)}</div>`;
+
+  // 表情：已有的直接点（再点一次取消），没有的走「＋」挑
+  const reactRow = `<div class="note-reacts">
+      ${Object.keys(reacs)
+        .map(
+          (e) =>
+            `<button class="react ${(reacs[e] || []).includes(me) ? 'on' : ''}"
+               data-act="note-react" data-id="${esc(n.id)}" data-emoji="${esc(e)}"
+               title="${esc(reactWho(reacs[e]))}">${esc(e)}${(reacs[e] || []).length}</button>`
+        )
+        .join('')}
+      <button class="react add" data-act="note-react-pick" data-id="${esc(n.id)}"
+        aria-label="加个表情">＋</button>
+    </div>`;
+
+  // 认领：一个人一条，别人点的置灰并告诉你是谁认领了
+  const claimRow = `<div class="note-claim">
+      ${
+        claimedBy
+          ? `<span class="claim-on ${isMine ? '' : 'other'}">✅ ${esc(claimedBy)}${isMine ? '来' : '认领了'}
+               ${isMine ? '<button class="claim-x" data-act="note-claim" data-id="' + esc(n.id) + '">取消</button>' : ''}
+             </span>`
+          : `<button class="btn ghost sm" data-act="note-claim" data-id="${esc(n.id)}">🙋 我来</button>`
+      }
+    </div>`;
+
+  const replies = n.replies || [];
+  const replyRow = replies.length
+    ? `<div class="note-replies">
+        ${replies
+          .map(
+            (r) => `<div class="reply">
+              <span class="reply-who">${memberEmoji(r.author)} <b>${esc(r.author)}</b></span>
+              <span class="reply-text">${esc(r.text)}</span>
+              <span class="reply-time">${esc(relTime(r.createdAt))}</span>
+              <button class="reply-x" data-act="note-reply-del" data-id="${esc(n.id)}"
+                data-rid="${esc(r.id)}" aria-label="删掉这条回复">✕</button>
+            </div>`
+          )
+          .join('')}
+      </div>`
+    : '';
+
+  const replyBox =
+    S.noteReplyTo === n.id
+      ? `<div class="note-replybox">
+          <input class="input" id="replyInput-${esc(n.id)}" placeholder="回一句…"
+            data-note-reply="${esc(n.id)}" maxlength="300" />
+          <button class="btn soft" data-act="note-reply-send" data-id="${esc(n.id)}">回复</button>
+          <button class="btn ghost" data-act="note-reply-cancel">取消</button>
+        </div>`
+      : '';
+
+  const inner = `<div class="note-in">${head}${body}${reactRow}${claimRow}${replyRow}${replyBox}
+      <div class="note-foot">
+        <button class="btn ghost sm" data-act="note-reply-open" data-id="${esc(n.id)}">
+          ${replies.length ? `💬 回复（${replies.length}）` : '💬 回复'}
+        </button>
+        <button class="btn ghost sm danger" data-act="note-del" data-id="${esc(n.id)}">🗑</button>
+      </div></div>`;
+
+  if (o.pick) return pickRowHtml('notes', n.id, `note ${o.compact ? 'compact' : ''}`, inner);
+  return `<article class="note ${o.compact ? 'compact' : ''}" data-note="${esc(n.id)}">${inner}</article>`;
+}
+
 function dishCard(d) {
   const cover = d.images && d.images[0];
   const img = cover
@@ -1255,6 +1394,25 @@ function dishCard(d) {
   if (d.duration) meta.push(`<span class="tag">⏱ ${d.duration}′</span>`);
   if (d.servings) meta.push(`<span class="tag">👥 ${esc(d.servings)}</span>`);
   if ((d.tags || []).length) meta.push(`<span class="tag hot">${esc(d.tags[0])}</span>`);
+
+  // 菜品互动条：想吃 / 我来做 / 留言。
+  // 卡片整块是「打开做法」，所以这里每个按钮都带 stop，点了不该顺手把菜谱也打开。
+  const v = dishVote(d.id);
+  const me = meName();
+  const dn = dishNotes(d.id).length;
+  const iWant = v.want.includes(me);
+  const iCook = v.cook.includes(me);
+  const cookBy = v.cook.length ? v.cook[0] : '';
+  const interact = `<div class="card-interact" data-stop="1">
+      <button class="ib ${iWant ? 'on' : ''}" data-act="dish-vote" data-id="${esc(d.id)}" data-role="want"
+        title="${esc(v.want.length ? reactWho(v.want) : '点一下表示想吃')}">🍽 想吃 ${v.want.length || ''}</button>
+      <button class="ib ${iCook ? 'on' : ''}" ${cookBy && !iCook ? 'disabled' : ''}
+        data-act="dish-vote" data-id="${esc(d.id)}" data-role="cook"
+        title="${esc(cookBy ? (iCook ? '点一下取消认领' : cookBy + ' 已经认领了') : '我来下厨这道')}">
+        👩‍🍳 ${iCook ? '我来做' : cookBy ? cookBy + ' 来做' : '我来做'}</button>
+      <button class="ib ${dn ? 'has' : ''}" data-act="open-dish-notes" data-id="${esc(d.id)}"
+        aria-label="${dn ? dn + ' 条留言' : '留个言'}">💬${dn ? ' ' + dn : ''}</button>
+    </div>`;
 
   return `<article class="card" role="button" tabindex="0" aria-label="查看 ${esc(d.name)} 做法"
     data-act="open-dish" data-id="${esc(d.id)}">
@@ -1268,6 +1426,7 @@ function dishCard(d) {
       ${d.description ? `<div class="card-desc">${esc(d.description)}</div>` : ''}
       <div class="card-meta">${meta.join('')}</div>
     </div>
+    ${interact}
   </article>`;
 }
 
@@ -2343,6 +2502,76 @@ const pantryNames = (ids) => {
     .map((p) => p.name);
 };
 
+/* ---------------- 留言板页 ---------------- */
+
+/** 写留言的那一栏：选「我是谁」+ 挑贴纸 + 输入 */
+function noteComposer() {
+  const me = meName();
+  const list = memberList();
+  const picked = S.noteSticker || '';
+  return `<div class="composer">
+      <div class="composer-who">
+        ${list
+          .map(
+            (m) =>
+              `<button class="who ${m.name === me ? 'on' : ''}" data-act="note-me" data-name="${esc(m.name)}"
+                aria-pressed="${m.name === me}">${m.emoji} ${esc(m.name)}</button>`
+          )
+          .join('')}
+      </div>
+      <div class="composer-stickers">
+        ${STICKER_EMOJI.map(
+          (s) =>
+            `<button class="sticker ${s === picked ? 'on' : ''}" data-act="note-sticker" data-s="${esc(s)}"
+              aria-pressed="${s === picked}">${s}</button>`
+        ).join('')}
+      </div>
+      <div class="composer-row">
+        <textarea class="textarea" id="noteText" rows="2" maxlength="500"
+          placeholder="说点什么…「今晚我做饭」「冰箱里还有排骨」「谁去买菜？」"></textarea>
+        <button class="btn" data-act="note-send">发一条</button>
+      </div>
+    </div>`;
+}
+
+function viewBoard() {
+  const list = boardNotes();
+  const house = currentHousehold();
+
+  const toolbar = picking('notes')
+    ? pickBarHtml('notes', list.map((n) => n.id), [
+        { act: 'pick-delete', cls: 'danger', label: '🗑 删除' },
+      ])
+    : list.length
+    ? `<div class="list-toolbar">
+         <span class="section-sub">${list.length} 条留言</span>
+         ${pickOnBtn('notes')}
+       </div>`
+    : '';
+
+  return `
+    <div class="section-head">
+      <h2 class="section-title">留言板</h2>
+      <span class="section-sub">${house ? esc(house.emoji + ' ' + house.name) : ''}</span>
+    </div>
+    ${noteComposer()}
+    ${toolbar}
+    ${
+      list.length
+        ? list.map((n) => noteCard(n, { pick: picking('notes') })).join('')
+        : `<div class="empty">
+             <span class="empty-emoji">💬</span>
+             <p class="empty-title">还没人留言</p>
+             <p class="empty-text">上面写一条，比如「今晚我做饭」「谁去买菜」</p>
+           </div>`
+    }
+    ${
+      picking('notes')
+        ? ''
+        : '<button class="fab" data-act="note-focus">💬 写一条</button>'
+    }`;
+}
+
 function viewPantry() {
   const all = householdPantry();
   const house = currentHousehold();
@@ -3368,10 +3597,21 @@ function render() {
   pb.textContent = urgent;
   pb.classList.toggle('warn', pantryList.some((p) => shelfStatus(p).key === 'expired'));
 
+  // 留言角标报「今天」：做不了「未读」（没这个概念），但今天家里说了几句
+  // 是真的想知道的事，总条数只会越滚越大、越滚越没意义
+  const bb = $('#boardBadge');
+  if (bb) {
+    const today = todayStr();
+    const todayN = boardNotes().filter((n) => String(n.createdAt || '').slice(0, 10) === today).length;
+    bb.hidden = todayN === 0;
+    bb.textContent = todayN;
+  }
+
   const view = $('#view');
   if (S.view === 'menu') view.innerHTML = viewMenu();
   else if (S.view === 'plan') view.innerHTML = viewPlan();
   else if (S.view === 'order') view.innerHTML = viewOrder();
+  else if (S.view === 'board') view.innerHTML = viewBoard();
   else if (S.view === 'pantry') view.innerHTML = viewPantry();
   else view.innerHTML = viewManage();
 
@@ -4183,7 +4423,207 @@ const ACTIONS = {
       if (!(S.data.dishes || []).length) S.pick = '';
       render();
       toast(`已删掉 ${ids.length} 道菜`);
+      return;
     }
+    if (key === 'notes') {
+      const names = boardNotes()
+        .filter((n) => ids.includes(n.id))
+        .map((n) => n.text);
+      const preview = pickPreview(names, '条');
+      if (!confirm(`删掉 ${preview} 留言？下面的回复也一起没了，删了就找不回来。`)) return;
+      const r = await api('DELETE', `/api/notes?ids=${ids.map(encodeURIComponent).join(',')}`);
+      S.sel.notes = new Set();
+      await loadState(true);
+      if (!boardNotes().length) S.pick = '';
+      render();
+      toast(r.removed ? `已删掉 ${r.removed} 条留言` : '没删掉任何东西');
+    }
+  },
+
+  /* ---- 留言板 / 菜品互动 ---- */
+
+  'note-me'(el) {
+    S.meName = el.dataset.name || '';
+    render();
+  },
+
+  'note-sticker'(el) {
+    const s = el.dataset.s || '';
+    S.noteSticker = S.noteSticker === s ? '' : s;
+    render();
+  },
+
+  /** 发一条留言（留言板页） */
+  async 'note-send'() {
+    const box = $('#noteText');
+    const text = ((box && box.value) || '').trim();
+    if (!text) return toast('写点什么再发吧');
+    await api('POST', '/api/notes', {
+      householdId: S.householdId,
+      kind: 'board',
+      author: meName(),
+      text,
+      sticker: S.noteSticker || '',
+    });
+    S.noteSticker = '';
+    await loadState(true);
+    render();
+    const back = $('#noteText');
+    if (back) back.value = '';
+    toast('已发出去');
+  },
+
+  /** 右下角那个「💬 写一条」：滚回上面的输入框 */
+  'note-focus'() {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    const box = $('#noteText');
+    if (box) box.focus();
+  },
+
+  /** 点已有的表情：再点一次取消 */
+  async 'note-react'(el) {
+    const id = el.dataset.id;
+    if (!noteById(id)) return;
+    await api('POST', `/api/notes/${encodeURIComponent(id)}/react`, { emoji: el.dataset.emoji, who: meName() });
+    closeSheet(); // 从「＋」弹层里挑完就把弹层收掉，回到留言本身
+    await loadState(true);
+    render();
+  },
+
+  /** 「＋」挑一个还没用过的表情 */
+  'note-react-pick'(el) {
+    const id = el.dataset.id;
+    const n = noteById(id);
+    if (!n) return;
+    const used = n.reactions || {};
+    openSheet({
+      title: '回一个表情',
+      body: `<div class="chip-row">
+          ${REACT_EMOJI.map(
+            (e) =>
+              `<button class="chip ${(used[e] || []).includes(meName()) ? 'on' : ''}"
+                data-act="note-react" data-id="${esc(id)}" data-emoji="${esc(e)}">${esc(e)}</button>`
+          ).join('')}
+        </div>`,
+      foot: `<button class="btn ghost" data-act="close-sheet">关闭</button>`,
+    });
+  },
+
+  /** 「我来」认领 / 取消认领 */
+  async 'note-claim'(el) {
+    const id = el.dataset.id;
+    const n = noteById(id);
+    if (!n) return;
+    const me = meName();
+    if (n.claim && n.claim.by !== me) return toast(`${n.claim.by} 已经认领了这条`);
+    await api('POST', `/api/notes/${encodeURIComponent(id)}/claim`, { by: me });
+    await loadState(true);
+    render();
+    toast(n.claim ? '取消认领了' : `${me} 认领了`);
+  },
+
+  async 'note-del'(el) {
+    const n = noteById(el.dataset.id);
+    if (!n) return;
+    const preview = pickPreview([n.text], '条');
+    const extra = (n.replies || []).length ? `下面的 ${n.replies.length} 条回复也会一起没了。` : '';
+    if (!confirm(`删掉「${preview}」？${extra}删了就找不回来。`)) return;
+    await api('DELETE', `/api/notes/${encodeURIComponent(n.id)}`);
+    await loadState(true);
+    render();
+    toast('已删掉');
+  },
+
+  'note-reply-open'(el) {
+    S.noteReplyTo = S.noteReplyTo === el.dataset.id ? '' : el.dataset.id;
+    render();
+    const box = document.querySelector(`[data-note-reply="${CSS.escape(S.noteReplyTo || '')}"]`);
+    if (box) box.focus();
+  },
+
+  'note-reply-cancel'() {
+    S.noteReplyTo = '';
+    render();
+  },
+
+  async 'note-reply-send'(el) {
+    const id = el.dataset.id;
+    const box = document.querySelector(`[data-note-reply="${CSS.escape(id)}"]`);
+    const text = ((box && box.value) || '').trim();
+    if (!text) return toast('回复不能是空的');
+    await api('POST', `/api/notes/${encodeURIComponent(id)}/replies`, { author: meName(), text });
+    S.noteReplyTo = '';
+    await loadState(true);
+    render();
+  },
+
+  async 'note-reply-del'(el) {
+    const id = el.dataset.id;
+    const rid = el.dataset.rid;
+    if (!confirm('删掉这条回复？')) return;
+    await api('DELETE', `/api/notes/${encodeURIComponent(id)}/replies/${encodeURIComponent(rid)}`);
+    await loadState(true);
+    render();
+  },
+
+  /** 菜品互动：想吃 / 我来做 */
+  async 'dish-vote'(el) {
+    const dishId = el.dataset.id;
+    const role = el.dataset.role === 'cook' ? 'cook' : 'want';
+    const me = meName();
+    const d = dishById(dishId);
+    if (!d) return;
+    if (role === 'cook') {
+      const cook = dishVote(dishId).cook;
+      if (cook.length && cook[0] !== me) return toast(`${cook[0]} 已经认领了「${d.name}」`);
+    }
+    await api('POST', '/api/dish-votes', { dishId, who: me, role });
+    await loadState(true);
+    render();
+  },
+
+  /** 某道菜的留言弹层 */
+  'open-dish-notes'(el) {
+    const d = dishById(el.dataset.id);
+    if (!d) return;
+    const draw = () => {
+      const list = dishNotes(d.id);
+      return `${
+        list.length
+          ? list.map((n) => noteCard(n, { compact: true })).join('')
+          : '<div class="empty" style="padding:24px 16px"><p class="empty-text">这道菜还没人留言</p></div>'
+      }
+      <div class="dish-note-add">
+        <textarea class="textarea" id="dishNoteText" rows="2" maxlength="500"
+          placeholder="对这道菜说点什么…「少放辣」「上次太咸了」"></textarea>
+        <button class="btn soft block" data-act="dish-note-send" data-id="${esc(d.id)}">留一句</button>
+      </div>`;
+    };
+    openSheet({
+      title: `「${d.name}」的留言`,
+      body: draw(),
+      foot: `<button class="btn ghost" data-act="close-sheet">关闭</button>`,
+      onMount: () => {},
+    });
+  },
+
+  async 'dish-note-send'(el) {
+    const box = $('#dishNoteText');
+    const text = ((box && box.value) || '').trim();
+    if (!text) return toast('写点什么再发吧');
+    const dishId = el.dataset.id;
+    await api('POST', '/api/notes', {
+      householdId: S.householdId,
+      kind: 'dish',
+      dishId,
+      author: meName(),
+      text,
+    });
+    await loadState(true);
+    render();
+    // 弹层还开着，重画一次列表（卡片上的留言数也要跟着变）
+    ACTIONS['open-dish-notes']({ dataset: { id: dishId } });
+    toast('已留言');
   },
 
   /** 批量改保质期：同一批买的，一次改完 */
@@ -4652,6 +5092,9 @@ ACTIONS['check-pin'] = async function () {
 
 /* 事件绑定 */
 document.addEventListener('click', (e) => {
+  // 菜品卡片整块是「打开做法」，互动条是压在上面的。
+  // 点互动条里的按钮照常走按钮自己的动作，但点到条上的空白处不能顺手把菜谱也打开。
+  if (e.target.closest('[data-stop]') && !e.target.closest('.ib')) return;
   const el = e.target.closest('[data-act]');
   if (!el) return;
   const fn = ACTIONS[el.dataset.act];

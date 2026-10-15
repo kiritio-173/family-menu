@@ -1048,6 +1048,157 @@ async function main() {
   eq('拿掉不存在的那条报 404', (await del('/api/plans/items/p_没有')).status, 404);
   await stop(bdDel);
 
+  /* ---------- 留言板 + 菜品互动 ---------- */
+  console.log('\n[20] 留言板与菜品互动');
+  const board = await boot('board');
+  const bDish = (await post('/api/dishes', { name: '留言测试菜', category: '家常菜' })).body.data;
+  const bOther = (await post('/api/dishes', { name: '另一道菜', category: '主食' })).body.data;
+  const bHouse = (await post('/api/households', { name: '302 室' })).body.data;
+
+  // ---- 留言板 ----
+  eq('初始没有留言', (await get('/api/state')).body.data.notes.notes.length, 0);
+  const n1 = (await post('/api/notes', { author: '我', text: '今晚我做饭', sticker: '🍳' })).body.data;
+  ok('留言建起来了', !!n1.id && n1.kind === 'board', n1);
+  eq('贴纸记下来了', n1.sticker, '🍳');
+  eq('空留言被拒', (await post('/api/notes', { author: '我', text: '   ' })).status, 400);
+  eq('不认识的贴纸丢掉', (await post('/api/notes', { author: '我', text: 'x', sticker: '💩' })).body.data.sticker, '');
+
+  const n2 = (await post('/api/notes', { author: '妈', text: '我去买菜' })).body.data;
+  // 前面那条「贴纸不认」的用例也真建了条留言，所以是 3 条
+  eq('三条留言', (await get('/api/state')).body.data.notes.notes.length, 3);
+
+  // 家庭之间互不串
+  const nOther = (await post('/api/notes', { householdId: bHouse.id, author: '舅', text: '这边也有留言' })).body.data;
+  eq('留言记到指定家庭', nOther.householdId, bHouse.id);
+  const byHouse = (await get('/api/state')).body.data.notes.notes.filter((n) => n.householdId === bHouse.id);
+  eq('另一个家庭的留言单独算', byHouse.length, 1);
+  eq('幽灵家庭拉回默认', (await post('/api/notes', { householdId: '幽灵', text: 'x' })).body.data.householdId,
+    (await get('/api/state')).body.data.households[0].id);
+
+  // ---- 表情 ----
+  const r1 = await post(`/api/notes/${n1.id}/react`, { emoji: '👍', who: '我' });
+  eq('表情点上了', r1.body.data.on, true);
+  eq('表情记了谁', JSON.stringify(r1.body.data.reactions['👍']), JSON.stringify(['我']));
+  const r2 = await post(`/api/notes/${n1.id}/react`, { emoji: '👍', who: '妈' });
+  eq('两个人都点了', r2.body.data.reactions['👍'].length, 2);
+  const r3 = await post(`/api/notes/${n1.id}/react`, { emoji: '👍', who: '我' });
+  eq('再点一次是取消', r3.body.data.on, false);
+  eq('取消后只剩妈那一个', JSON.stringify(r3.body.data.reactions['👍']), JSON.stringify(['妈']));
+  await post(`/api/notes/${n2.id}/react`, { emoji: '🔥', who: '我' });
+  await post(`/api/notes/${n2.id}/react`, { emoji: '🔥', who: '我' });
+  eq('取消到没人就不留空数组',
+    (await get('/api/state')).body.data.notes.notes.find((n) => n.id === n2.id).reactions['🔥'], undefined);
+  eq('不认识的表情被拒', (await post(`/api/notes/${n1.id}/react`, { emoji: '💩', who: '我' })).status, 400);
+  eq('没人名不给点', (await post(`/api/notes/${n1.id}/react`, { emoji: '👍', who: '' })).status, 400);
+  eq('给不存在的留言点表情 404', (await post('/api/notes/n_没有/react', { emoji: '👍', who: '我' })).status, 404);
+
+  // ---- 认领 ----
+  const c1 = await post(`/api/notes/${n1.id}/claim`, { by: '妈' });
+  eq('妈认领了', c1.body.data.claim.by, '妈');
+  const c2 = await post(`/api/notes/${n1.id}/claim`, { by: '我' });
+  eq('别人不能抢认领', c2.status, 409);
+  eq('还是妈认领着', (await get('/api/state')).body.data.notes.notes.find((n) => n.id === n1.id).claim.by, '妈');
+  eq('本人再点是取消', (await post(`/api/notes/${n1.id}/claim`, { by: '妈' })).body.data.claim, null);
+  eq('取消了就能被别人认领', (await post(`/api/notes/${n1.id}/claim`, { by: '我' })).body.data.claim.by, '我');
+
+  // ---- 楼中楼 ----
+  const rp1 = (await post(`/api/notes/${n1.id}/replies`, { author: '妈', text: '好啊' })).body.data;
+  ok('回复建起来了', !!rp1.id, rp1);
+  await post(`/api/notes/${n1.id}/replies`, { author: '我', text: '六点开饭' });
+  eq('两条回复', (await get('/api/state')).body.data.notes.notes.find((n) => n.id === n1.id).replies.length, 2);
+  eq('空回复被拒', (await post(`/api/notes/${n1.id}/replies`, { author: '我', text: '' })).status, 400);
+  eq('删掉一条回复', (await del(`/api/notes/${n1.id}/replies/${rp1.id}`)).body.data.removed, 1);
+  eq('删完剩一条', (await get('/api/state')).body.data.notes.notes.find((n) => n.id === n1.id).replies.length, 1);
+  eq('删不存在的回复 404', (await del(`/api/notes/${n1.id}/replies/r_没有`)).status, 404);
+
+  // ---- 菜品留言 ----
+  const dn = (await post('/api/notes', { kind: 'dish', dishId: bDish.id, author: '妈', text: '少放辣' })).body.data;
+  eq('菜品留言挂上菜了', dn.kind + '/' + dn.dishId, 'dish/' + bDish.id);
+  // 板上的留言：n1、贴纸那条、n2、302 室那条、幽灵家庭那条
+  eq('菜品留言不进留言板', (await get('/api/state')).body.data.notes.notes.filter((n) => n.kind === 'board').length, 5);
+  eq('菜品留言不给菜就明确报错',
+    (await post('/api/notes', { kind: 'dish', author: '我', text: '孤儿' })).status, 400);
+  eq('给不存在的菜留言被拒',
+    (await post('/api/notes', { kind: 'dish', dishId: 'd_没有', author: '我', text: 'x' })).status, 400);
+
+  // ---- 菜品投票 ----
+  const v1 = await post('/api/dish-votes', { dishId: bDish.id, who: '我', role: 'want' });
+  eq('想吃点上了', JSON.stringify(v1.body.data.want), JSON.stringify(['我']));
+  await post('/api/dish-votes', { dishId: bDish.id, who: '妈', role: 'want' });
+  eq('两个人想吃', v1.status, 200);
+  const vCook = await post('/api/dish-votes', { dishId: bDish.id, who: '妈', role: 'cook' });
+  eq('妈认领下厨', vCook.body.data.cook[0], '妈');
+  eq('别人抢下厨被拒', (await post('/api/dish-votes', { dishId: bDish.id, who: '我', role: 'cook' })).status, 409);
+  eq('认领人没被顶掉',
+    (await get('/api/state')).body.data.notes.votes[bDish.id].cook[0], '妈');
+  eq('本人再点是取消认领',
+    (await post('/api/dish-votes', { dishId: bDish.id, who: '妈', role: 'cook' })).body.data.cook.length, 0);
+  eq('想吃可以取消',
+    (await post('/api/dish-votes', { dishId: bDish.id, who: '我', role: 'want' })).body.data.want.join(), '妈');
+  eq('给不存在的菜投票 404', (await post('/api/dish-votes', { dishId: 'd_没有', who: '我', role: 'want' })).status, 404);
+  eq('投票必须有名', (await post('/api/dish-votes', { dishId: bDish.id, who: '', role: 'want' })).status, 400);
+
+  // ---- 级联 ----
+  await del(`/api/dishes/${bDish.id}`);
+  let stB = (await get('/api/state')).body.data;
+  eq('菜删了，挂在它下面的留言降级但内容留着',
+    stB.notes.notes.find((n) => n.id === dn.id).kind, 'board');
+  ok('留言正文没被抹掉', !!stB.notes.notes.find((n) => n.id === dn.id));
+  ok('投票被清掉', !Object.keys(stB.notes.votes).includes(bDish.id), stB.notes.votes);
+  await post('/api/dish-votes', { dishId: bOther.id, who: '我', role: 'want' });
+  await del(`/api/households/${bHouse.id}`);
+  stB = (await get('/api/state')).body.data;
+  eq('删家庭带走它的留言', stB.notes.notes.filter((n) => n.householdId === bHouse.id).length, 0);
+  eq('别的家庭的留言还在', stB.notes.notes.filter((n) => n.kind === 'board').length >= 4, true);
+
+  // ---- 批量删留言 ----
+  const alive = stB.notes.notes.map((n) => n.id);
+  const delAll = await del(`/api/notes?ids=${alive.join(',')}`);
+  eq('批量删留言 200', delAll.status, 200);
+  eq('一次全删完', delAll.body.data.removed, alive.length);
+  eq('留言板空了', (await get('/api/state')).body.data.notes.notes.length, 0);
+  eq('批量删不带 ids 报错', (await del('/api/notes')).status, 400);
+  eq('报错说的是「要删哪几条留言」', /要删哪几条留言/.test((await del('/api/notes')).body.error || ''), true);
+  eq('ids 为空报错', (await del('/api/notes?ids=')).status, 400);
+  eq('删不存在的留言不报错', (await del('/api/notes?ids=n_没有')).body.data.removed, 0);
+  await stop(board);
+
+  /* ---------- 老数据没有 notes.json ---------- */
+  console.log('\n[20·2] 老数据升级');
+  const legacyBoard = await boot('legacyBoard', (dataDir) => {
+    // 只放老版本的 dishes.json，故意不放 notes.json
+    fs.writeFileSync(
+      path.join(dataDir, 'dishes.json'),
+      JSON.stringify([{ id: 'd_老菜', name: '老菜', category: '家常菜', images: [] }], null, 2),
+      'utf8'
+    );
+  });
+  st = (await get('/api/state')).body.data;
+  ok('没 notes.json 也能起，留言是空的', st.notes && Array.isArray(st.notes.notes), st.notes);
+  eq('老数据留言数 0', st.notes.notes.length, 0);
+  eq('老数据投票是空对象', JSON.stringify(st.notes.votes), '{}');
+  ok('notes.json 已被自动补出来', fs.existsSync(path.join(TMP, 'legacyBoard', 'data', 'notes.json')));
+  await stop(legacyBoard);
+
+  /* ---------- 备份把留言一起带走 ---------- */
+  console.log('\n[20·3] 备份带上留言');
+  const bkNote = await boot('bkNote');
+  const bkDish = (await post('/api/dishes', { name: '备份测试菜', category: '家常菜' })).body.data;
+  await post('/api/notes', { author: '我', text: '这条要进备份' });
+  await post('/api/dish-votes', { dishId: bkDish.id, who: '我', role: 'want' });
+  const bkSnap = (await post('/api/backups')).body.data.name;
+  await post('/api/notes', { author: '我', text: '备份之后才写的' });
+  const restoredNote = await reqRaw(
+    'POST',
+    `/api/backups/${encodeURIComponent(bkSnap)}/restore`
+  );
+  eq('恢复 200', restoredNote.status, 200);
+  const bkAfter = (await get('/api/state')).body.data;
+  eq('备份之后的留言被回退了', bkAfter.notes.notes.length, 1);
+  eq('备份里的留言内容还在', bkAfter.notes.notes[0].text, '这条要进备份');
+  eq('备份里的投票也回来了', JSON.stringify(bkAfter.notes.votes), JSON.stringify({ [bkDish.id]: { want: ['我'], cook: [] } }));
+  await stop(bkNote);
+
   /* ---------- 收尾 ---------- */
   fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5 });
 

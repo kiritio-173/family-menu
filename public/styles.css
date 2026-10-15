@@ -220,6 +220,28 @@ a { color: var(--primary-dark); }
   display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 .card-meta { margin-top: auto; padding-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+
+/* ---------- 菜品互动条（想吃 / 我来做 / 留言） ---------- */
+/* 卡片整块是「打开做法」，这条压在上面，所以按钮自己带 data-stop */
+.card-interact {
+  display: flex; align-items: center; gap: 4px;
+  padding: 6px 8px; border-top: 1px solid var(--line);
+  background: var(--bg-soft);
+}
+.ib {
+  flex: 1; min-width: 0;
+  display: inline-flex; align-items: center; justify-content: center; gap: 3px;
+  padding: 5px 4px; border-radius: 7px;
+  border: 1px solid transparent; background: transparent;
+  font-size: 11.5px; font-weight: 600; color: var(--text-mid);
+  cursor: pointer; transition: background .14s ease, color .14s ease;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ib:hover { background: var(--surface); }
+.ib.on { background: var(--primary); color: #fff; border-color: var(--primary); }
+.ib.has { color: var(--primary-dark); font-weight: 700; }
+.ib[disabled] { opacity: .5; cursor: default; }
+.ib[disabled]:hover { background: transparent; }
 .tag {
   font-size: 11.5px; padding: 2px 7px; border-radius: 6px;
   background: var(--bg-soft); color: var(--text-mid);
@@ -299,9 +321,9 @@ a { color: var(--primary-dark); }
 }
 .tab-icon { font-size: 20px; line-height: 1; }
 .tab-label { font-size: 11px; }
-/* 五个页签时图标和字都稍微收一点，窄屏才挤得下 */
-.tab-icon { font-size: 19px; }
-.tab-label { font-size: 10.5px; }
+/* 六个页签时图标和字都稍微收一点，窄屏才挤得下 */
+.tab-icon { font-size: 18px; }
+.tab-label { font-size: 10px; }
 .tab[aria-current="page"] { color: var(--primary-dark); font-weight: 600; }
 .badge {
   position: absolute; top: 7px; left: calc(50% + 7px);
@@ -461,7 +483,96 @@ a { color: var(--primary-dark); }
 .tl-flag-seq { background: var(--primary-soft); color: var(--primary-dark); }
 .tl-why { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.55; }
 
-/* ---------- 多选（库存 / 买菜 / 点餐 / 计划 / 菜品 共用） ---------- */
+/* ---------- 留言板 / 菜品互动 ---------- */
+.composer {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 12px; margin-bottom: 14px;
+  display: flex; flex-direction: column; gap: 10px;
+  box-shadow: var(--shadow-sm);
+}
+.composer-who { display: flex; gap: 6px; flex-wrap: wrap; }
+.composer-who .who {
+  padding: 4px 10px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--bg-soft);
+  font-size: 12.5px; color: var(--text-mid);
+}
+.composer-who .who.on { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: 600; }
+.composer-stickers { display: flex; gap: 4px; flex-wrap: wrap; }
+.composer-stickers .sticker {
+  width: 32px; height: 32px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--bg-soft); font-size: 16px;
+  filter: grayscale(.55); opacity: .6; transition: filter .14s, opacity .14s;
+}
+.composer-stickers .sticker.on { filter: none; opacity: 1; border-color: var(--primary); background: var(--primary-soft); }
+.composer-row { display: flex; gap: 8px; align-items: flex-end; }
+.composer-row .textarea { flex: 1; min-height: 46px; resize: vertical; }
+
+.note {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 12px; margin-bottom: 10px;
+  display: flex; flex-direction: column; gap: 8px;
+  box-shadow: var(--shadow-sm);
+}
+.note.compact { margin-bottom: 8px; padding: 10px; }
+.note .note-in { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
+.note .note-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.note .note-who { font-size: 13px; color: var(--text); }
+.note .note-where {
+  font-size: 11px; color: var(--primary-dark);
+  background: var(--primary-soft); padding: 1px 7px; border-radius: 999px;
+}
+.note .note-time { margin-left: auto; font-size: 11.5px; color: var(--muted); }
+.note .note-text { font-size: 14.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+.note .note-sticker { font-size: 17px; margin-right: 7px; }
+
+.note-reacts { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+.react {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 3px 8px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--bg-soft);
+  font-size: 12.5px; color: var(--text-mid);
+}
+.react.on { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: 700; }
+.react.add { color: var(--muted); padding: 3px 9px; }
+
+.note-claim { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.claim-on {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+  background: rgba(76, 124, 90, .14); color: #3d6449;
+}
+.claim-on.other { background: var(--bg-soft); color: var(--text-mid); }
+.claim-x {
+  border: 0; background: transparent; cursor: pointer; padding: 0 2px;
+  font-size: 11.5px; color: inherit; text-decoration: underline;
+}
+
+.note-replies {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 10px; border-radius: var(--radius-sm); background: var(--bg-soft);
+}
+.reply { display: flex; align-items: baseline; gap: 7px; font-size: 13px; flex-wrap: wrap; }
+.reply-who { font-size: 12.5px; color: var(--text-mid); white-space: nowrap; }
+.reply-text { flex: 1; min-width: 90px; line-height: 1.5; word-break: break-word; }
+.reply-time { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.reply-x {
+  border: 0; background: transparent; cursor: pointer; color: var(--muted);
+  font-size: 11px; padding: 0 2px;
+}
+.reply-x:hover { color: var(--danger); }
+
+.note-replybox { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.note-replybox .input { flex: 1; min-width: 120px; }
+.note-foot { display: flex; gap: 6px; align-items: center; }
+.note-foot .btn.danger { color: var(--danger); }
+
+.dish-note-add { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+
+/* 多选模式下一条留言要能整行点：勾选框靠左，内容在右边那一列 */
+.note.pick { flex-direction: row; gap: 10px; align-items: flex-start; }
+.note.pick .pick-box { margin-top: 2px; }
+
+/* ---------- 多选（库存 / 买菜 / 点餐 / 计划 / 菜品 / 留言 共用） ---------- */
 .pick-bar {
   position: sticky; top: 0; z-index: 5;
   display: flex; align-items: center; gap: 8px;
@@ -487,6 +598,7 @@ a { color: var(--primary-dark); }
 .pick.on .pick-box { background: var(--primary); border-color: var(--primary); }
 .pick:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 /* 各行原本类名不同，勾选框统一靠左占一个位，别把缩略图挤走 */
+/* .note.pick 不在这里：留言是多行块，勾选框要对齐第一行而不是整块居中 */
 .food-row.pick, .order-item.pick, .plan-item.pick, .list-row.pick { align-items: center; }
 
 /* ---------- 版本 ---------- */
