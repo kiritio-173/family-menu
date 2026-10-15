@@ -408,7 +408,92 @@ a { color: var(--primary-dark); }
 }
 .method-head:first-child { margin-top: 0; }
 
-/* ---------- 厨房助手 ---------- */
+/* ---------- 厨房助手：带时间轴的备餐流程 ---------- */
+.timeline { list-style: none; margin: 0; padding: 0; }
+.tl-step {
+  position: relative;
+  display: flex; gap: 12px;
+  padding: 0 0 16px 0;
+}
+/* 竖线串起整条轴，最后一步不再画，免得尾巴拖到弹层外面 */
+.tl-step::before {
+  content: '';
+  position: absolute;
+  left: 7px; top: 22px; bottom: -2px;
+  width: 2px; background: var(--line-strong);
+}
+.tl-step:last-child { padding-bottom: 0; }
+.tl-step:last-child::before { display: none; }
+
+.tl-time {
+  flex: 0 0 58px;
+  text-align: right;
+  padding-top: 1px;
+}
+.tl-at { display: block; font-size: 12.5px; font-weight: 750; color: var(--primary); }
+.tl-len { display: block; font-size: 11px; color: var(--muted); }
+
+.tl-body { flex: 1; min-width: 0; padding-left: 14px; position: relative; }
+/* 圆点：可并行的用绿色，必须守灶的用橙色，一眼分出能不能离开灶台 */
+.tl-body::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 6px;
+  width: 9px; height: 9px; border-radius: 50%;
+  border: 2px solid var(--surface);
+  box-sizing: border-box;
+}
+.tl-par .tl-body::before { background: var(--green); }
+.tl-seq .tl-body::before { background: var(--primary); }
+
+.tl-what { font-size: 14px; font-weight: 650; line-height: 1.5; padding-right: 22px; }
+.tl-n {
+  display: inline-block; min-width: 18px; margin-right: 6px;
+  font-size: 11px; font-weight: 700; color: var(--muted);
+}
+.tl-dish { font-size: 12px; color: var(--text-mid); margin-top: 2px; }
+.tl-flag {
+  display: inline-block; margin-top: 5px;
+  padding: 1px 7px; border-radius: 999px;
+  font-size: 11px; font-weight: 650;
+}
+.tl-flag-par { background: rgba(76, 124, 90, 0.14); color: #3d6449; }
+.tl-flag-seq { background: var(--primary-soft); color: var(--primary-dark); }
+.tl-why { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.55; }
+
+/* ---------- 库存批量选择 ---------- */
+.pick-bar {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; margin-bottom: 12px;
+  background: var(--primary-soft);
+  border-radius: var(--radius-sm);
+}
+.pick-bar .pick-count { flex: 1; font-size: 12.5px; font-weight: 650; color: var(--primary-dark); }
+.pick-bar .btn[disabled] { opacity: 0.45; }
+
+.food-row.pick { cursor: pointer; align-items: center; }
+.food-row.pick.on { background: var(--primary-soft); border-color: var(--primary); }
+.pick-box {
+  flex: 0 0 22px; height: 22px;
+  border: 1.5px solid var(--line-strong); border-radius: 6px;
+  background: var(--surface);
+  display: grid; place-items: center;
+  font-size: 13px; font-weight: 800; color: #fff;
+}
+.food-row.pick.on .pick-box { background: var(--primary); border-color: var(--primary); }
+.food-row.pick:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+/* ---------- 版本 ---------- */
+.version-tag {
+  font-size: 10.5px; font-weight: 700; color: var(--primary-dark);
+  background: var(--primary-soft); padding: 2px 8px; border-radius: 999px;
+}
+.list-row[role="button"] { cursor: pointer; }
+.list-row[role="button"]:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.release.current .block-title { color: var(--primary-dark); }
+
+/* ---------- 厨房助手（旧结构，保留兜底） ---------- */
 .prep-list { list-style: none; margin: 0; padding: 0; }
 .prep-list li {
   position: relative; padding: 6px 0 6px 18px;

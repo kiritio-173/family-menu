@@ -565,6 +565,26 @@ async function main() {
           choices: [{ message: { role: 'assistant', content: '<think>想了一下</think>这不是 JSON' } }],
         }));
       }
+      // 备餐时间轴：结构不一样，单独回一份，别混进 cook-plan 的字段里。
+      // 认的是系统提示里独有的 startMinute —— 发给假服务器的是 messages，里面没有 task 名。
+      if (body.indexOf('startMinute') >= 0) {
+        return rs.end(JSON.stringify({
+          model: 'MiniMax-M3',
+          choices: [
+            {
+              message: {
+                role: 'assistant',
+                content:
+                  '```json\n{"totalMinutes":38,"stages":[' +
+                  '{"step":1,"startMinute":0,"minutes":8,"what":"洗菜切配","dish":"番茄炒蛋","parallel":true,"why":"先备好下锅就能炒"},' +
+                  '{"step":2,"startMinute":8,"minutes":5,"what":"热油炒蛋盛出","dish":"番茄炒蛋","parallel":false,"why":"这一步要守着锅"}' +
+                  '],"tips":["花生最后放"]}\n```',
+              },
+            },
+          ],
+          usage: { total_tokens: 200 },
+        }));
+      }
       // 正常回复：思考过程混在 content 里，外面还套了 ```json 围栏
       return rs.end(JSON.stringify({
         model: 'MiniMax-M3',
@@ -619,8 +639,85 @@ async function main() {
   const emptyPrompt = await post('/api/ai/chat', { task: 'cook-plan', prompt: '' });
   eq('空内容被拒', emptyPrompt.status, 400);
 
+  // 备餐时间轴：厨房助手现在用的任务，要能拿到 minutes / parallel / startMinute
+  const tl = await post('/api/ai/chat', { task: 'prep-timeline', prompt: '今天做番茄炒蛋和宫保鸡丁' });
+  ok('备餐时间轴调用成功', tl.body.data.ok === true, tl.body.data);
+  eq('总耗时被解析出来', tl.body.data.result.totalMinutes, 38);
+  eq('第一步从第 0 分钟开始', tl.body.data.result.stages[0].startMinute, 0);
+  eq('每步的耗时在', tl.body.data.result.stages[0].minutes, 8);
+  eq('能不能并行有标记', tl.body.data.result.stages[0].parallel, true);
+  eq('必须守灶的步骤标成不可并行', tl.body.data.result.stages[1].parallel, false);
+  eq('步骤属于哪道菜', tl.body.data.result.stages[1].dish, '番茄炒蛋');
+
   await stop(ai);
   await new Promise((r) => mock.close(r));
+
+  console.log('\n[15] 版本信息');
+  const verBoot = await boot('ver');
+  const v = (await get('/api/version')).body.data;
+  ok('版本号有值', /^\d+\.\d+\.\d+$/.test(v.version), v.version);
+  ok('更新记录不是空数组', Array.isArray(v.releases) && v.releases.length > 0, v.releases && v.releases.length);
+  ok('第一条更新记录就是当前版本', v.releases[0].version === v.version, {
+    current: v.version,
+    first: v.releases[0].version,
+  });
+  ok('每条更新记录都有标题和日期', v.releases.every((r) => r.title && /^\d{4}-\d{2}-\d{2}$/.test(r.date)), v.releases.map((r) => r.version));
+  ok('每条更新记录都列了具体改了什么', v.releases.every((r) => Array.isArray(r.items) && r.items.length), v.releases.map((r) => r.items && r.items.length));
+  // 版本页不该要口令：网页上任何人都该能看到自己跑的是哪一版
+  const noPinVer = (await get('/api/version')).status;
+  eq('没口令也能看版本', noPinVer, 200);
+  await stop(verBoot);
+
+  console.log('\n[16] 批量删除库存');
+  const bulk = await boot('bulk');
+  const pf1 = (await post('/api/pantry', { name: '土豆', category: '蔬菜', quantity: 2, unit: '个' })).body.data;
+  const pf2 = (await post('/api/pantry', { name: '五花肉', category: '肉类', quantity: 1, unit: '斤' })).body.data;
+  const pf3 = (await post('/api/pantry', { name: '鸡蛋', category: '蛋类', quantity: 10, unit: '个' })).body.data;
+  eq('先记了 3 样', (await get('/api/state')).body.data.pantry.length, 3);
+
+  const rm2 = await del(`/api/pantry?ids=${pf1.id},${pf2.id}`);
+  eq('批量删返回 200', rm2.status, 200);
+  eq('删掉了 2 样', rm2.body.data.removed, 2);
+  const afterIds = (await get('/api/state')).body.data.pantry.map((p) => p.id);
+  eq('没勾的那样还在', JSON.stringify(afterIds), JSON.stringify([pf3.id]));
+
+  const rmAgain = await del(`/api/pantry?ids=${pf1.id}`);
+  eq('重复删不报错，只是删不到东西', rmAgain.body.data.removed, 0);
+  const rmNone = await del('/api/pantry?ids=');
+  eq('没勾任何东西时明确报错', rmNone.status, 400);
+
+  // 老的按 scope 清理不能被 ids 分支顶掉
+  await post('/api/pantry', { name: '牛奶', category: '奶制品', quantity: 1, unit: '盒', expireAt: dayOffset(-2) });
+  await post('/api/pantry', { name: '酸奶', category: '奶制品', quantity: 1, unit: '盒', expireAt: dayOffset(2) });
+  const scopePurge = await del('/api/pantry?scope=expired');
+  eq('按过期清理仍然可用', scopePurge.body.data.removed, 1);
+  // 不带任何参数曾经等于「删掉所有填了保质期的」——这种默认值太危险
+  const noParam = await del('/api/pantry');
+  eq('不说明删什么就拒绝执行', noParam.status, 400);
+  const badScope = await del('/api/pantry?scope=all');
+  eq('不认识的清理范围被拒', badScope.status, 400);
+  eq('上面的拒绝没有误删任何东西', (await get('/api/state')).body.data.pantry.length, 2);
+  await stop(bulk);
+
+  console.log('\n[17] 点餐一键开做');
+  const bulkOrder = await boot('bulkOrder');
+  const bd1 = (await post('/api/dishes', { name: '测试菜一', category: '家常菜' })).body.data;
+  const bd2 = (await post('/api/dishes', { name: '测试菜二', category: '家常菜' })).body.data;
+  const bo1 = (await post('/api/orders', { dishId: bd1.id, dishName: bd1.name, requester: '我', people: 2 })).body.data;
+  const bo2 = (await post('/api/orders', { dishId: bd2.id, dishName: bd2.name, requester: '我', people: 3 })).body.data;
+  eq('两条点餐都是待做', (await get('/api/state')).body.data.orders.every((o) => o.status === 'pending'), true);
+
+  const started = await req('PATCH', '/api/orders', { ids: [bo1.id, bo2.id], status: 'cooking' });
+  eq('一键开做返回 200', started.status, 200);
+  eq('两条都改了', started.body.data.changed, 2);
+  const afterStart = (await get('/api/state')).body.data.orders.map((o) => o.status);
+  eq('状态全变成制作中', JSON.stringify(afterStart.sort()), JSON.stringify(['cooking', 'cooking']));
+
+  const badStatus = await req('PATCH', '/api/orders', { ids: [bo1.id], status: '瞎写' });
+  eq('不认的状态被拒', badStatus.status, 400);
+  const noIds = await req('PATCH', '/api/orders', { status: 'cooking' });
+  eq('没选任何一条时明确报错', noIds.status, 400);
+  await stop(bulkOrder);
 
   /* ---------- 收尾 ---------- */
   fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5 });

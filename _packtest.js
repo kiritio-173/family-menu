@@ -103,7 +103,7 @@ async function main() {
   } else {
     ok('首页能拿到菜谱', st.dishes.length === 5, st.dishes.length);
   }
-  ok('默认带 1 个家庭', st.households.length === 1, st.households);
+  ok('家庭列表跟着包过来了', st.households.length >= 1, st.households);
   ok('默认家庭成员还在', st.households[0].members[0].name === '我', st.households[0].members);
   ok('库存初始为空', st.pantry.length === 0);
   ok('页面文件都在', (await fetch(BASE + '/')).status === 200 && (await fetch(BASE + '/app.js')).status === 200);
@@ -112,6 +112,8 @@ async function main() {
   ok('食材预设在包里也可用', pre.presets.length === 148, pre.presets.length);
 
   console.log('\n跑一遍多家庭 + 库存 …');
+  // 打进去的家庭有几个取决于本机当时的数据（写死 1 的话，用户多建一个家庭就误报）
+  const baseHouseholds = st.households.length;
   const h = (await api('POST', '/api/households', { name: '301' })).body.data;
   ok('加第二个家庭', !!h.id, h);
   await api('POST', '/api/orders', { dishName: '番茄炒蛋', householdId: h.id });
@@ -127,7 +129,7 @@ async function main() {
   // 数据要真的落在解压目录里
   await sleep(400);
   const onDisk = JSON.parse(fs.readFileSync(path.join(APP, 'data', 'households.json'), 'utf8'));
-  ok('households.json 落盘', onDisk.length === 2, onDisk.length);
+  ok('households.json 落盘', onDisk.length === baseHouseholds + 1, onDisk.length);
   const pantryOnDisk = JSON.parse(fs.readFileSync(path.join(APP, 'data', 'pantry.json'), 'utf8'));
   ok('pantry.json 落盘', pantryOnDisk.length === 2, pantryOnDisk.length);
 

@@ -15,9 +15,12 @@ const S = {
   memberFilter: '',
   pantryCat: '全部',
   pantryFilter: 'all', // all | soon | expired
+  pantryPick: false, // 库存批量删除：多选模式开关
+  pantrySel: new Set(), // 库存批量删除：勾中的 id
   planWeek: '', // 正在看的周（周一日期），空 = 本周
   authed: false, // 是否已解锁管理区（没设口令时恒为 true）
   cookPlanText: '', // 厨房助手结果的纯文本版，给「复制」用
+  version: null, // /api/version 的结果，管理页显示版本和更新内容
   householdId: '', // 当前家庭，存在本机 localStorage：每台设备各选各的
   data: {
     categories: [], dishes: [], orders: [], settings: {},
@@ -263,6 +266,19 @@ async function loadAIStatus() {
 const aiReady = () => !!(aiInfo && aiInfo.enabled);
 
 /**
+ * 版本号和更新内容。
+ * 拉不到也不能挡着页面：该显示什么还显示什么，只是版本号位置空着而已。
+ */
+async function loadVersion() {
+  try {
+    S.version = await api('GET', '/api/version');
+  } catch (_) {
+    S.version = null;
+  }
+  return S.version;
+}
+
+/**
  * 调一次 AI。
  * 失败时统一 toast + 返回 null，调用方拿到 null 就安静退回去，
  * 绝不让 AI 的问题影响到菜谱/点餐这些主流程。
@@ -295,6 +311,9 @@ async function askAI(task, prompt, imageUrl) {
  * 中途误触关闭（关掉了结果就白等一场）。
  */
 let aiBusyOn = false;
+// 这次忙碌遮罩是不是我们临时把 #modalRoot 掀开才挂上去的
+// （原本没弹层，它带着 hidden，遮罩挂进去也看不见）
+let aiBusyOwn = false;
 
 function aiBusy(title, hint) {
   if (aiBusyOn) return; // 已经有一层了，别叠成两层
@@ -308,13 +327,31 @@ function aiBusy(title, hint) {
     `<div class="ai-busy-title">${esc(title)}</div>` +
     `<div class="ai-busy-hint">${esc(hint || '')}</div>` +
     '</div>';
-  ($('#modalRoot') || document.body).appendChild(el);
+  const root = $('#modalRoot');
+  // CSS 里有 `[hidden] { display: none !important }`，而 #modalRoot 没弹层时
+  // 一直带着 hidden —— 遮罩挂进去等于挂进了黑洞。点餐页点「厨房助手」正好
+  // 没弹层，表现是按下去十几秒毫无反馈，像按钮坏了。临时掀开，用完盖回去。
+  if (root && root.hidden) {
+    root.hidden = false;
+    aiBusyOwn = true;
+    document.body.style.overflow = 'hidden';
+  }
+  (root || document.body).appendChild(el);
 }
 
 function aiBusyDone() {
   aiBusyOn = false;
   const el = $('#aiBusy');
   if (el) el.remove();
+  if (!aiBusyOwn) return;
+  aiBusyOwn = false;
+  const root = $('#modalRoot');
+  // 等结果的间隙可能已经开出了新弹层（比如厨房助手的时间轴），
+  // 那种情况下不能再把 root 盖回去，否则连刚出的结果一起收走
+  if (root && !root.querySelector('.sheet')) {
+    root.hidden = true;
+    document.body.style.overflow = '';
+  }
 }
 
 /* ---------------- API ---------------- */
@@ -651,66 +688,121 @@ async function addToPlan(entry, weekOf, after) {
   }
 }
 
-/** 厨房助手的结果：备菜先行 + 顺序 + 提醒，可一键复制走 */
+/**
+ * 厨房助手的结果：从洗菜到最后上桌的整条流程。
+ *
+ * 做饭时真正想知道的是「现在几点该干嘛、还要多久」，所以每一步都挂时间轴：
+ * 左边是 T+几分钟，右边标清楚这一步能不能离开灶台。
+ */
 function openCookPlanSheet(r) {
+  const stages = Array.isArray(r.stages) ? r.stages.filter((s) => s && (s.what || s.dish)) : [];
+  const tips = Array.isArray(r.tips) ? r.tips : [];
   const prep = Array.isArray(r.prep) ? r.prep : [];
   const seq = Array.isArray(r.sequence) ? r.sequence : [];
-  const tips = Array.isArray(r.tips) ? r.tips : [];
 
-  const body = `
-    ${
-      prep.length
-        ? `<div class="block">
-             <h3 class="block-title">🥕 先把这些备好</h3>
-             <div class="panel">
-               <ul class="prep-list">
-                 ${prep.map((p) => `<li>${esc(p)}</li>`).join('')}
-               </ul>
-             </div>
-           </div>`
-        : ''
-    }
-    ${
-      seq.length
-        ? `<div class="block">
-             <h3 class="block-title">👨‍🍳 下厨顺序</h3>
-             <ol class="cook-seq">
-               ${seq
-                 .map(
-                   (s) => `<li class="cook-step">
-                     <div class="cook-step-head">
-                       <span class="cook-step-n">${esc(s.step)}</span>
-                       <span class="cook-step-what">${esc(s.what)}</span>
-                     </div>
-                     ${s.dish ? `<div class="cook-step-dish">${esc(s.dish)}</div>` : ''}
-                     ${s.why ? `<div class="cook-step-why">💡 ${esc(s.why)}</div>` : ''}
-                   </li>`
-                 )
-                 .join('')}
-             </ol>
-           </div>`
-        : ''
-    }
-    ${
-      tips.length
-        ? `<div class="block">
-             <h3 class="block-title">📌 提醒</h3>
-             <div class="panel"><ul class="prep-list">${tips.map((t) => `<li>${esc(t)}</li>`).join('')}</ul></div>
-           </div>`
-        : ''
-    }
-    ${!prep.length && !seq.length ? '<div class="empty"><p class="empty-text">这次没排出来，试试换个说法</p></div>' : ''}`;
+  // 总耗时：优先用 AI 给的，没有就按最后一步的 startMinute + minutes 算
+  const last = stages[stages.length - 1];
+  const derived = last ? (Number(last.startMinute) || 0) + (Number(last.minutes) || 0) : 0;
+  const total = Number(r.totalMinutes) || derived;
+
+  const clock = (m) => `T+${Math.max(0, Math.round(Number(m) || 0))}′`;
+
+  let timeline = '';
+  if (stages.length) {
+    // AI 漏给 startMinute 时按前一步顺推，别让整条时间轴空着
+    let timelineCursor = 0;
+    timeline = `<div class="block">
+      <h3 class="block-title">⏱ 备餐流程${total ? ` · 大约 ${total} 分钟` : ''}</h3>
+      <ol class="timeline">
+        ${stages
+          .map((s, i) => {
+            const start = Number(s.startMinute);
+            const mins = Number(s.minutes);
+            const hasClock = Number.isFinite(start) && start >= 0;
+            const at = hasClock ? start : i === 0 ? 0 : timelineCursor;
+            timelineCursor = at + Math.max(1, Math.round(mins) || 1);
+            const parallel = s.parallel === true;
+            return `<li class="tl-step ${parallel ? 'tl-par' : 'tl-seq'}">
+              <div class="tl-time">
+                <span class="tl-at">${clock(at)}</span>
+                <span class="tl-len">${Math.round(mins) || '?'} 分钟</span>
+              </div>
+              <div class="tl-body">
+                <div class="tl-what"><span class="tl-n">${i + 1}</span>${esc(s.what || '')}</div>
+                ${s.dish ? `<div class="tl-dish">${esc(s.dish)}</div>` : ''}
+                <span class="tl-flag ${parallel ? 'tl-flag-par' : 'tl-flag-seq'}">
+                  ${parallel ? '可离开 · 和别的菜同时做' : '要守灶 · 得看着'}
+                </span>
+                ${s.why ? `<div class="tl-why">💡 ${esc(s.why)}</div>` : ''}
+              </div>
+            </li>`;
+          })
+          .join('')}
+      </ol>
+      <p class="section-sub" style="margin-top:8px;line-height:1.6">
+        标了「可离开」的是可以顺手做的事 —— 洗菜的时候把另一道菜的肉腌上，
+        炖着的 20 分钟正好够切完剩下两道。标了「要守灶」的就别走开。
+      </p>
+    </div>`;
+  }
+
+  // 老结构（prep/sequence）保留：万一 AI 少给了 stages，至少还能看到点什么
+  const legacy = !stages.length
+    ? `<div class="block">
+        <h3 class="block-title">👨‍🍳 下厨顺序</h3>
+        ${prep.length ? `<div class="panel"><ul class="prep-list">${prep.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></div>` : ''}
+        ${
+          seq.length
+            ? `<ol class="cook-seq">
+                ${seq
+                  .map(
+                    (s) => `<li class="cook-step">
+                      <div class="cook-step-head">
+                        <span class="cook-step-n">${esc(s.step)}</span>
+                        <span class="cook-step-what">${esc(s.what)}</span>
+                      </div>
+                      ${s.dish ? `<div class="cook-step-dish">${esc(s.dish)}</div>` : ''}
+                      ${s.why ? `<div class="cook-step-why">💡 ${esc(s.why)}</div>` : ''}
+                    </li>`
+                  )
+                  .join('')}
+              </ol>`
+            : ''
+        }
+      </div>`
+    : '';
+
+  const tipsHtml = tips.length
+    ? `<div class="block">
+        <h3 class="block-title">📌 提醒</h3>
+        <div class="panel"><ul class="prep-list">${tips.map((t) => `<li>${esc(t)}</li>`).join('')}</ul></div>
+      </div>`
+    : '';
 
   openSheet({
-    title: '厨房助手 · 怎么做最快',
-    body,
+    title: '厨房助手 · 今晚怎么做',
+    body: `${timeline}${legacy}${tipsHtml}${
+      !stages.length && !prep.length && !seq.length
+        ? '<div class="empty"><p class="empty-text">这次没排出来，试试再点一次</p></div>'
+        : ''
+    }`,
     foot: `<button class="btn ghost" data-act="close-sheet">关闭</button>
            <button class="btn" data-act="copy-cook-plan">复制</button>`,
   });
 
+  const lines = stages.length
+    ? stages.map(
+        (s, i) =>
+          `${i + 1}. [${clock(s.startMinute)} · ${Math.round(Number(s.minutes)) || '?'} 分钟${
+            s.parallel === true ? ' · 可并行' : ' · 要守灶'
+          }] ${s.what}${s.dish ? `（${s.dish}）` : ''}`
+      )
+    : seq.map((s) => `${s.step}. ${s.what}${s.dish ? `（${s.dish}）` : ''}`);
+
   S.cookPlanText = [
-    prep.length ? '【先备菜】\n' + prep.map((p, i) => `${i + 1}. ${p}`).join('\n') : '',
-    seq.length ? '【下厨顺序】\n' + seq.map((s) => `${s.step}. ${s.what}${s.dish ? '（' + s.dish + '）' : ''}`).join('\n') : '',
+    total ? `【整桌大约 ${total} 分钟】` : '',
+    lines.length ? '【流程】\n' + lines.join('\n') : '',
+    prep.length && !stages.length ? '【先备菜】\n' + prep.map((p, i) => `${i + 1}. ${p}`).join('\n') : '',
     tips.length ? '【提醒】\n' + tips.map((t) => '· ' + t).join('\n') : '',
   ]
     .filter(Boolean)
@@ -1030,6 +1122,7 @@ function viewOrder() {
   });
 
   const doneCount = all.filter((o) => o.status === 'done').length;
+  const pendingCount = all.filter((o) => o.status === 'pending').length;
 
   return `
     ${shopHtml}
@@ -1042,9 +1135,19 @@ function viewOrder() {
           : ''
       }
       ${
+        pendingCount
+          ? `<button class="btn green sm" style="margin-left:${
+              S.orderStatus === 'done' && doneCount ? '8px' : 'auto'
+            }"
+              data-act="start-all" title="待做的全部开始做">🔥 一键开做 ${pendingCount}</button>`
+          : ''
+      }
+      ${
         aiReady() && pendingOrders().length >= 2
-          ? `<button class="btn soft sm" style="margin-left:${S.orderStatus === 'done' && doneCount ? '8px' : 'auto'}"
-               data-act="ai-cook-plan" title="看这几道菜怎么并行着做最快">👨‍🍳 厨房助手</button>`
+          ? `<button class="btn soft sm" style="margin-left:${
+              S.orderStatus === 'done' && doneCount || pendingCount ? '8px' : 'auto'
+            }"
+              data-act="ai-cook-plan" title="看这几道菜怎么并行着做最快">👨‍🍳 厨房助手</button>`
           : ''
       }
     </div>
@@ -1360,6 +1463,23 @@ function foodRow(p) {
   const st = shelfStatus(p);
   const flagText =
     st.key === 'none' ? (p.expireAt || '未填保质期') : st.label;
+
+  // 多选模式：整行变成一个勾选框，数量加减暂时让位（批量清理不需要先调数量）
+  if (S.pantryPick) {
+    const on = S.pantrySel.has(p.id);
+    return `<div class="food-row pick ${on ? 'on' : ''}" role="checkbox" tabindex="0"
+      aria-checked="${on}" data-act="pick-food" data-id="${esc(p.id)}"
+      aria-label="选择 ${esc(p.name)}">
+      <span class="pick-box">${on ? '✓' : ''}</span>
+      <div class="food-main">
+        <div class="food-name">${esc(p.name)}
+          <span class="food-qty-inline">${esc(fmtQty(p.quantity))}${esc(p.unit)}</span>
+        </div>
+        <div class="food-sub">${esc(p.category)} · ${esc(flagText)}</div>
+      </div>
+    </div>`;
+  }
+
   return `<div class="food-row">
     <span class="food-emoji">${catEmoji(p.category)}</span>
     <div class="food-main" role="button" tabindex="0" data-act="edit-food" data-id="${esc(p.id)}"
@@ -1392,6 +1512,30 @@ async function bumpQty(id, delta) {
   await loadState(true);
   render();
 }
+
+/**
+ * 当前筛选条件下能看到的那批食材。
+ *
+ * viewPantry 和「全选」都必须走这一个函数 —— 两边各算一遍的话，
+ * 迟早会出现「全选显示 10 样、删掉却是 12 样」这种对不上的情况。
+ */
+function pantryVisible() {
+  const all = householdPantry();
+  let list = all;
+  if (S.pantryFilter === 'soon') list = list.filter((p) => ['soon', 'today'].includes(shelfStatus(p).key));
+  else if (S.pantryFilter === 'expired') list = list.filter((p) => shelfStatus(p).key === 'expired');
+  if (S.pantryCat !== '全部') list = list.filter((p) => p.category === S.pantryCat);
+  return list;
+}
+
+const visiblePantryIds = () => pantryVisible().map((p) => p.id);
+
+const pantryNames = (ids) => {
+  const set = new Set(ids);
+  return householdPantry()
+    .filter((p) => set.has(p.id))
+    .map((p) => p.name);
+};
 
 function viewPantry() {
   const all = householdPantry();
@@ -1439,10 +1583,8 @@ function viewPantry() {
     )
     .join('');
 
-  let list = all;
-  if (S.pantryFilter === 'soon') list = soon;
-  else if (S.pantryFilter === 'expired') list = expired;
-  if (S.pantryCat !== '全部') list = list.filter((p) => p.category === S.pantryCat);
+  // 筛选和「全选」共用 pantryVisible()，不要在这里另算一遍
+  const list = pantryVisible();
 
   let body;
   if (S.loading) {
@@ -1488,8 +1630,28 @@ function viewPantry() {
       .join('');
   }
 
+  // 多选模式的工具条：全选、已选几样、退出、删掉
+  const pickBar = S.pantryPick
+    ? (() => {
+        const visible = list.map((p) => p.id).filter((id) => S.pantrySel.has(id));
+        const allOn = list.length > 0 && visible.length === list.length;
+        return `<div class="pick-bar">
+          <button class="btn ghost sm" data-act="pick-all">${allOn ? '☑ 全不选' : '☐ 全选'}</button>
+          <span class="pick-count">${list.length ? `已选 ${visible.length} / ${list.length}` : '没有可选的'}</span>
+          <button class="btn ghost sm" data-act="pick-cancel">退出</button>
+          <button class="btn danger sm" data-act="pick-delete" ${visible.length ? '' : 'disabled'}>🗑 删除</button>
+        </div>`;
+      })()
+    : all.length
+    ? `<div class="list-toolbar">
+        <span class="section-sub">${all.length} 样食材</span>
+        <button class="btn ghost sm" data-act="pick-on">☑ 批量删除</button>
+      </div>`
+    : '';
+
   return `
     ${alertHtml}
+    ${pickBar}
     <div class="stat-row">
       <div class="stat"><div class="stat-num">${all.length}</div><div class="stat-label">样食材</div></div>
       <div class="stat${soon.length ? ' warn' : ''}"><div class="stat-num">${soon.length}</div><div class="stat-label">快过期</div></div>
@@ -1498,7 +1660,7 @@ function viewPantry() {
     <div class="chip-row">${filterChips}</div>
     <div class="chip-row">${catChips}</div>
     ${body}
-    <button class="fab" data-act="new-food">＋ 记一样食材</button>`;
+    ${S.pantryPick ? '' : '<button class="fab" data-act="new-food">＋ 记一样食材</button>'}`;
 }
 
 /* ---------------- 食材录入 / 编辑 ---------------- */
@@ -1605,6 +1767,53 @@ async function openFoodEditor(item) {
 /* =========================================================
    视图 4：管理
    ========================================================= */
+
+/**
+ * 版本号 + 更新内容。
+ *
+ * 放在「关于」里而不是藏进设置深处：这个页面跑在别人家的电脑上，
+ * 出了新版本时得让人一眼看到自己跑的是哪一版、这一版加了什么。
+ */
+function versionHtml() {
+  const v = S.version;
+  if (!v) {
+    return `<div class="list-row"><span class="icon-mini">🏷️</span><span class="list-row-main">
+      <span class="list-row-title">版本</span>
+      <span class="list-row-sub">没读到版本信息（服务刚起来或连不上）</span>
+    </span></div>`;
+  }
+  const latest = v.releases[0];
+  return `<div class="list-row" role="button" tabindex="0" data-act="show-changelog"
+      aria-label="查看版本 ${esc(v.version)} 的更新内容">
+      <span class="icon-mini">🏷️</span>
+      <span class="list-row-main">
+        <span class="list-row-title">版本 v${esc(v.version)}</span>
+        <span class="list-row-sub">${esc(latest ? latest.title : '点开看更新内容')}</span>
+      </span>
+      <span class="version-tag">${v.releases.length} 次更新</span>
+    </div>`;
+}
+
+/** 更新内容弹层：新版本排在最上面，越往下越早 */
+function openChangelogSheet() {
+  const v = S.version;
+  if (!v) return toast('还没读到版本信息，稍后再看看');
+  const body = v.releases
+    .map(
+      (r, i) => `<div class="block release${i ? '' : ' current'}">
+        <h3 class="block-title">v${esc(r.version)}${i ? '' : ' <span class="pill-now">当前</span>'}</h3>
+        <p class="section-sub" style="margin:-4px 0 8px">${esc(r.date)} · ${esc(r.title)}</p>
+        <ul class="prep-list">${r.items.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
+      </div>`
+    )
+    .join('');
+
+  openSheet({
+    title: `版本 v${v.version}`,
+    body,
+    foot: `<button class="btn" data-act="close-sheet">知道了</button>`,
+  });
+}
 
 function viewManage() {
   // 前端拿不到口令明文了，改成看 hasPin 标记 + 本机有没有会话 token
@@ -1738,6 +1947,9 @@ function viewManage() {
           : '未配置（data/ai.json 里填上 API Key 就会出现在菜谱编辑和点餐页）'
       }</span>
     </span></div>
+
+    <div class="section-head"><h2 class="section-title">关于</h2></div>
+    ${versionHtml()}
 
     <div class="section-head"><h2 class="section-title">数据</h2></div>
     <div class="row-2">
@@ -2441,14 +2653,7 @@ const ACTIONS = {
     }
     if (dishes.length < 2) return toast('至少有两道待做的菜才需要排顺序');
 
-    openSheet({
-      title: '厨房助手',
-      body: `<div class="empty" style="padding:32px">
-        <div class="empty-emoji" style="font-size:40px">👨‍🍳</div>
-        <p class="empty-title" style="margin-top:12px">正在排下厨顺序…</p>
-        <p class="empty-text">${dishes.length} 道菜，大概 5-15 秒</p>
-      </div>`,
-    });
+    aiBusy('厨房助手在想', `${dishes.length} 道菜，大概 5-15 秒`);
 
     const brief =
       '今天要一起做这几道菜：\n\n' +
@@ -2460,8 +2665,8 @@ const ACTIONS = {
             (d.steps.length ? `\n   步骤：${d.steps.join(' ')}` : '')
         )
         .join('\n');
-    const r = await askAI('cook-plan', brief);
-    closeSheet();
+    const r = await askAI('prep-timeline', brief);
+    aiBusyDone();
     if (!r) return;
     openCookPlanSheet(r);
   },
@@ -2940,6 +3145,72 @@ const ACTIONS = {
     render();
     toast(r.removed ? `已清理 ${r.removed} 样` : '没有需要清理的');
   },
+
+  /* ---- 库存批量删除 ---- */
+
+  'pick-on'() {
+    S.pantryPick = true;
+    S.pantrySel = new Set();
+    render();
+  },
+  'pick-cancel'() {
+    S.pantryPick = false;
+    S.pantrySel = new Set();
+    render();
+  },
+  'pick-food'(el) {
+    const id = el.dataset.id;
+    if (S.pantrySel.has(id)) S.pantrySel.delete(id);
+    else S.pantrySel.add(id);
+    render();
+  },
+  /** 全选/全不选只针对「当前看得到的那批」，不是整个库存 */
+  'pick-all'(el) {
+    const visible = visiblePantryIds();
+    const allOn = visible.length > 0 && visible.every((id) => S.pantrySel.has(id));
+    if (allOn) visible.forEach((id) => S.pantrySel.delete(id));
+    else visible.forEach((id) => S.pantrySel.add(id));
+    render();
+  },
+  async 'pick-delete'() {
+    const ids = [...S.pantrySel];
+    if (!ids.length) return toast('还没勾选任何一样');
+    // 只把名字念出来，不念「家里有 12 样」这种会吓人的总数
+    const names = pantryNames(ids);
+    const preview = names.slice(0, 3).join('、') + (names.length > 3 ? ` 等 ${names.length} 样` : '');
+    if (!confirm(`删掉「${currentHousehold() ? currentHousehold().name : ''}」库存里的 ${preview}？删了就找不回来了。`))
+      return;
+    const r = await api('DELETE', `/api/pantry?ids=${ids.map(encodeURIComponent).join(',')}`);
+    S.pantrySel = new Set();
+    await loadState(true);
+    // 先刷新再判断：原来在刷新前比数量，筛选状态下会误判「全删光了」
+    if (!householdPantry().length) S.pantryPick = false;
+    render();
+    toast(r.removed ? `已删掉 ${r.removed} 样` : '没删掉任何东西');
+  },
+
+  /* ---- 点餐一键开做 ---- */
+
+  async 'start-all'() {
+    const list = pendingOrders().filter((o) => o.status === 'pending');
+    if (!list.length) return toast('没有待做的菜了');
+    const names = [...new Set(list.map((o) => o.dishName))];
+    const preview = names.slice(0, 3).join('、') + (names.length > 3 ? ` 等 ${names.length} 道` : '');
+    if (!confirm(`把 ${list.length} 条待做全部标成制作中？\n${preview}`)) return;
+    const r = await api('PATCH', '/api/orders', {
+      ids: list.map((o) => o.id),
+      status: 'cooking',
+    });
+    // 全部开做之后自动切到「制作中」，不然用户还停在空的「待做」页
+    if (r.changed) S.orderStatus = 'cooking';
+    await loadState(true);
+    render();
+    toast(r.changed ? `${r.changed} 道菜开始做了` : '没有改动');
+  },
+
+  'show-changelog'() {
+    openChangelogSheet();
+  },
   /** 买菜清单里「入库」：把买回来的东西记进当前家庭库存 */
   async 'stock-it'(el) {
     const name = el.dataset.name;
@@ -3193,4 +3464,5 @@ window.addEventListener(
 
 /* 启动 */
 loadAIStatus(); // 和 loadState 并行，不阻塞首屏
+loadVersion(); // 版本信息同理，拉不到也不影响使用
 loadState();

@@ -25,6 +25,72 @@ const MAX_BODY = 16 * 1024 * 1024; // 16MB，够放压缩后的 base64 图片
 const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '1';
 
 /* ------------------------------------------------------------------ *
+ * 版本与更新内容
+ *
+ * 网页上「这是第几版、这一版加了什么」直接读这里。
+ * 写在代码里而不是另开一个文件，是为了保证打包时不会漏 —— 少一个文件，
+ * 网页上就会出现一个空白的更新日志，比没有还糟。
+ * ------------------------------------------------------------------ */
+
+const APP_VERSION = '1.4.0';
+
+// 新的排在前面；date 只写发布年月日，不用精确到时分
+const RELEASES = [
+  {
+    version: '1.4.0',
+    date: '2026-10-15',
+    title: '备餐流程时间轴 + 批量操作 + 版本页',
+    items: [
+      '厨房助手升级成完整备餐时间轴：从开始洗菜到最后一道上标，每步带预计耗时，能并行的标「可并行」，必须等的标「要等」',
+      '库存支持批量删除：进多选模式，勾选或全选后一次清掉',
+      '点餐页新增「一键开做」：待做的菜一次全部转成制作中',
+      '管理页新增版本信息，点开能看到每个版本都改了什么',
+      '点餐单上的菜名现在可以直接点开菜谱（自定义菜除外）',
+    ],
+  },
+  {
+    version: '1.3.0',
+    date: '2026-10-15',
+    title: 'AI 厨房助手',
+    items: [
+      '拍张照 AI 认菜谱：传一张成品图，自动填菜名、分类、调料用量、步骤',
+      '菜谱规范化：把随手记的乱菜谱理顺，「够两个人吃的」会变成「2 人份」',
+      '厨房助手：把今晚几道菜排成并行下厨的顺序',
+      'AI 全程走服务端，API Key 不进网页、不进备份、不进 GitHub',
+    ],
+  },
+  {
+    version: '1.2.0',
+    date: '2026-10-14',
+    title: '本周计划',
+    items: [
+      '新增「本周计划」页：把想做的菜先排上，一周一次买齐',
+      '计划菜自动汇总成采购清单，标了「家里有」的不用买',
+      '可以翻到下一周提前备菜，计划按家庭各记各的',
+    ],
+  },
+  {
+    version: '1.1.0',
+    date: '2026-10-14',
+    title: '管理口令',
+    items: [
+      '可选的管理口令，口令只存在服务端，前端拿不到明文',
+      '改菜谱、导备份要口令；点餐、库存、本周计划不受影响',
+      '编辑菜品时误关弹层不再丢内容，自动存草稿',
+    ],
+  },
+  {
+    version: '1.0.0',
+    date: '2026-10-13',
+    title: '第一版',
+    items: [
+      '菜谱管理、点餐、买菜清单、库存、多家庭、局域网扫码点餐',
+      '零第三方依赖：不用 npm install、不用数据库',
+    ],
+  },
+];
+
+/* ------------------------------------------------------------------ *
  * 工具
  * ------------------------------------------------------------------ */
 
@@ -1040,6 +1106,27 @@ async function handleAPI(req, res, url) {
           '"tips":["提醒"]}。',
         wantJSON: true,
       },
+      // 厨房助手现在用的是这个：把 cook-plan 的「顺序」升级成带时间轴的整条流程
+      'prep-timeline': {
+        system:
+          '你是厨房调度助手。用户会给今天要一起做的几道菜，请排出一条从「开始洗菜」' +
+          '到最后一道菜上桌的完整流程。只输出 JSON，不要解释、不要 markdown 代码块。格式：' +
+          '{"totalMinutes":总耗时分钟数,' +
+          '"stages":[{"step":1,"startMinute":从第几分钟开始,"minutes":这一步要几分钟,' +
+          '"what":"具体做什么（动词开头，一句话）","dish":"属于哪道菜，没有就空字符串",' +
+          '"parallel":true或false,"why":"为什么这一步排在这里"}],' +
+          '"tips":["提醒"]}。' +
+          '要求：' +
+          '1) startMinute 必须和前面所有步骤的时长对得上——第一步 startMinute=0，' +
+          '之后每一步的 startMinute = 上一步 startMinute + 上一步 minutes；' +
+          '2) parallel=true 表示这一步可以和别的菜同时做（洗菜、切配、腌肉、蒸饭），' +
+          'parallel=false 表示必须守着灶台或必须等上一步做完（下锅、翻炒、收汁、装盘）；' +
+          '3) minutes 写实际耗时，洗菜切菜 3-8 分钟，下锅翻炒 2-5 分钟，' +
+          '炖煮 15-40 分钟，不要一律填 5；' +
+          '4) 步骤 5-12 条，从备菜一直写到全部上桌；' +
+          '5) why 用一句话说明为什么这么排，不要空话。',
+        wantJSON: true,
+      },
     };
 
     const t = AI_TASKS[task];
@@ -1062,6 +1149,15 @@ async function handleAPI(req, res, url) {
     return sendJSON(res, 200, {
       ok: true,
       data: { ok: true, result: t.wantJSON ? r.json : r.text, usage: r.usage, model: r.model },
+    });
+  }
+
+  // GET /api/version —— 版本号和更新内容。
+  // 不用认证：这里没有任何用户数据，网页上任何人都该能看到自己跑的是哪一版。
+  if (method === 'GET' && route.length === 1 && route[0] === 'version') {
+    return sendJSON(res, 200, {
+      ok: true,
+      data: { version: APP_VERSION, releases: RELEASES },
     });
   }
 
@@ -1242,17 +1338,42 @@ async function handleAPI(req, res, url) {
       return sendJSON(res, 200, { ok: true, data: gone });
     }
     if (method === 'DELETE' && !id) {
-      // 批量清理：?householdId=xxx&scope=expired|soon
+      // 两种批量删法，靠参数区分：
+      //   ?ids=a,b,c            删勾选的那几样（库存多选模式）
+      //   ?householdId=&scope=   删过期 / 临期（保质期清理）
+      // 两种都必须明确给参数：宁可报错，也不能「不传参数就当全选」。
+      const idsRaw = url.searchParams.get('ids');
+      if (idsRaw !== null) {
+        const ids = new Set(
+          idsRaw
+            .split(',')
+            .map((s) => safeText(s, 40))
+            .filter(Boolean)
+        );
+        if (!ids.size) return sendError(res, 400, '没有选中任何一样');
+        const before = state.pantry.length;
+        // 一次过滤删完，而不是循环 splice：省掉「边删边比对」的坑
+        state.pantry = state.pantry.filter((p) => !ids.has(p.id));
+        scheduleSave('pantry');
+        return sendJSON(res, 200, {
+          ok: true,
+          data: { removed: before - state.pantry.length },
+        });
+      }
       const hid = safeText(url.searchParams.get('householdId'), 40);
       const scope = safeText(url.searchParams.get('scope'), 12);
+      // 少了 scope 就直接拒：以前这里是 return false（=删），
+      // 意味着误调一次接口就能把全家的保质期食材清空
+      if (scope !== 'expired' && scope !== 'soon') {
+        return sendError(res, 400, '得说清楚清理哪一类：expired 或 soon');
+      }
       const today = todayStr();
       const soon = daysFromNow(3);
       const keep = (p) => {
         if (hid && p.householdId !== hid) return true;
         if (!p.expireAt) return true;
         if (scope === 'expired') return p.expireAt >= today;
-        if (scope === 'soon') return p.expireAt < today || p.expireAt > soon;
-        return false;
+        return p.expireAt < today || p.expireAt > soon; // soon
       };
       const before = state.pantry.length;
       state.pantry = state.pantry.filter(keep);
@@ -1354,6 +1475,28 @@ async function handleAPI(req, res, url) {
       state.orders.unshift(order);
       scheduleSave('orders');
       return sendJSON(res, 200, { ok: true, data: order });
+    }
+    // 批量改状态：点餐页「一键开做」用。PATCH /api/orders 不带 id。
+    // 一次改完，不是循环单改 —— 十几条点餐时前者明显更快。
+    if (method === 'PATCH' && !id) {
+      const body = await readBody(req);
+      const status = ['pending', 'cooking', 'done', 'cancelled'].includes(body.status)
+        ? body.status
+        : null;
+      if (!status) return sendError(res, 400, '状态不对');
+      const ids = Array.isArray(body.ids) ? body.ids.map((s) => safeText(s, 40)).filter(Boolean) : [];
+      if (!ids.length) return sendError(res, 400, '没有选中任何一条');
+      const set = new Set(ids);
+      let n = 0;
+      const now = nowISO();
+      state.orders.forEach((o) => {
+        if (!set.has(o.id)) return;
+        o.status = status;
+        o.updatedAt = now;
+        n++;
+      });
+      scheduleSave('orders');
+      return sendJSON(res, 200, { ok: true, data: { changed: n, status } });
     }
     if (method === 'PATCH' && id) {
       const order = state.orders.find((o) => o.id === id);
