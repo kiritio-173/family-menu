@@ -103,7 +103,13 @@ async function main() {
   if (isEmpty) {
     ok('empty 包首启由 server.js 生成示例菜', st.dishes.length > 0, st.dishes.map((d) => d.name));
   } else {
-    ok('首页能拿到菜谱', st.dishes.length === 5, st.dishes.length);
+    // 打包时带了多少道菜取决于本机当时的数据（写死 5 的话，用户多录一道菜就误报）。
+    // 正确做法是拿包里那份 dishes.json 当基准：带过去了几道，冷启动后就该有几道。
+    const shippedDishes = JSON.parse(
+      fs.readFileSync(path.join(APP, 'data', 'dishes.json'), 'utf8')
+    );
+    const want = (Array.isArray(shippedDishes) ? shippedDishes : shippedDishes.dishes || []).length;
+    ok('首页能拿到菜谱', st.dishes.length === want && want > 0, { 包里: want, 实际: st.dishes.length });
   }
   ok('家庭列表跟着包过来了', st.households.length >= 1, st.households);
   ok('默认家庭成员还在', st.households[0].members[0].name === '我', st.households[0].members);

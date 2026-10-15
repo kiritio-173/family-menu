@@ -610,6 +610,21 @@ async function main() {
           usage: { total_tokens: 200 },
         }));
       }
+      // 对话助手：要的是纯文本，不能被当成 JSON 解析
+      if (body.includes('【当前页面】')) {
+        return rs.end(JSON.stringify({
+          model: 'MiniMax-M3',
+          choices: [
+            {
+              message: {
+                role: 'assistant',
+                content: '1. 少放半勺盐就行。\n2. 出锅前尝一下咸淡。',
+              },
+            },
+          ],
+          usage: { total_tokens: 40 },
+        }));
+      }
       // 正常回复：思考过程混在 content 里，外面还套了 ```json 围栏
       return rs.end(JSON.stringify({
         model: 'MiniMax-M3',
@@ -674,8 +689,69 @@ async function main() {
   eq('必须守灶的步骤标成不可并行', tl.body.data.result.stages[1].parallel, false);
   eq('步骤属于哪道菜', tl.body.data.result.stages[1].dish, '番茄炒蛋');
 
+  // 对话助手：纯文本直出 + 能带上下文
+  const chat = await post('/api/ai/chat', {
+    task: 'assistant-chat',
+    prompt: '【当前页面】点餐单\n【用户问】宫保鸡丁减盐怎么做',
+    history: [
+      { role: 'user', text: '晚上做什么好' },
+      { role: 'assistant', text: '做个宫保鸡丁吧' },
+    ],
+  });
+  ok('对话助手调用成功', chat.body.data.ok === true, chat.body.data);
+  ok(
+    '对话助手返回的是纯文本',
+    String(chat.body.data.result).indexOf('1. 少放半勺盐') === 0,
+    chat.body.data.result
+  );
+
   await stop(ai);
   await new Promise((r) => mock.close(r));
+
+  console.log('\n[14·2] 做法自带调料');
+  const mz = await boot('methodSeason');
+  const md = await post('/api/dishes', {
+    name: '红烧肉',
+    category: '家常菜',
+    servings: '3 人份',
+    seasonings: [{ name: '五花肉', amount: '600g' }],
+    methods: [
+      {
+        name: '红烧',
+        seasonings: [{ name: '冰糖', amount: '20g' }, { name: '八角', amount: '2 个' }],
+        steps: ['冷水下肉焯水', '炒糖色后下肉', '加开水没过，小火 50 分钟'],
+      },
+      { name: '清蒸', steps: ['肉切片铺盘', '上汽蒸 40 分钟'] },
+    ],
+  });
+  const mzId = md.body.data.id;
+  eq('菜品级调料留着', JSON.stringify(md.body.data.seasonings), JSON.stringify([{ name: '五花肉', amount: '600g' }]));
+  eq('做法能带自己的调料', md.body.data.methods[0].seasonings.length, 2);
+  eq('做法调料名字对', md.body.data.methods[0].seasonings[0].name, '冰糖');
+  eq('没配调料的做法是空数组', JSON.stringify(md.body.data.methods[1].seasonings), '[]');
+
+  // 存盘再读，字段不能被服务端规范化吃掉
+  await new Promise((r) => setTimeout(r, 400)); // 等防抖落盘
+  const mzBack = (await get('/api/state')).body.data.dishes.find((x) => x.id === mzId);
+  eq('重新读出来做法调料还在', mzBack.methods[0].seasonings.length, 2);
+
+  // 老数据（没有 methods[].seasonings）不能被弄坏
+  const oldStyle = await post('/api/dishes', {
+    name: '老格式菜',
+    category: '家常菜',
+    seasonings: [{ name: '盐', amount: '适量' }],
+    methods: [{ name: '唯一做法', steps: ['炒一下'] }],
+  });
+  eq('老格式自动补空数组', JSON.stringify(oldStyle.body.data.methods[0].seasonings), '[]');
+  eq('老格式的步骤没丢', oldStyle.body.data.methods[0].steps[0], '炒一下');
+  // 没有调料名的空行不能进 JSON
+  const withBlank = await put('/api/dishes/' + mzId, {
+    methods: [
+      { name: '红烧', seasonings: [{ name: '  ', amount: 'x' }, { name: '老抽', amount: '2 勺' }], steps: ['焯水'] },
+    ],
+  });
+  eq('空调料名被丢掉', JSON.stringify(withBlank.body.data.methods[0].seasonings), JSON.stringify([{ name: '老抽', amount: '2 勺' }]));
+  await stop(mz);
 
   console.log('\n[15] 版本信息');
   const verBoot = await boot('ver');

@@ -38,10 +38,23 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.5.0',
+    date: '2026-10-15',
+    title: '全局对话助手 + 一菜多做法各带调料 + 备份区瘦身',
+    items: [
+      '顶栏多了个 💬，在哪个页面都能打开直接问 AI：它知道你正在看哪一页、哪个家庭、手上这道菜、谁点了什么、哪些食材快过期了',
+      '菜品调料拆成两层：菜品上的「通用调料」是每种做法都要用的，每个做法里还能只给自己加几味不一样的（比如微辣版多一勺小米辣）',
+      '买菜清单会把各做法的调料一起汇总，并写清是哪道菜的哪个做法要用',
+      '管理页数据区不再堆一列快照：改成「⬇ 导出备份 / ⬆ 恢复备份」两个按钮，恢复就是选一个文件回来',
+      '自动快照还在（每天凌晨 3 点 + 每次启动，保留最近 7 份），只是收成了一行字加两个小按钮',
+      '老的菜谱不用改：以前没有的做法级调料会自动补成空，你记的东西一样不少',
+    ],
+  },
   {
     version: '1.4.0',
     date: '2026-10-15',
@@ -1258,6 +1271,18 @@ function normDish(input, prev, keepInputId) {
     methods: safeList(input.methods)
       .map((m) => ({
         name: safeText(m && m.name, 24).trim() || '做法',
+        // 每个做法可以带自己的调料。
+        // 一道菜常有几种做法甚至几种口味（红烧/清蒸、甜口/辣口），
+        // 用到的调料本来就不一样，全挂在菜品级就分不出谁是谁的。
+        // 菜品级的 seasonings 现在的语义是「通用调料」，两种都不冲突。
+        // 老数据没有这个字段，解析出来就是空数组 —— 不用迁移，菜谱不会少东西。
+        seasonings: safeList(m && m.seasonings)
+          .map((s) => ({
+            name: safeText(s && s.name, 30).trim(),
+            amount: safeText(s && s.amount, 30).trim(),
+          }))
+          .filter((s) => s.name)
+          .slice(0, 40),
         steps: (Array.isArray(m && m.steps)
           ? m.steps
           : safeText(m && m.steps, 3000).split('\n')
@@ -1503,9 +1528,12 @@ async function handleAPI(req, res, url) {
           '{"name":"菜名","category":"分类","description":"一句话介绍",' +
           '"servings":"份量","duration":分钟数,"difficulty":"简单|中等|有点难",' +
           '"tags":["标签"],"seasonings":[{"name":"食材","amount":"用量"}],' +
-          '"methods":[{"name":"做法名","steps":["一步一句"]}],"notes":"备注"}。' +
+          '"methods":[{"name":"做法名","seasonings":[{"name","amount"}],"steps":["一步一句"]}],' +
+          '"notes":"备注"}。' +
           '要求：分类从家常菜/主食/汤羹/凉菜/早餐/小吃甜点/饮品/其他里挑一个；' +
           '调料用量写「2 个」「400g」「1 小勺」这种能直接买菜的形式；步骤 4-8 步。' +
+          'seasonings 是所有做法都要用的通用调料；只有当这道菜有多种做法时，' +
+          '才把某几个做法独有的调料放进那个做法的 seasonings 里，通用调料不要重复放。' +
           '看不清的字段就留空字符串或空数组，不要编造。',
         wantJSON: true,
         think: true, // 看图要仔细判断，给它开思考
@@ -1516,9 +1544,11 @@ async function handleAPI(req, res, url) {
           '不要解释、不要 markdown 代码块。格式：' +
           '{"name","category","description","servings","duration":分钟数,' +
           '"difficulty","tags":[],"seasonings":[{"name","amount"}],' +
-          '"methods":[{"name","steps":[]}],"notes"}。' +
+          '"methods":[{"name","seasonings":[{"name","amount"}],"steps":[]}],"notes"}。' +
           '做法：统一份量写法（如「2-3 人份」「3 碗」）、把用量写规范、' +
-          '步骤一行一步、补上原文里明显缺的字段。不要凭空增加原文没有的食材。',
+          '步骤一行一步、补上原文里明显缺的字段。不要凭空增加原文没有的食材。' +
+          '一道菜有多种做法时，把各做法独有的调料放进那个做法的 seasonings，' +
+          '通用的留在菜品级；只有一个做法时调料一律放菜品级，那个做法的 seasonings 留空数组。',
         wantJSON: true,
       },
       'cook-plan': {
@@ -1551,6 +1581,25 @@ async function handleAPI(req, res, url) {
           '5) why 用一句话说明为什么这么排，不要空话。',
         wantJSON: true,
       },
+      // 全局对话助手：菜单/库存/点餐/计划哪都能问，能多轮接着聊。
+      // 前端把「当前在看什么」拼进 prompt，这里只管怎么回。
+      'assistant-chat': {
+        system:
+          '你是「家庭菜单」这个本地菜谱应用的助手，服务于一户普通人家。\n' +
+          '应用里有：菜单（菜谱，含多个做法，每个做法可带自己的调料）、' +
+          '点餐单、买菜清单、库存（食材/数量/保质期）、本周计划、家庭成员。\n\n' +
+          '用户消息前面会有一段【当前页面】的上下文，说明他在哪个页面、手上是什么。' +
+          '务必结合它回答，不要泛泛而谈。\n\n' +
+          '怎么答：\n' +
+          '1) 用中文，直接给答案，不要客套开场（「好的」「没问题」这类直接省掉）；\n' +
+          '2) 步骤用编号列表，用量写「2 个」「400g」「1 小勺」这种具体形式；\n' +
+          '3) 上下文里没给的数字不要编。缺信息就直说「你没说几个人吃」并给个按 2 人份的答案；\n' +
+          '4) 可以主动提醒：这个菜要哪种做法、库存里还缺什么、替代食材是什么；\n' +
+          '5) 简洁。一次别写超过 400 字，用户在手机上扫着看；\n' +
+          '6) 不要输出 JSON，不要 markdown 代码块，就是普通文本。',
+        wantJSON: false,
+        think: false, // 对话要快，开思考会明显拖慢每一句
+      },
     };
 
     const t = AI_TASKS[task];
@@ -1559,10 +1608,16 @@ async function handleAPI(req, res, url) {
     const userContent = imageUrl
       ? [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: imageUrl } }]
       : prompt;
-    const r = await callAI(
-      [{ role: 'system', content: t.system }, { role: 'user', content: userContent }],
-      { wantJSON: t.wantJSON, think: !!t.think }
-    );
+    // 多轮对话：body.history 里的历史也是模型给的，不接受前端直接传消息数组
+    // （那等于把这个接口变成任意角色扮演的跳板）
+    const history = Array.isArray(body && body.history)
+      ? body.history
+          .slice(-12) // 只带最近几轮，太长会把每句都拖慢
+          .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string')
+          .map((m) => ({ role: m.role, content: safeText(m.text, 2000) }))
+      : [];
+    const messages = [{ role: 'system', content: t.system }, ...history, { role: 'user', content: userContent }];
+    const r = await callAI(messages, { wantJSON: t.wantJSON, think: !!t.think });
     if (!r.ok) return sendJSON(res, 200, { ok: true, data: { ok: false, error: r.error } });
     if (t.wantJSON && !r.json) {
       return sendJSON(res, 200, {

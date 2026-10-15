@@ -502,17 +502,41 @@ a { color: var(--primary-dark); }
   padding: 8px 12px; border: 1px solid var(--line);
   border-radius: var(--radius-sm); background: var(--surface);
 }
-.backup-when {
-  font-size: 13px; font-weight: 600; color: var(--text);
-  font-variant-numeric: tabular-nums; flex: none;
+.bk-btns { display: flex; gap: 4px; flex: none; }
+
+/* ---------- 做法专属调料 ---------- */
+.mseason {
+  margin: 0 0 10px; padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--primary-soft);
 }
-.backup-size {
-  font-size: 12px; color: var(--muted); margin-right: auto;
-  font-variant-numeric: tabular-nums;
+.mseason-label {
+  font-size: 12.5px; font-weight: 700; color: var(--text); margin-bottom: 8px;
 }
-.backup-item .btn.sm { flex: none; padding: 6px 11px; font-size: 12.5px; }
-.backup-item .btn.danger { color: #b4472e; }
-.backup-item .btn.danger:hover { background: rgba(180, 71, 46, 0.09); }
+.mseason-label .field-hint { display: block; font-weight: 400; margin-top: 2px; }
+.mseason-view { margin-bottom: 8px; }
+
+/* ---------- AI 对话 ---------- */
+.chat-box { display: flex; flex-direction: column; gap: 10px; }
+.chat-turns { display: flex; flex-direction: column; gap: 8px; min-height: 60px; }
+.chat-msg {
+  max-width: 88%; padding: 9px 13px; border-radius: 14px;
+  font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+}
+.chat-msg.user {
+  align-self: flex-end;
+  background: var(--primary); color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.chat-msg.assistant {
+  align-self: flex-start;
+  background: var(--bg-soft);
+  border-bottom-left-radius: 4px;
+}
+.chat-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chat-chips .chip { font-size: 12.5px; padding: 5px 11px; }
+.chat-input-row { padding-top: 4px; border-top: 1px solid var(--line); }
+.chat-input-row .input { margin-top: 8px; }
 
 /* ---------- 厨房助手（旧结构，保留兜底） ---------- */
 .prep-list { list-style: none; margin: 0; padding: 0; }

@@ -21,7 +21,9 @@ const S = {
   authed: false, // 是否已解锁管理区（没设口令时恒为 true）
   cookPlanText: '', // 厨房助手结果的纯文本版，给「复制」用
   version: null, // /api/version 的结果，管理页显示版本和更新内容
-  backups: null, // /api/backups 的结果，管理页列出自动备份
+  backups: null, // /api/backups 的结果，管理页显示自动备份状态
+  chatOpenDish: '', // 打开对话时正在看/编辑的是哪道菜，AI 回答要贴着它
+  chatTurns: [], // 对话历史，{role:'user'|'assistant', text}
   householdId: '', // 当前家庭，存在本机 localStorage：每台设备各选各的
   data: {
     categories: [], dishes: [], orders: [], settings: {},
@@ -261,6 +263,9 @@ async function loadAIStatus() {
   } catch (_) {
     aiInfo = { enabled: false };
   }
+  // 没配 Key 就不给入口：与其点了才报错，不如一开始就没有那个按钮
+  const cb = $('#chatBtn');
+  if (cb) cb.hidden = !aiInfo.enabled;
   return aiInfo;
 }
 
@@ -315,6 +320,181 @@ async function askAI(task, prompt, imageUrl) {
     return null;
   }
 }
+
+/* =========================================================
+   全局 AI 对话助手
+
+   顶栏那个 💬，菜单/库存/点餐/计划/管理哪都能点开。
+   关键不在于「能聊天」，而在于**它知道你在看什么** —— 当前哪个家庭、
+   手上这道菜是什么、点餐单上还挂着哪几道、库存里什么快过期。
+   少了这些，答出来全是「你好，请问需要什么帮助」这种废话。
+   ========================================================= */
+
+const VIEW_LABEL = {
+  menu: '菜单（浏览菜谱）',
+  plan: '本周计划',
+  order: '点餐单',
+  pantry: '库存',
+  manage: '管理',
+};
+
+/** 把「当前页面上看得见的东西」摘要成一段话，贴在用户消息前面发给 AI */
+function chatContext() {
+  const L = [];
+  L.push(`【当前页面】${VIEW_LABEL[S.view] || S.view}`);
+
+  const house = currentHousehold();
+  if (house) {
+    const members = (house.members || []).map((m) => m.name).join('、');
+    L.push(`【当前家庭】${house.name}${members ? '，成员：' + members : '，成员还没登记'}`);
+  }
+
+  // 手上这道菜：AI 答「减盐怎么改」全靠这段，不然它根本不知道说的是哪道菜
+  const d = S.chatOpenDish ? dishById(S.chatOpenDish) : null;
+  if (d) {
+    const lines = [`【正在看的菜】${d.name}（${d.category}，${d.servings || '份量未填'}，约 ${d.duration || '?'} 分钟，难度${d.difficulty || '未填'}）`];
+    if (d.description) lines.push(`  介绍：${d.description}`);
+    const gs = collectDishSeasonings(d);
+    if (gs.length) {
+      lines.push('  调料：' + gs.map((s) => (s.method ? `${s.name} ${s.amount}（${s.method}独有）` : `${s.name} ${s.amount}`)).join('、'));
+    }
+    (d.methods || []).forEach((m) => {
+      if (m.steps && m.steps.length) lines.push(`  做法「${m.name}」：${m.steps.slice(0, 3).join(' ')}${m.steps.length > 3 ? ' …' : ''}`);
+    });
+    if (d.notes) lines.push(`  备注：${d.notes}`);
+    L.push(lines.join('\n'));
+  }
+
+  const pend = pendingOrders();
+  if (pend.length) {
+    L.push(
+      `【待做点餐】共 ${pend.length} 道：` +
+        pend.map((o) => `${o.dishName}（${o.people} 人份${o.requester ? '，' + o.requester + '点的' : ''}）`).join('、')
+    );
+  }
+
+  // 库存只给「要处理」的那些，全量倒进去既超长又没用
+  const p = householdPantry();
+  const soon = p.filter((x) => x.expireAt && daysToToday(x.expireAt) <= 3);
+  if (soon.length) {
+    L.push(
+      `【库存里快过期/已过期】${soon
+        .map((x) => `${x.name} ${x.quantity}${x.unit}（${x.expireAt < todayStr() ? '已过期' : '还剩 ' + daysToToday(x.expireAt) + ' 天'}）`)
+        .join('、')}`
+    );
+  } else if (p.length) {
+    L.push(`【库存】共 ${p.length} 样，暂时没有快过期的`);
+  }
+
+  L.push(`【菜单】共 ${(S.data.dishes || []).length} 道菜`);
+  return L.join('\n');
+}
+
+/** 距离今天还有几天（过期为负） */
+function daysToToday(dateStr) {
+  const t = new Date(todayStr() + 'T00:00:00');
+  const d = new Date(String(dateStr).slice(0, 10) + 'T00:00:00');
+  return Math.round((d - t) / 86400000);
+}
+
+/** 快捷指令：跟着当前页面走，减少用户自己想「该问什么」 */
+function chatChips() {
+  const base = [['清空对话', 'chat-clear']];
+  const d = S.chatOpenDish ? dishById(S.chatOpenDish) : null;
+  if (d) {
+    base.unshift([`${d.name} 减盐怎么做`, '']);
+    base.unshift([`${d.name} 两个人吃要多少量`, '']);
+    base.unshift([`${d.name} 还能怎么做`, '']);
+  }
+  if (S.view === 'order' && pendingOrders().length >= 2) {
+    base.unshift(['今晚几点能吃上', '']);
+    base.unshift(['这几道菜先做哪个', '']);
+  }
+  if (S.view === 'pantry') {
+    base.unshift(['哪些该先处理', '']);
+    base.unshift(['这些能配出今晚的菜吗', '']);
+  }
+  base.unshift(['随便推荐今晚吃什么', '']);
+  return base;
+}
+
+function openChatSheet() {
+  if (!aiReady()) return toast('还没配置 AI（data/ai.json 里填 API Key）');
+  S.chatOpenDish = S.chatOpenDish || '';
+  openSheet({
+    title: '问问 AI',
+    body: `<div class="chat-box">
+      <div id="chatTurns" class="chat-turns"></div>
+      <div id="chatChips" class="chat-chips"></div>
+      <div class="chat-input-row">
+        <input class="input" id="chatInput" placeholder="想问什么…（回车发送）" autocomplete="off" />
+      </div>
+    </div>`,
+    foot: `<button class="btn ghost" data-act="close-sheet">关闭</button>
+           <button class="btn" data-act="chat-send">发送</button>`,
+    onMount: () => {
+      redrawChat();
+      const inp = $('#chatInput');
+      if (inp) inp.focus();
+    },
+  });
+}
+
+function redrawChat() {
+  const box = $('#chatTurns');
+  if (!box) return;
+  if (!S.chatTurns.length) {
+    box.innerHTML = '';
+  } else {
+    box.innerHTML = S.chatTurns
+      .map(
+        (t) => `<div class="chat-msg ${t.role}">${
+          t.role === 'user' ? esc(t.text) : esc(t.text).replace(/\n/g, '<br />')
+        }</div>`
+      )
+      .join('');
+  }
+  $('#chatChips').innerHTML = chatChips()
+    .map(([label, act]) =>
+      act
+        ? `<button class="chip" data-act="${esc(act)}">${esc(label)}</button>`
+        : `<button class="chip" data-act="chat-chip" data-q="${esc(label)}">${esc(label)}</button>`
+    )
+    .join('');
+  // .sheet-body 才是真正的滚动区，chat-box 在它里面
+  const body = document.querySelector('.sheet-body');
+  if (body) body.scrollTop = body.scrollHeight;
+}
+
+/** 发一条。上下文每次重算 —— 用户可能在别的页面待了一会儿了 */
+async function sendChat(text) {
+  const q = String(text || '').trim();
+  if (!q) return;
+  if (chatSending) return;
+  chatSending = true;
+  S.chatTurns.push({ role: 'user', text: q });
+  redrawChat();
+
+  const prompt = chatContext() + '\n\n【用户问】' + q;
+  try {
+    const r = await api('POST', '/api/ai/chat', {
+      task: 'assistant-chat',
+      prompt,
+      history: S.chatTurns.slice(0, -1), // 刚才那条已经在 prompt 里了
+    });
+    if (!r || r.ok === false) {
+      S.chatTurns.push({ role: 'assistant', text: '（' + ((r && r.error) || '这次没答上来') + '）' });
+    } else {
+      S.chatTurns.push({ role: 'assistant', text: String(r.result || '').trim() || '（没说话）' });
+    }
+  } catch (err) {
+    S.chatTurns.push({ role: 'assistant', text: '（连不上：' + err.message + '）' });
+  }
+  chatSending = false;
+  redrawChat();
+}
+
+let chatSending = false;
 
 /**
  * AI 干活时的忙碌遮罩。
@@ -846,6 +1026,8 @@ async function copyText(text) {
 function openDish(id) {
   const d = dishById(id);
   if (!d) return;
+  // 记住手上这道菜：顶栏的 AI 助手要靠它知道你在问哪道菜
+  S.chatOpenDish = id;
 
   const cover = d.images && d.images[0];
   const hero = cover
@@ -861,7 +1043,7 @@ function openDish(id) {
 
   const seasoningHtml = (d.seasonings || []).length
     ? `<div class="block">
-         <h3 class="block-title">调料用量</h3>
+         <h3 class="block-title">通用调料</h3>
          <div class="panel">
            ${d.seasonings
              .map(
@@ -876,12 +1058,28 @@ function openDish(id) {
        </div>`
     : '';
 
+  // 每种做法额外要的调料就挂在它自己下面，不用往上翻去对照
   const methodsHtml = (d.methods || []).length
     ? `<div class="block">
          <h3 class="block-title">做法步骤</h3>
          ${d.methods
            .map(
              (m) => `<div class="method-head">👩‍🍳 ${esc(m.name)}</div>
+                     ${
+                       (m.seasonings || []).length
+                         ? `<div class="panel mseason-view">
+                       ${m.seasonings
+                         .map(
+                           (s) => `<div class="seasoning-row">
+                         <span class="seasoning-name">${esc(s.name)}</span>
+                         <span class="seasoning-dots"></span>
+                         <span class="seasoning-amt">${esc(s.amount)}</span>
+                       </div>`
+                         )
+                         .join('')}
+                     </div>`
+                         : ''
+                     }
                      <div class="panel"><ol class="steps">
                        ${m.steps.map((s) => `<li>${esc(s)}</li>`).join('')}
                      </ol></div>`
@@ -977,19 +1175,34 @@ function findStock(name) {
   return list.filter((p) => p.name && (p.name.includes(name) || name.includes(p.name)));
 }
 
-/** 采购清单：把一批菜品的调料合并，并标出家里已经有的 */
-function shoppingFromDishIds(dishIds) {
-  const map = new Map();
-  dishIds.forEach((id) => {
-    const d = dishById(id);
-    if (!d) return;
-    (d.seasonings || []).forEach((s) => {
-      if (!s.name) return;
-      if (!map.has(s.name)) map.set(s.name, []);
-      const parts = map.get(s.name);
-      const tag = `${d.name} ${s.amount}`;
-      if (!parts.includes(tag)) parts.push(tag);
+/**
+ * 一道菜要用的所有调料，带上「这是哪个做法要的」。
+ *
+ * 通用调料（菜品级）和各做法独有的调料都得算进来 ——
+ * 买菜的人只看到「冰糖」，得知道红烧要 10g、清蒸不要。
+ */
+function collectDishSeasonings(d) {
+  const out = [];
+  (d.seasonings || []).forEach((s) => {
+    if (s.name) out.push({ name: s.name, amount: s.amount, method: '' });
+  });
+  (d.methods || []).forEach((m) => {
+    (m.seasonings || []).forEach((s) => {
+      if (s.name) out.push({ name: s.name, amount: s.amount, method: m.name || '' });
     });
+  });
+  return out;
+}
+
+/** 把一批「菜名 + 调料」汇总成采购条目，同名的合并 */
+function mergeSeasonings(rows) {
+  const map = new Map();
+  rows.forEach((r) => {
+    if (!r.name) return;
+    if (!map.has(r.name)) map.set(r.name, []);
+    const parts = map.get(r.name);
+    const tag = r.method ? `${r.dish}（${r.method}） ${r.amount}` : `${r.dish} ${r.amount}`;
+    if (!parts.includes(tag)) parts.push(tag);
   });
   return [...map.entries()].map(([name, parts]) => {
     const stock = findStock(name);
@@ -1007,31 +1220,28 @@ function shoppingFromDishIds(dishIds) {
   });
 }
 
+/** 采购清单：把一批菜品的调料合并，并标出家里已经有的 */
+function shoppingFromDishIds(dishIds) {
+  const rows = [];
+  dishIds.forEach((id) => {
+    const d = dishById(id);
+    if (!d) return;
+    collectDishSeasonings(d).forEach((s) => rows.push({ ...s, dish: d.name }));
+  });
+  return mergeSeasonings(rows);
+}
+
 /** 采购清单：当前家庭待做菜品的调料 */
 function buildShoppingList() {
-  const map = new Map();
+  const rows = [];
   pendingOrders()
     .filter((o) => !S.memberFilter || o.requester === S.memberFilter)
     .forEach((o) => {
       const d = o.dishId ? dishById(o.dishId) : null;
       if (!d) return;
-      (d.seasonings || []).forEach((s) => {
-        if (!map.has(s.name)) map.set(s.name, []);
-        const parts = map.get(s.name);
-        const tag = `${d.name} ${s.amount}`;
-        if (!parts.includes(tag)) parts.push(tag);
-      });
+      collectDishSeasonings(d).forEach((s) => rows.push({ ...s, dish: d.name }));
     });
-  return [...map.entries()].map(([name, parts]) => {
-    const stock = findStock(name);
-    return {
-      name,
-      parts,
-      stock,
-      stockQty: stock.reduce((s, p) => s + (p.quantity || 0), 0),
-      stockUnit: stock.length === 1 ? stock[0].unit : stock.map((p) => p.unit).filter((v, i, a) => a.indexOf(v) === i).join('/'),
-    };
-  });
+  return mergeSeasonings(rows);
 }
 
 /**
@@ -1837,50 +2047,33 @@ function openChangelogSheet() {
 }
 
 /**
- * 自动备份列表。
+ * 数据区的备份说明。
  *
- * 服务端每次启动、以及每天凌晨 3 点会打一份快照到 backups/，
- * 保留最近 7 份。这里把它们列出来，坏了可以一键回退 ——
- * 比「想起来去导出」靠谱得多。
+ * 原来这里把 backups/ 里每一份都列出来，攒到 7 份时页面上就是 7 行，
+ * 长得像日志、挤得慌，平时其实没人看。这里只留一行状态 + 手动存一份，
+ * 恢复走「选文件」—— 真要回退的时候，用户手里通常本来就有个备份文件。
  */
-/**
- * 备份文件名 → 看得懂的时间。
- * backup-20261015-114235.zip → 10/15 11:42
- * （「backup-」占 7 个字符，年份占 4 位，别写成魔法数字容易差一位）
- */
-function backupTime(name) {
-  const d = String(name).slice(7);
-  return `${d.slice(4, 6)}/${d.slice(6, 8)} ${d.slice(9, 11)}:${d.slice(11, 13)}`;
-}
-
 function backupsHtml() {
   const b = S.backups;
-  if (!b || !b.list) return '';
-  const list = b.list;
+  const n = b && b.list ? b.list.length : 0;
+  const keep = (b && b.keep) || 7;
   return `<div class="list-row" style="margin-top:6px">
       <span class="icon-mini">🗂️</span><span class="list-row-main">
         <span class="list-row-title">自动备份</span>
         <span class="list-row-sub">${
-          list.length
-            ? `${list.length} 份，每天凌晨 3 点存一次，保留最近 ${b.keep} 份`
-            : '还没生成，启动服务时会自动打第一份'
+          n
+            ? `已自动存 ${n} 份，保留最近 ${keep} 份，在 backups/ 目录`
+            : `每天凌晨 3 点自动存一份，保留最近 ${keep} 份`
         }</span>
-      </span><button class="icon-mini" data-act="backup-now" title="立刻打一份">💾</button>
-    </div>
-    ${
-      list.length
-        ? `<div class="backup-list">${list
-            .map(
-              (x) => `<div class="backup-item">
-      <span class="backup-when">${esc(backupTime(x.name))}</span>
-      <span class="backup-size">${Math.max(1, Math.round(x.size / 1024))}KB</span>
-      <button class="btn ghost sm" data-act="download-backup" data-name="${esc(x.name)}">⬇ 下载</button>
-      <button class="btn ghost sm danger" data-act="restore-backup" data-name="${esc(x.name)}">↩ 恢复</button>
-    </div>`
-            )
-            .join('')}</div>`
-        : ''
-    }`;
+      </span><span class="bk-btns">
+        <button class="icon-mini" data-act="backup-now" title="立刻存一份">💾</button>
+        ${
+          n
+            ? `<button class="icon-mini" data-act="restore-latest" title="回到最近一次自动备份">↩</button>`
+            : ''
+        }
+      </span>
+    </div>`;
 }
 
 function viewManage() {
@@ -2105,7 +2298,12 @@ function openDishEditor(dish) {
       images: [...(d.images || [])],
       tags: [...(d.tags || [])],
       seasonings: (d.seasonings || []).map((s) => ({ ...s })),
-      methods: (d.methods || []).map((m) => ({ name: m.name, steps: [...(m.steps || [])] })),
+      methods: (d.methods || []).map((m) => ({
+        name: m.name,
+        // 老数据没有这个字段，补空数组，菜谱不会少东西
+        seasonings: (m.seasonings || []).map((s) => ({ ...s })),
+        steps: [...(m.steps || [])],
+      })),
     },
   };
 
@@ -2181,7 +2379,7 @@ function openDishEditor(dish) {
       </div>
 
       <div class="field">
-        <label class="field-label">调料用量</label>
+        <label class="field-label">通用调料<span class="field-hint">每种做法都要用的主料和基础调料</span></label>
         <div id="fSeasons">
           ${d.seasonings
             .map(
@@ -2199,18 +2397,7 @@ function openDishEditor(dish) {
       <div class="field">
         <label class="field-label">做法步骤<span class="field-hint">可以写多种做法</span></label>
         <div id="fMethods">
-          ${d.methods
-            .map(
-              (m, i) => `<div class="sub-card">
-                <div class="sub-card-head">
-                  <input class="mini-input" data-act="method-name" data-i="${i}" value="${esc(m.name)}" placeholder="做法名称" />
-                  <button class="del-btn" data-act="rm-method" data-i="${i}">✕</button>
-                </div>
-                <textarea class="textarea" data-act="method-steps" data-i="${i}"
-                  placeholder="一行一步">${esc(m.steps.join('\n'))}</textarea>
-              </div>`
-            )
-            .join('')}
+          ${d.methods.map(methodCardHtml).join('')}
         </div>
         <button class="btn ghost sm" data-act="add-method">＋ 加一种做法</button>
       </div>
@@ -2310,6 +2497,11 @@ function applyAIResult(r) {
       .slice(0, 6)
       .map((m, i) => ({
         name: String(m.name || '做法 ' + (i + 1)).slice(0, 24),
+        // AI 可能给做法单独配调料，也可能不配；不配就是空的，不影响步骤
+        seasonings: (Array.isArray(m.seasonings) ? m.seasonings : [])
+          .filter((s) => s && s.name)
+          .slice(0, 40)
+          .map((s) => ({ name: String(s.name).slice(0, 30), amount: String(s.amount || '').slice(0, 30) })),
         steps: m.steps.map((s) => String(s).slice(0, 200)).slice(0, 30),
       }));
     redrawMethods();
@@ -2333,6 +2525,8 @@ function collectDish() {
   d.methods = d.methods
     .map((m) => ({
       name: m.name.trim() || '做法',
+      // 没写调料名的那一行直接丢掉，别留空壳进 JSON
+      seasonings: (m.seasonings || []).filter((s) => s.name.trim()),
       steps: m.steps.map((s) => s.trim()).filter(Boolean),
     }))
     .filter((m) => m.steps.length);
@@ -2352,19 +2546,40 @@ function redrawSeasons() {
     .join('');
 }
 
-function redrawMethods() {
-  $('#fMethods').innerHTML = S.draft.dish.methods
-    .map(
-      (m, i) => `<div class="sub-card">
-        <div class="sub-card-head">
-          <input class="mini-input" data-act="method-name" data-i="${i}" value="${esc(m.name)}" placeholder="做法名称" />
-          <button class="del-btn" data-act="rm-method" data-i="${i}">✕</button>
-        </div>
-        <textarea class="textarea" data-act="method-steps" data-i="${i}"
-          placeholder="一行一步">${esc(m.steps.join('\n'))}</textarea>
+/**
+ * 一个做法卡片的 HTML（编辑器里用）。
+ *
+ * 每种做法可以带自己的调料：一道菜常有几种做法甚至几种口味
+ * （红烧/清蒸、甜口/辣口），用到的调料本来就不一样。
+ * 通用调料写在菜品级，这里只放这个做法独有的那些。
+ */
+function methodCardHtml(m, i) {
+  const seasons = m.seasonings || [];
+  return `<div class="sub-card">
+    <div class="sub-card-head">
+      <input class="mini-input" data-act="method-name" data-i="${i}" value="${esc(m.name)}" placeholder="做法名称（如：红烧 / 清蒸 / 微辣版）" />
+      <button class="del-btn" data-act="rm-method" data-i="${i}">✕</button>
+    </div>
+    <div class="mseason">
+      <div class="mseason-label">这个做法独有的调料<span class="field-hint">上面的通用调料它也能用，这里只写它额外要的</span></div>
+      ${seasons
+        .map(
+          (s, j) => `<div class="row-2" style="margin-bottom:6px">
+        <input class="mini-input" data-act="mseason-name" data-i="${i}" data-j="${j}" value="${esc(s.name)}" placeholder="调料名" />
+        <input class="mini-input" data-act="mseason-amt" data-i="${i}" data-j="${j}" value="${esc(s.amount)}" placeholder="用量" />
+        <button class="del-btn" data-act="rm-mseason" data-i="${i}" data-j="${j}">✕</button>
       </div>`
-    )
-    .join('');
+        )
+        .join('')}
+      <button class="btn ghost sm" data-act="add-mseason" data-i="${i}">＋ 加一味</button>
+    </div>
+    <textarea class="textarea" data-act="method-steps" data-i="${i}"
+      placeholder="一行一步">${esc(m.steps.join('\n'))}</textarea>
+  </div>`;
+}
+
+function redrawMethods() {
+  $('#fMethods').innerHTML = S.draft.dish.methods.map(methodCardHtml).join('');
 }
 
 function redrawImages() {
@@ -2716,7 +2931,7 @@ const ACTIONS = {
         name: o.dishName,
         duration: d ? d.duration : 0,
         servings: d ? d.servings : o.people + ' 人份',
-        seasonings: (d ? d.seasonings || [] : []).map((s) => `${s.name} ${s.amount}`).join('；'),
+        seasonings: d ? collectDishSeasonings(d).map((s) => `${s.name} ${s.amount}`).join('；') : '',
         steps: d ? (d.methods || []).flatMap((m) => m.steps || []) : [],
       });
     }
@@ -2769,9 +2984,18 @@ const ACTIONS = {
       `耗时：${d.duration || '(空)'}`,
       `难度：${d.difficulty}`,
       `标签：${(d.tags || []).join('、') || '(空)'}`,
-      d.seasonings.length ? `调料：${d.seasonings.map((s) => s.name + ' ' + s.amount).join('；')}` : '调料：(空)',
+      d.seasonings.length ? `通用调料：${d.seasonings.map((s) => s.name + ' ' + s.amount).join('；')}` : '通用调料：(空)',
       d.methods.length
-        ? `做法：${d.methods.map((m) => `[${m.name}] ${m.steps.join(' ')}`).join(' | ')}`
+        ? `做法：${d.methods
+            .map(
+              (m) =>
+                `[${m.name}]` +
+                ((m.seasonings || []).length
+                  ? ` 额外调料：${m.seasonings.map((s) => s.name + ' ' + s.amount).join('；')}；`
+                  : '') +
+                ` ${m.steps.join(' ')}`
+            )
+            .join(' | ')}`
         : '做法：(空)',
       d.notes ? `备注：${d.notes}` : '',
     ].filter(Boolean).join('\n');
@@ -2815,12 +3039,31 @@ const ACTIONS = {
   },
   'add-method'() {
     collectDish();
-    S.draft.dish.methods.push({ name: `做法 ${S.draft.dish.methods.length + 1}`, steps: [] });
+    S.draft.dish.methods.push({
+      name: `做法 ${S.draft.dish.methods.length + 1}`,
+      seasonings: [],
+      steps: [],
+    });
     redrawMethods();
   },
   'rm-method'(el) {
     collectDish();
     S.draft.dish.methods.splice(Number(el.dataset.i), 1);
+    redrawMethods();
+  },
+  'add-mseason'(el) {
+    collectDish();
+    const m = S.draft.dish.methods[Number(el.dataset.i)];
+    if (!m) return;
+    m.seasonings = m.seasonings || [];
+    m.seasonings.push({ name: '', amount: '' });
+    redrawMethods();
+  },
+  'rm-mseason'(el) {
+    collectDish();
+    const m = S.draft.dish.methods[Number(el.dataset.i)];
+    if (!m) return;
+    m.seasonings.splice(Number(el.dataset.j), 1);
     redrawMethods();
   },
   async 'save-dish'() {
@@ -3344,6 +3587,25 @@ const ACTIONS = {
     promptPin();
   },
 
+  /* 对话式 AI */
+  'open-chat'() {
+    openChatSheet();
+  },
+  async 'chat-send'() {
+    const inp = $('#chatInput');
+    if (!inp) return;
+    const v = inp.value;
+    inp.value = '';
+    await sendChat(v);
+  },
+  async 'chat-chip'(el) {
+    await sendChat(el.dataset.q);
+  },
+  'chat-clear'() {
+    S.chatTurns = [];
+    redrawChat();
+    toast('对话已清空');
+  },
   /* 数据 */
 
   /**
@@ -3403,34 +3665,29 @@ const ACTIONS = {
     }
   },
 
-  async 'download-backup'(el) {
-    try {
-      await this.saveAttachment('/api/backups/' + encodeURIComponent(el.dataset.name), el.dataset.name);
-      toast('备份已下载');
-    } catch (err) {
-      if (err.message !== '需要管理口令') toast('下载失败：' + err.message);
-    }
-  },
-
-  async 'restore-backup'(el) {
-    const name = el.dataset.name;
+  async 'restore-latest'() {
+    const b = S.backups;
+    const latest = b && b.list && b.list[0];
+    if (!latest) return toast('还没有自动备份');
+    // 回退会丢掉「这一份备份之后」的所有改动，弹窗里必须说清楚是哪一份
     if (
       !confirm(
-        `恢复「${name}」会覆盖现在的菜单、点餐、库存和照片。\n\n` +
-          `（服务端会先给当前状态自动存一份，恢复错了还能退回去。）\n\n确定恢复？`
+        `回到最近一次自动备份（${latest.name.slice(8, 12)} ${latest.name.slice(14, 16)}:${latest.name.slice(16, 18)} 前后）。\n\n` +
+          `这之后录入的菜、改的点餐、库存变动都会没掉。\n` +
+          `（服务端会先给当前状态再自动存一份，回退错了还能退回去。）\n\n确定回退？`
       )
     ) {
       return;
     }
     try {
-      const r = await api('POST', '/api/backups/' + encodeURIComponent(name) + '/restore');
+      const r = await api('POST', '/api/backups/' + encodeURIComponent(latest.name) + '/restore');
       await loadBackups();
       await loadState(true);
       S.view = 'menu';
       render();
-      toast(`已恢复到 ${name}：菜谱 ${r.dishes} 道${r.written ? `，照片 ${r.written} 张` : ''}`);
+      toast(`已回退：菜谱 ${r.dishes} 道${r.written ? `，照片 ${r.written} 张` : ''}`);
     } catch (err) {
-      toast('恢复失败：' + err.message);
+      toast('回退失败：' + err.message);
     }
   },
   'import-data'() {
@@ -3488,11 +3745,14 @@ document.addEventListener('input', (e) => {
   const act = el.dataset && el.dataset.act;
   if (!act || !S.draft) return;
   const i = Number(el.dataset.i);
+  const j = Number(el.dataset.j);
+  const m = S.draft.dish.methods[i];
   if (act === 'season-name') S.draft.dish.seasonings[i].name = el.value;
   else if (act === 'season-amt') S.draft.dish.seasonings[i].amount = el.value;
-  else if (act === 'method-name') S.draft.dish.methods[i].name = el.value;
-  else if (act === 'method-steps')
-    S.draft.dish.methods[i].steps = el.value.split('\n').map((s) => s.trim()).filter(Boolean);
+  else if (act === 'method-name' && m) m.name = el.value;
+  else if (act === 'method-steps' && m) m.steps = el.value.split('\n').map((s) => s.trim()).filter(Boolean);
+  else if (act === 'mseason-name' && m && m.seasonings[j]) m.seasonings[j].name = el.value;
+  else if (act === 'mseason-amt' && m && m.seasonings[j]) m.seasonings[j].amount = el.value;
 });
 
 /* 搜索输入 */
@@ -3502,6 +3762,17 @@ document.addEventListener('input', (e) => {
     render();
   }
   if (e.target.id === 'fPresetSearch') renderPresetGrid();
+});
+
+/* 对话框回车就发，不用去点右下角那个按钮 */
+document.addEventListener('keydown', async (e) => {
+  if (e.key !== 'Enter' || e.shiftKey) return;
+  const inp = e.target.closest && e.target.closest('#chatInput');
+  if (!inp) return;
+  e.preventDefault();
+  const v = inp.value;
+  inp.value = '';
+  await sendChat(v);
 });
 
 /* 改分类时，常见食材快选跟着换 */
