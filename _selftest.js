@@ -610,19 +610,55 @@ async function main() {
           usage: { total_tokens: 200 },
         }));
       }
-      // 对话助手：要的是纯文本，不能被当成 JSON 解析
+      // 对话助手：现在要的是 {reply, actions}，而且 actions 必须是能落库的结构
       if (body.includes('【当前页面】')) {
+        if (body.includes('【用户问】把红烧肉加到菜单')) {
+          return rs.end(JSON.stringify({
+            model: 'MiniMax-M3',
+            choices: [
+              {
+                message: {
+                  role: 'assistant',
+                  content:
+                    '```json\n{"reply":"给你记上这道红烧肉。",' +
+                    '"actions":[{"type":"add_dish","data":{' +
+                    '"name":"红烧肉","category":"家常菜","description":"肥而不腻，配饭一绝",' +
+                    '"servings":"3 人份","duration":90,"difficulty":"中等","tags":["下饭"],' +
+                    '"seasonings":[{"name":"五花肉","amount":"600g"},{"name":"冰糖","amount":"20g"}],' +
+                    '"methods":[{"name":"红烧","steps":["焯水","炒糖色","小火 50 分钟"],' +
+                    '"seasonings":[{"name":"八角","amount":"2 个"}]}]}}]}\n```',
+                },
+              },
+            ],
+            usage: { total_tokens: 88 },
+          }));
+        }
+        if (body.includes('【用户问】宫保鸡丁减盐怎么做')) {
+          return rs.end(JSON.stringify({
+            model: 'MiniMax-M3',
+            choices: [
+              {
+                message: {
+                  role: 'assistant',
+                  // 故意不给 JSON：验证降级路径不会把这一轮整句话吞掉
+                  content: '1. 少放半勺盐就行。\n2. 出锅前尝一下咸淡。',
+                },
+              },
+            ],
+            usage: { total_tokens: 40 },
+          }));
+        }
         return rs.end(JSON.stringify({
           model: 'MiniMax-M3',
           choices: [
             {
               message: {
                 role: 'assistant',
-                content: '1. 少放半勺盐就行。\n2. 出锅前尝一下咸淡。',
+                content: '{"reply":"今晚做个宫保鸡丁吧，菜单里有这道。","actions":[]}',
               },
             },
           ],
-          usage: { total_tokens: 40 },
+          usage: { total_tokens: 30 },
         }));
       }
       // 正常回复：思考过程混在 content 里，外面还套了 ```json 围栏
@@ -689,21 +725,43 @@ async function main() {
   eq('必须守灶的步骤标成不可并行', tl.body.data.result.stages[1].parallel, false);
   eq('步骤属于哪道菜', tl.body.data.result.stages[1].dish, '番茄炒蛋');
 
-  // 对话助手：纯文本直出 + 能带上下文
+  // 对话助手：回 {reply, actions}，actions 要能直接拿去落库
   const chat = await post('/api/ai/chat', {
     task: 'assistant-chat',
-    prompt: '【当前页面】点餐单\n【用户问】宫保鸡丁减盐怎么做',
+    prompt: '【当前页面】点餐单\n【用户问】今晚吃什么',
     history: [
       { role: 'user', text: '晚上做什么好' },
       { role: 'assistant', text: '做个宫保鸡丁吧' },
     ],
   });
   ok('对话助手调用成功', chat.body.data.ok === true, chat.body.data);
-  ok(
-    '对话助手返回的是纯文本',
-    String(chat.body.data.result).indexOf('1. 少放半勺盐') === 0,
-    chat.body.data.result
+  ok('有 reply 字段', typeof chat.body.data.result.reply === 'string', chat.body.data.result);
+  ok('纯问答不带动作', Array.isArray(chat.body.data.result.actions) && chat.body.data.result.actions.length === 0, chat.body.data.result);
+
+  const act = await post('/api/ai/chat', {
+    task: 'assistant-chat',
+    prompt: '【当前页面】菜单\n【用户问】把红烧肉加到菜单',
+  });
+  ok('动手请求调用成功', act.body.data.ok === true, act.body.data);
+  eq('回了一条可执行动作', act.body.data.result.actions.length, 1);
+  eq('动作类型认得', act.body.data.result.actions[0].type, 'add_dish');
+  eq('动作里带上了菜名', act.body.data.result.actions[0].data.name, '红烧肉');
+  eq('动作里的耗时是数字', act.body.data.result.actions[0].data.duration, 90);
+  eq(
+    '动作里各层调料都在',
+    act.body.data.result.actions[0].data.seasonings.length + '/' +
+      act.body.data.result.actions[0].data.methods[0].seasonings.length,
+    '2/1'
   );
+
+  // 模型偶尔不包 JSON 时，不能让这一轮整句话没回应
+  const fb = await post('/api/ai/chat', {
+    task: 'assistant-chat',
+    prompt: '【当前页面】点餐单\n【用户问】宫保鸡丁减盐怎么做',
+  });
+  ok('AI 没包好 JSON 也不报错', fb.body.data.ok === true, fb.body.data);
+  ok('降级时原文当回复', String(fb.body.data.result.reply).indexOf('少放半勺盐') > 0, fb.body.data.result);
+  ok('降级时没有动作', fb.body.data.result.actions.length === 0, fb.body.data.result);
 
   await stop(ai);
   await new Promise((r) => mock.close(r));

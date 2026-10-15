@@ -517,8 +517,80 @@ a { color: var(--primary-dark); }
 .mseason-view { margin-bottom: 8px; }
 
 /* ---------- AI 对话 ---------- */
-.chat-box { display: flex; flex-direction: column; gap: 10px; }
-.chat-turns { display: flex; flex-direction: column; gap: 8px; min-height: 60px; }
+/* ---------- AI 助手：底部悬浮窗 ----------
+   收起 = 一条 pill；展开 = 贴着底部的面板。
+   整块浮在底部导航之上，不占页面布局，所以任何页面都能直接戳。 */
+
+.chat-dock {
+  position: fixed;
+  left: 0; right: 0;
+  bottom: calc(var(--tab-h) + var(--safe-b) + 10px);
+  z-index: 45;                 /* 比底部导航(40)高，比弹层(.modal-root)低 */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 0 16px;
+  pointer-events: none;        /* 容器本身不吃点击，否则整条横幅都挡住列表 */
+}
+.chat-dock > * { pointer-events: auto; }
+
+/* 收起状态：一条小 pill，贴左边，给右下角的「记一道菜」留位置 */
+.chat-pill {
+  display: inline-flex; align-items: center; gap: 7px;
+  max-width: 68vw;
+  height: 38px; padding: 0 15px;
+  border-radius: 999px;
+  background: var(--primary); color: #fff;
+  font-size: 13.5px; font-weight: 600;
+  box-shadow: 0 6px 20px rgba(224, 118, 58, 0.38);
+}
+.chat-pill:active { transform: scale(0.96); }
+.chat-pill-txt {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chat-pill-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #fff; flex: none;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.28);
+}
+
+/* 展开状态：贴底的对话面板 */
+.chat-panel {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  max-height: min(64vh, 520px);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: 0 12px 40px rgba(70, 45, 25, 0.18);
+  overflow: hidden;
+  animation: chatUp 0.2s ease;
+}
+@keyframes chatUp { from { transform: translateY(14px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+.chat-panel-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 10px 9px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-soft);
+}
+.chat-panel-title { font-weight: 650; font-size: 14px; }
+.chat-panel-ctx {
+  flex: 1; min-width: 0;
+  font-size: 11.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chat-panel-head .icon-mini { flex: none; }
+
+.chat-turns {
+  flex: 1; min-height: 130px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px 14px;
+}
 .chat-msg {
   max-width: 88%; padding: 9px 13px; border-radius: 14px;
   font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
@@ -533,10 +605,49 @@ a { color: var(--primary-dark); }
   background: var(--bg-soft);
   border-bottom-left-radius: 4px;
 }
-.chat-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.chat-chips .chip { font-size: 12.5px; padding: 5px 11px; }
-.chat-input-row { padding-top: 4px; border-top: 1px solid var(--line); }
-.chat-input-row .input { margin-top: 8px; }
+.chat-msg.typing { color: var(--muted); }
+
+/* ---------- 操作卡：AI 说「我准备做什么」，用户点确认才落库 ---------- */
+.chat-acts { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+.act-card {
+  align-self: flex-start;
+  width: min(100%, 92%);
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+}
+.act-card[data-state='done'] { background: var(--bg-soft); }
+.act-card[data-state='error'] { border-color: var(--danger-soft); }
+.act-card-head { font-size: 11.5px; color: var(--muted); }
+.act-card-title { font-weight: 650; font-size: 14px; margin-top: 3px; }
+.act-card-lines {
+  margin-top: 7px;
+  font-size: 12.5px; line-height: 1.65; color: var(--muted);
+}
+.act-card-btns { display: flex; gap: 8px; margin-top: 10px; }
+.act-card-result { margin-top: 6px; font-size: 13px; }
+.act-card-result.ok { color: var(--green); }
+.act-card-result.bad { color: var(--danger); }
+
+.chat-chips {
+  display: flex; gap: 6px; padding: 0 14px 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.chat-chips::-webkit-scrollbar { display: none; }
+.chat-chips .chip { font-size: 12.5px; padding: 5px 11px; white-space: nowrap; flex: none; }
+
+.chat-input-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+}
+.chat-input-row .input { flex: 1; min-width: 0; margin: 0; }
+.chat-input-row .btn { flex: none; }
+
+/* 面板展开时挡住底下的内容，给 .view 多留一点底部空间 */
+body.chat-open .view { padding-bottom: calc(var(--tab-h) + var(--safe-b) + 92px); }
 
 /* ---------- 厨房助手（旧结构，保留兜底） ---------- */
 .prep-list { list-style: none; margin: 0; padding: 0; }

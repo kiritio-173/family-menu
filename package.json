@@ -1,6 +1,6 @@
 {
   "name": "family-menu",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "本地部署的家庭菜单与点餐服务",
   "private": true,
   "main": "server.js",

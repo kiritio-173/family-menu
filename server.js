@@ -38,10 +38,24 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.6.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.6.0',
+    date: '2026-10-15',
+    title: 'AI 助手改成底部悬浮窗，而且真的能动手',
+    items: [
+      'AI 入口从顶栏搬到底部：收起时是一条小胶囊，点开是贴着底面的对话面板，单手拿手机也戳得到',
+      '它现在不只是聊天：「把红烧排骨记到菜单」「刚买了三斤排骨」「这道排进本周计划」——说完就给你一张操作卡',
+      '操作卡上写着它准备改什么（菜名、用量、几步、哪个做法），你点「确认」才真的存进去，点「算了」就当没说过',
+      '能操作四样：加菜品（调料和步骤按常见做法自动填好）、下点餐单、排本周计划、记库存',
+      '菜单里已有的菜会一起告诉它，它不会再一本正经地重复添加已有的那道',
+      '模型偶尔没把回复包成 JSON 也不会整句没回应，原话照样显示，只是这轮没有可点确认的操作',
+      '收起时 pill 上会冒个红点，方便你忙完别的再回来看它答了什么',
+    ],
+  },
   {
     version: '1.5.0',
     date: '2026-10-15',
@@ -1581,23 +1595,57 @@ async function handleAPI(req, res, url) {
           '5) why 用一句话说明为什么这么排，不要空话。',
         wantJSON: true,
       },
-      // 全局对话助手：菜单/库存/点餐/计划哪都能问，能多轮接着聊。
+      // 全局对话助手：菜单/库存/点餐/计划哪都能问，能多轮接着聊，
+      // 还能回一句「加到菜单里」就真的给出一张待确认的操作卡。
       // 前端把「当前在看什么」拼进 prompt，这里只管怎么回。
       'assistant-chat': {
         system:
-          '你是「家庭菜单」这个本地菜谱应用的助手，服务于一户普通人家。\n' +
-          '应用里有：菜单（菜谱，含多个做法，每个做法可带自己的调料）、' +
-          '点餐单、买菜清单、库存（食材/数量/保质期）、本周计划、家庭成员。\n\n' +
-          '用户消息前面会有一段【当前页面】的上下文，说明他在哪个页面、手上是什么。' +
-          '务必结合它回答，不要泛泛而谈。\n\n' +
-          '怎么答：\n' +
+          '你是「家庭菜单」这个本地菜谱应用的助手，服务于一户普通人家。你不只是聊天，' +
+          '还能真的动手改这个应用里的数据。\n' +
+          '应用里有：菜单（菜谱）、点餐单、买菜清单、库存（食材/数量/保质期）、本周计划、家庭成员。\n\n' +
+          '用户消息前面有一段【当前页面】上下文，说明他在哪个页面、手上是什么。务必结合它回答。\n\n' +
+          '只输出 JSON，不要 markdown 代码块。格式：\n' +
+          '{"reply":"给用户看的话，纯文本","actions":[]}\n' +
+          'actions 里放你要执行的操作，最多 3 条：\n' +
+          '[{"type":"add_dish","data":{"name":"菜名","category":"分类","description":"一句话介绍",' +
+          '"servings":"2 人份","duration":20,"difficulty":"简单","tags":["下饭"],' +
+          '"seasonings":[{"name":"盐","amount":"2g"}],' +
+          '"methods":[{"name":"做法名","steps":["一步一行"],"seasonings":[{"name":"小米辣","amount":"1 勺"}]}]}}]\n' +
+          '[{"type":"order_dish","data":{"dishName":"菜名（必须和菜单里的完全一样）",' +
+          '"requester":"谁点的，没有就说匿名","people":2,"note":"备注"}}]\n' +
+          '[{"type":"add_to_plan","data":{"dishName":"菜名"}}]\n' +
+          '[{"type":"add_pantry","data":{"name":"食材名","category":"蔬菜","quantity":2,' +
+          '"unit":"根","expireAt":"2026-10-20","note":""}}]\n\n' +
+          '怎么用 actions：\n' +
+          '· 用户说「把…加到菜单 / 记一道菜 / 收录这道菜」→ add_dish\n' +
+          '· 用户说「我想吃… / 帮我点… / 加个单」→ order_dish\n' +
+          '· 用户说「这周做… / 排进计划」→ add_to_plan\n' +
+          '· 用户说「刚买了… / 记一下库存 / 进了几斤」→ add_pantry\n' +
+          '· 只是问「这道菜怎么做」「今晚吃什么」「还有几天过期」→ 不要 actions，actions 留空数组 []\n' +
+          '· 一次最多 3 条。\n' +
+          '· 参数不全不要反问一串：按下面的默认值补上，然后在 reply 里带一句\n' +
+          '  「缺的我先按…记的，不对告诉我」即可。\n' +
+          '  只有菜名缺了（用户压根没说做什么）才真的反问。\n' +
+          '  默认值：servings="2 人份"、difficulty="简单"、duration=30、people=2、\n' +
+          '  category="家常菜"、order_dish 的 requester="匿名"、add_pantry 的 unit="份"。\n' +
+          '· add_dish 特殊：用户常常只给一个菜名。这时候要像正常菜谱一样把\n' +
+          '  seasonings 和 methods 填完整 —— 通用调料给足量，每个做法写清步骤\n' +
+          '  （一行一步，4-8 步），这是这个功能最有用的地方，不要留空。\n' +
+          '  只有用户明说「先建个空壳」「别的我一会儿填」时才留空数组。\n' +
+          '  在 reply 里说明「用量和步骤我按常见做法填了，录进来后可以改」。\n' +
+          '  add_dish 里 duration 是分钟（数字），expireAt 是 YYYY-MM-DD。\n' +
+          '  category 从这些里选：家常菜、主食、汤羹、凉菜、早餐、小吃甜点、饮品。\n' +
+          '  order_dish / add_to_plan 的 dishName 必须能在菜单里找到，找不到就别放这条。\n\n' +
+          'reply 怎么写：\n' +
           '1) 用中文，直接给答案，不要客套开场（「好的」「没问题」这类直接省掉）；\n' +
-          '2) 步骤用编号列表，用量写「2 个」「400g」「1 小勺」这种具体形式；\n' +
-          '3) 上下文里没给的数字不要编。缺信息就直说「你没说几个人吃」并给个按 2 人份的答案；\n' +
-          '4) 可以主动提醒：这个菜要哪种做法、库存里还缺什么、替代食材是什么；\n' +
-          '5) 简洁。一次别写超过 400 字，用户在手机上扫着看；\n' +
-          '6) 不要输出 JSON，不要 markdown 代码块，就是普通文本。',
-        wantJSON: false,
+          '2) 有 actions 时，reply 用一两句话说明「我准备做什么」，别把内容重复一遍；\n' +
+          '3) 步骤用编号列表，用量写「2 个」「400g」「1 小勺」这种具体形式；\n' +
+          '4) 上下文里没给的数字不要编。缺信息就直说「你没说几个人吃」并给个按 2 人份的答案；\n' +
+          '5) 简洁。一次别写超过 400 字，用户在手机上扫着看。',
+        wantJSON: true,
+        // 对话不能因为模型偶尔没包好 JSON 就整句没回应：
+        // 解析失败就把原文当 reply 返回，actions 照常是空。
+        jsonFallback: true,
         think: false, // 对话要快，开思考会明显拖慢每一句
       },
     };
@@ -1620,6 +1668,20 @@ async function handleAPI(req, res, url) {
     const r = await callAI(messages, { wantJSON: t.wantJSON, think: !!t.think });
     if (!r.ok) return sendJSON(res, 200, { ok: true, data: { ok: false, error: r.error } });
     if (t.wantJSON && !r.json) {
+      // 对话任务不让「模型这轮没包好 JSON」把整句话吞掉：
+      // 原文照样当回复给用户，只是这轮没有可执行动作。
+      if (t.jsonFallback && r.text) {
+        return sendJSON(res, 200, {
+          ok: true,
+          data: {
+            ok: true,
+            result: { reply: r.text, actions: [] },
+            fallback: true,
+            usage: r.usage,
+            model: r.model,
+          },
+        });
+      }
       return sendJSON(res, 200, {
         ok: true,
         data: { ok: false, error: 'AI 的回复看不懂（不是合法 JSON），可以再试一次' },

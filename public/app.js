@@ -23,7 +23,9 @@ const S = {
   version: null, // /api/version 的结果，管理页显示版本和更新内容
   backups: null, // /api/backups 的结果，管理页显示自动备份状态
   chatOpenDish: '', // 打开对话时正在看/编辑的是哪道菜，AI 回答要贴着它
-  chatTurns: [], // 对话历史，{role:'user'|'assistant', text}
+  chatTurns: [], // 对话历史，{role:'user'|'assistant', text, actions:[{type,data,state}]}
+  chatOpen: false, // 底部悬浮窗是展开还是收起
+  chatDot: false, // 收起期间来了新回复，在 pill 上冒个红点
   householdId: '', // 当前家庭，存在本机 localStorage：每台设备各选各的
   data: {
     categories: [], dishes: [], orders: [], settings: {},
@@ -263,9 +265,8 @@ async function loadAIStatus() {
   } catch (_) {
     aiInfo = { enabled: false };
   }
-  // 没配 Key 就不给入口：与其点了才报错，不如一开始就没有那个按钮
-  const cb = $('#chatBtn');
-  if (cb) cb.hidden = !aiInfo.enabled;
+  // 没配 Key 就不给入口：与其点了才报错，不如一开始就没有那个悬浮窗
+  redrawChat();
   return aiInfo;
 }
 
@@ -322,12 +323,20 @@ async function askAI(task, prompt, imageUrl) {
 }
 
 /* =========================================================
-   全局 AI 对话助手
+   全局 AI 对话助手（底部悬浮窗）
 
-   顶栏那个 💬，菜单/库存/点餐/计划/管理哪都能点开。
-   关键不在于「能聊天」，而在于**它知道你在看什么** —— 当前哪个家庭、
-   手上这道菜是什么、点餐单上还挂着哪几道、库存里什么快过期。
-   少了这些，答出来全是「你好，请问需要什么帮助」这种废话。
+   两件事，都是冲着「更好用」去的：
+
+   1) 入口从顶栏搬到底部。收起时是一条 pill，点开是贴着底部的面板。
+      顶栏那颗 💬 又小又靠上，单手拿手机够不着；放到底部随时能戳。
+
+   2) 它不只是聊天。模型可以回一句「我准备把这道菜加到菜单」并附一张
+      操作卡，用户点「确认」才真的落库 —— 问一句就能把菜记进来，
+      不用先去菜单页找「记一道菜」再抄一遍；但改数据这步仍然由人按。
+
+   关键不在于「能聊天」，而在于**它知道你在看什么**：当前哪个家庭、
+   手上这道菜是什么、点餐单上挂着哪几道、库存里什么快过期，
+   以及菜单里已经有哪些菜（不然它会一本正经地重复添加已有的那道）。
    ========================================================= */
 
 const VIEW_LABEL = {
@@ -386,7 +395,15 @@ function chatContext() {
     L.push(`【库存】共 ${p.length} 样，暂时没有快过期的`);
   }
 
-  L.push(`【菜单】共 ${(S.data.dishes || []).length} 道菜`);
+  // 菜单里已有哪些菜必须给全：不然它会一本正经地「添加」一道早就有的菜
+  const all = S.data.dishes || [];
+  L.push(
+    `【菜单里已有的 ${all.length} 道菜】` +
+      (all.length
+        ? all.map((x) => `${x.name}（${x.category}${x.methods && x.methods.length ? '，' + x.methods.length + ' 种做法' : ''}）`).join('、')
+        : '（还一道菜都没有）')
+  );
+  L.push('【可选分类】' + (S.data.categories || []).map((c) => c.name).join('、'));
   return L.join('\n');
 }
 
@@ -402,69 +419,309 @@ function chatChips() {
   const base = [['清空对话', 'chat-clear']];
   const d = S.chatOpenDish ? dishById(S.chatOpenDish) : null;
   if (d) {
-    base.unshift([`${d.name} 减盐怎么做`, '']);
-    base.unshift([`${d.name} 两个人吃要多少量`, '']);
     base.unshift([`${d.name} 还能怎么做`, '']);
+    base.unshift([`${d.name} 两个人吃要多少量`, '']);
+    base.unshift([`${d.name} 减盐怎么做`, '']);
   }
   if (S.view === 'order' && pendingOrders().length >= 2) {
-    base.unshift(['今晚几点能吃上', '']);
     base.unshift(['这几道菜先做哪个', '']);
+    base.unshift(['今晚几点能吃上', '']);
   }
   if (S.view === 'pantry') {
-    base.unshift(['哪些该先处理', '']);
     base.unshift(['这些能配出今晚的菜吗', '']);
+    base.unshift(['哪些该先处理', '']);
   }
+  // 「让它动手」的例子放在最前面 —— 这是它跟普通聊天框最不一样的地方
+  base.unshift(['把今天做的菜都加到菜单里', '']);
   base.unshift(['随便推荐今晚吃什么', '']);
   return base;
 }
 
-function openChatSheet() {
-  if (!aiReady()) return toast('还没配置 AI（data/ai.json 里填 API Key）');
+/* ---------- 底部悬浮窗的显隐 ---------- */
+
+function openChat() {
+  // 这里不再判断 aiReady()：没配 Key 时整个 dock 本来就是 hidden，
+  // 多一层判断只会在「刚加载完、正好点进来」的时候白挡一次。
   S.chatOpenDish = S.chatOpenDish || '';
-  openSheet({
-    title: '问问 AI',
-    body: `<div class="chat-box">
-      <div id="chatTurns" class="chat-turns"></div>
-      <div id="chatChips" class="chat-chips"></div>
-      <div class="chat-input-row">
-        <input class="input" id="chatInput" placeholder="想问什么…（回车发送）" autocomplete="off" />
-      </div>
-    </div>`,
-    foot: `<button class="btn ghost" data-act="close-sheet">关闭</button>
-           <button class="btn" data-act="chat-send">发送</button>`,
-    onMount: () => {
-      redrawChat();
-      const inp = $('#chatInput');
-      if (inp) inp.focus();
-    },
-  });
+  S.chatOpen = true;
+  S.chatDot = false;
+  document.body.classList.add('chat-open');
+  redrawChat();
+  const inp = $('#chatInput');
+  if (inp && !('ontouchstart' in window)) inp.focus();
+}
+
+function closeChat() {
+  S.chatOpen = false;
+  document.body.classList.remove('chat-open');
+  redrawChat();
+}
+
+/* ---------- 可执行动作 ---------- */
+
+const ACTION_META = {
+  add_dish: { icon: '📖', verb: '加入菜单', label: '添加菜品' },
+  order_dish: { icon: '🔔', verb: '下单', label: '加入点餐单' },
+  add_to_plan: { icon: '🗓️', verb: '排进本周计划', label: '加入本周计划' },
+  add_pantry: { icon: '🧊', verb: '入库', label: '加入库存' },
+};
+
+/** 把模型给的 payload 收拾干净：只留本应用认识的字段，长度也卡住 */
+function cleanDishPayload(d) {
+  const seasons = (arr) =>
+    (Array.isArray(arr) ? arr : [])
+      .map((s) => ({
+        name: String((s && s.name) || '').trim().slice(0, 30),
+        amount: String((s && s.amount) || '').trim().slice(0, 30),
+      }))
+      .filter((s) => s.name)
+      .slice(0, 40);
+  const steps = (arr) =>
+    (Array.isArray(arr) ? arr : [])
+      .map((s) => String(s == null ? '' : s).trim().slice(0, 200))
+      .filter(Boolean)
+      .slice(0, 30);
+  return {
+    name: String(d.name || '').trim().slice(0, 40),
+    category: String(d.category || '').trim().slice(0, 24),
+    description: String(d.description || '').trim().slice(0, 300),
+    servings: String(d.servings || '').trim().slice(0, 30),
+    duration: Number(d.duration) || 0,
+    difficulty: String(d.difficulty || '').trim().slice(0, 12),
+    tags: (Array.isArray(d.tags) ? d.tags : [])
+      .map((t) => String(t).trim().slice(0, 12))
+      .filter(Boolean)
+      .slice(0, 8),
+    seasonings: seasons(d.seasonings),
+    methods: (Array.isArray(d.methods) ? d.methods : [])
+      .map((m) => ({
+        name: String((m && m.name) || '').trim().slice(0, 24),
+        steps: steps(m && m.steps),
+        seasonings: seasons(m && m.seasonings),
+      }))
+      .filter((m) => m.name || m.steps.length)
+      .slice(0, 6),
+  };
+}
+
+/** 动作卡上那几行摘要，让人一眼看清「它到底要改什么」 */
+function actionLines(a) {
+  const d = a.data || {};
+  const out = [];
+  if (a.type === 'add_dish') {
+    out.push([d.category, d.servings, d.duration ? `约 ${d.duration} 分钟` : '', d.difficulty].filter(Boolean).join(' · '));
+    if ((d.seasonings || []).length) {
+      out.push('通用调料 ' + d.seasonings.map((s) => `${s.name} ${s.amount || ''}`.trim()).join('、'));
+    }
+    (d.methods || []).forEach((m) => {
+      const extra = (m.seasonings || []).map((s) => `${s.name} ${s.amount || ''}`.trim()).join('、');
+      out.push(
+        `做法「${m.name || '未命名'}」${m.steps && m.steps.length ? m.steps.length + ' 步' : '（没写步骤）'}` +
+          (extra ? ` · 独有调料：${extra}` : '')
+      );
+    });
+  } else if (a.type === 'order_dish') {
+    out.push(`${d.people || 2} 人份${d.requester ? ' · ' + d.requester + ' 点的' : ''}`);
+    if (d.note) out.push(d.note);
+  } else if (a.type === 'add_to_plan') {
+    out.push('本周 · ' + (currentHousehold() ? currentHousehold().name : ''));
+  } else if (a.type === 'add_pantry') {
+    const bits = [d.category, d.quantity != null ? `${d.quantity}${d.unit || ''}` : ''];
+    if (d.expireAt) {
+      const left = daysToToday(d.expireAt);
+      bits.push('保质期到 ' + d.expireAt + (left < 0 ? '（那天就过期了）' : `（还有 ${left} 天）`));
+    }
+    out.push(bits.filter(Boolean).join(' · '));
+  }
+  return out.filter(Boolean);
+}
+
+function actionTitle(a) {
+  const d = a.data || {};
+  if (a.type === 'add_dish') return '加一道菜：' + (d.name || '（没名字）');
+  if (a.type === 'order_dish') return '点餐：' + (d.dishName || '（没写菜名）');
+  if (a.type === 'add_to_plan') return '排进本周计划：' + (d.dishName || '（没写菜名）');
+  if (a.type === 'add_pantry') return '入库：' + (d.name || '（没写食材）');
+  return '执行操作';
+}
+
+/**
+ * 真的落库。只在用户点了卡上的「确认」之后才走到这里。
+ *
+ * 保守为上：菜名对不上菜单、库存没写名字这类情况一律不猜，直接报回去，
+ * 让用户改一句话重新问 —— 宁可多问一句，也不要往菜单里塞错东西。
+ */
+async function runChatAction(turnIdx, actIdx) {
+  const t = S.chatTurns[turnIdx];
+  const a = t && t.actions && t.actions[actIdx];
+  if (!a || a.state !== 'pending') return;
+  const d = a.data || {};
+  a.state = 'busy';
+  redrawChat();
+  try {
+    if (a.type === 'add_dish') {
+      const p = cleanDishPayload(d);
+      if (!p.name) throw new Error('这道菜没名字，没法加');
+      const dup = (S.data.dishes || []).find((x) => x.name === p.name);
+      if (dup) throw new Error(`菜单里已经有「${p.name}」了，不用再加一遍`);
+      const saved = await api('POST', '/api/dishes', p);
+      a.dishId = (saved && saved.id) || '';
+      a.done = `已加入菜单：${p.name}`;
+      toast(`📖 已加入菜单：${p.name}`);
+    } else if (a.type === 'order_dish') {
+      const name = String(d.dishName || '').trim();
+      if (!name) throw new Error('没说要吃哪道菜');
+      const dish = (S.data.dishes || []).find((x) => x.name === name);
+      if (!dish) throw new Error(`菜单里没有「${name}」，先让它加到菜单里`);
+      await api('POST', '/api/orders', {
+        householdId: S.householdId,
+        dishId: dish.id,
+        dishName: dish.name,
+        requester: String(d.requester || '').trim() || '匿名',
+        people: Number(d.people) || 2,
+        note: String(d.note || '').trim(),
+      });
+      a.done = `已下单：${dish.name}`;
+      toast(`🔔 已下单：${dish.name}`);
+    } else if (a.type === 'add_to_plan') {
+      const name = String(d.dishName || '').trim();
+      if (!name) throw new Error('没说要排哪道菜');
+      const dish = (S.data.dishes || []).find((x) => x.name === name);
+      await addToPlan(
+        dish ? { dishId: dish.id, name: dish.name, servings: dish.servings } : { name },
+        planWeek(),
+        () => {}
+      );
+      a.done = `已排进本周计划：${name}`;
+      toast(`🗓️ 已排进本周计划：${name}`);
+    } else if (a.type === 'add_pantry') {
+      const name = String(d.name || '').trim();
+      if (!name) throw new Error('没写食材名');
+      await api('POST', '/api/pantry', {
+        householdId: S.householdId,
+        name,
+        category: String(d.category || '其他').trim().slice(0, 20),
+        quantity: Number(d.quantity) || 1,
+        unit: String(d.unit || '份').trim().slice(0, 10),
+        expireAt: d.expireAt ? String(d.expireAt).slice(0, 10) : '',
+        note: String(d.note || '').trim(),
+      });
+      a.done = `已入库：${name}`;
+      toast(`🧊 已入库：${name}`);
+    } else {
+      throw new Error('不认识这个操作');
+    }
+    a.state = 'done';
+    await loadState(true);
+    render();
+  } catch (err) {
+    a.state = 'error';
+    a.done = (err && err.message) || '没能执行';
+    toast('没执行成功：' + a.done);
+  }
+  redrawChat();
+}
+
+/* ---------- 渲染 ---------- */
+
+/** 一张待确认的操作卡 */
+function actionCardHtml(a, ti, ai) {
+  const meta = ACTION_META[a.type] || { icon: '⚙️', label: '操作' };
+  let body = '';
+  if (a.state === 'pending' || a.state === 'busy') {
+    const main = meta.icon === '📖' ? 'btn' : 'btn soft';
+    body =
+      `<div class="act-card-lines">${actionLines(a).map((l) => `<div>${esc(l)}</div>`).join('')}</div>` +
+      `<div class="act-card-btns">` +
+      `<button class="${main} sm" data-act="chat-run" data-t="${ti}" data-a="${ai}" ${a.state === 'busy' ? 'disabled' : ''}>` +
+      `${a.state === 'busy' ? '执行中…' : esc(meta.icon + ' 确认' + meta.verb)}</button>` +
+      `<button class="btn ghost sm" data-act="chat-dismiss" data-t="${ti}" data-a="${ai}">算了</button>` +
+      `</div>`;
+  } else {
+    const cls = a.state === 'done' ? 'ok' : 'bad';
+    body =
+      `<div class="act-card-result ${cls}">${a.state === 'done' ? '✅' : '⚠️'} ${esc(a.done || '')}</div>` +
+      `<div class="act-card-btns">` +
+      (a.state === 'done' && a.dishId
+        ? `<button class="btn ghost sm" data-act="chat-view" data-d="${esc(a.dishId)}">去看看</button>`
+        : '') +
+      `<button class="btn ghost sm" data-act="chat-dismiss" data-t="${ti}" data-a="${ai}">知道了</button>` +
+      `</div>`;
+  }
+  return `<div class="act-card" data-state="${a.state}">
+    <div class="act-card-head">${esc(meta.icon)} <b>${esc(meta.label)}</b></div>
+    <div class="act-card-title">${esc(actionTitle(a))}</div>
+    ${body}
+  </div>`;
 }
 
 function redrawChat() {
+  const dock = $('#chatDock');
+  const panel = $('#chatPanel');
+  const pillTxt = $('#chatPillTxt');
+  const dot = $('#chatDot');
+  if (!dock) return;
+
+  dock.hidden = !aiReady();
+  if (!aiReady()) return;
+
+  const open = !!S.chatOpen;
+  if (panel) panel.hidden = !open;
+  // 展开时 pill 就没用了（面板自带标题栏），留着反而挡住上面的内容
+  const pill = document.querySelector('.chat-pill');
+  if (pill) pill.hidden = open;
+
+  // 收起状态下那一条 pill：没话就说「问问 AI」，有话就把最后一句露个脸
+  if (pillTxt) {
+    const last = S.chatTurns[S.chatTurns.length - 1];
+    pillTxt.textContent = open
+      ? '问问 AI'
+      : last
+      ? (last.role === 'user' ? '你：' : '') + String(last.text || '').replace(/\s+/g, ' ').slice(0, 18)
+      : '问问 AI';
+  }
+  if (dot) dot.hidden = !S.chatDot;
+
   const box = $('#chatTurns');
-  if (!box) return;
-  if (!S.chatTurns.length) {
-    box.innerHTML = '';
-  } else {
+  if (box) {
     box.innerHTML = S.chatTurns
-      .map(
-        (t) => `<div class="chat-msg ${t.role}">${
-          t.role === 'user' ? esc(t.text) : esc(t.text).replace(/\n/g, '<br />')
-        }</div>`
+      .map((t, ti) => {
+        const bubble =
+          `<div class="chat-msg ${t.role}">${
+            t.role === 'user' ? esc(t.text) : esc(t.text).replace(/\n/g, '<br />')
+          }</div>`;
+        const acts =
+          t.actions && t.actions.length
+            ? `<div class="chat-acts">${t.actions.map((a, ai) => actionCardHtml(a, ti, ai)).join('')}</div>`
+            : '';
+        return bubble + acts;
+      })
+      .join('');
+    if (chatSending) box.insertAdjacentHTML('beforeend', '<div class="chat-msg assistant typing">正在想…</div>');
+    box.scrollTop = box.scrollHeight;
+  }
+
+  const chips = $('#chatChips');
+  if (chips) {
+    chips.innerHTML = chatChips()
+      .map(([label, act]) =>
+        act
+          ? `<button class="chip" data-act="${esc(act)}">${esc(label)}</button>`
+          : `<button class="chip" data-act="chat-chip" data-q="${esc(label)}">${esc(label)}</button>`
       )
       .join('');
   }
-  $('#chatChips').innerHTML = chatChips()
-    .map(([label, act]) =>
-      act
-        ? `<button class="chip" data-act="${esc(act)}">${esc(label)}</button>`
-        : `<button class="chip" data-act="chat-chip" data-q="${esc(label)}">${esc(label)}</button>`
-    )
-    .join('');
-  // .sheet-body 才是真正的滚动区，chat-box 在它里面
-  const body = document.querySelector('.sheet-body');
-  if (body) body.scrollTop = body.scrollHeight;
+
+  const ctx = $('#chatCtx');
+  if (ctx) {
+    const h = currentHousehold();
+    ctx.textContent = [VIEW_LABEL[S.view] || '', h ? h.name : ''].filter(Boolean).join(' · ');
+  }
+  const send = $('#chatSendBtn');
+  if (send) send.disabled = chatSending;
 }
+
+/* ---------- 发消息 ---------- */
 
 /** 发一条。上下文每次重算 —— 用户可能在别的页面待了一会儿了 */
 async function sendChat(text) {
@@ -472,25 +729,48 @@ async function sendChat(text) {
   if (!q) return;
   if (chatSending) return;
   chatSending = true;
+  const inp = $('#chatInput');
+  if (inp) inp.value = '';
   S.chatTurns.push({ role: 'user', text: q });
   redrawChat();
 
   const prompt = chatContext() + '\n\n【用户问】' + q;
+  const history = S.chatTurns
+    .slice(0, -1)
+    .map((t) => ({ role: t.role, text: t.text }));
+
   try {
     const r = await api('POST', '/api/ai/chat', {
       task: 'assistant-chat',
       prompt,
-      history: S.chatTurns.slice(0, -1), // 刚才那条已经在 prompt 里了
+      history,
     });
     if (!r || r.ok === false) {
-      S.chatTurns.push({ role: 'assistant', text: '（' + ((r && r.error) || '这次没答上来') + '）' });
+      S.chatTurns.push({
+        role: 'assistant',
+        text: '（' + ((r && r.error) || '这次没答上来') + '）',
+        actions: [],
+      });
     } else {
-      S.chatTurns.push({ role: 'assistant', text: String(r.result || '').trim() || '（没说话）' });
+      // 服务端给的是 { reply, actions }；万一是纯文本（老服务端或降级）也接得住
+      const res = r.result;
+      const reply = typeof res === 'string' ? res : String((res && res.reply) || '').trim();
+      const acts = typeof res === 'object' && res && Array.isArray(res.actions) ? res.actions : [];
+      S.chatTurns.push({
+        role: 'assistant',
+        text: reply || '（没说话）',
+        actions: acts
+          .filter((a) => a && typeof a.type === 'string' && ACTION_META[a.type])
+          .slice(0, 3)
+          .map((a) => ({ type: a.type, data: a.data || {}, state: 'pending' })),
+      });
     }
   } catch (err) {
-    S.chatTurns.push({ role: 'assistant', text: '（连不上：' + err.message + '）' });
+    S.chatTurns.push({ role: 'assistant', text: '（连不上：' + err.message + '）', actions: [] });
   }
   chatSending = false;
+  // 收着的时候别让用户干等：pill 上冒个红点，回来再看
+  S.chatDot = !S.chatOpen;
   redrawChat();
 }
 
@@ -2767,6 +3047,9 @@ function render() {
   else if (S.view === 'order') view.innerHTML = viewOrder();
   else if (S.view === 'pantry') view.innerHTML = viewPantry();
   else view.innerHTML = viewManage();
+
+  // 悬浮窗面板头上那行「当前页面 · 当前家庭」跟着一起更新
+  redrawChat();
 }
 
 /** 顶栏上的「当前家庭」按钮 */
@@ -3587,24 +3870,38 @@ const ACTIONS = {
     promptPin();
   },
 
-  /* 对话式 AI */
-  'open-chat'() {
-    openChatSheet();
+  /* 对话式 AI：底部悬浮窗 */
+  'chat-toggle'() {
+    if (S.chatOpen) closeChat();
+    else openChat();
   },
-  async 'chat-send'() {
-    const inp = $('#chatInput');
-    if (!inp) return;
-    const v = inp.value;
-    inp.value = '';
-    await sendChat(v);
+  'chat-collapse'() {
+    closeChat();
   },
   async 'chat-chip'(el) {
     await sendChat(el.dataset.q);
   },
   'chat-clear'() {
     S.chatTurns = [];
+    S.chatDot = false;
     redrawChat();
     toast('对话已清空');
+  },
+  'chat-run'(el) {
+    return runChatAction(Number(el.dataset.t), Number(el.dataset.a));
+  },
+  'chat-dismiss'(el) {
+    const t = S.chatTurns[Number(el.dataset.t)];
+    const a = t && t.actions && t.actions[Number(el.dataset.a)];
+    if (!a || a.state === 'busy') return;
+    a.state = 'skipped';
+    a.done = '没有执行';
+    redrawChat();
+  },
+  'chat-view'(el) {
+    const d = dishById(el.dataset.d);
+    if (!d) return toast('这道菜已经不在菜单里了');
+    openDish(d.id);
   },
   /* 数据 */
 
@@ -3764,15 +4061,13 @@ document.addEventListener('input', (e) => {
   if (e.target.id === 'fPresetSearch') renderPresetGrid();
 });
 
-/* 对话框回车就发，不用去点右下角那个按钮 */
-document.addEventListener('keydown', async (e) => {
-  if (e.key !== 'Enter' || e.shiftKey) return;
-  const inp = e.target.closest && e.target.closest('#chatInput');
-  if (!inp) return;
+/* 悬浮窗里的输入框回车就发（form 自带，不用再单独挂 keydown） */
+document.addEventListener('submit', (e) => {
+  const f = e.target.closest && e.target.closest('#chatForm');
+  if (!f) return;
   e.preventDefault();
-  const v = inp.value;
-  inp.value = '';
-  await sendChat(v);
+  const inp = $('#chatInput');
+  if (inp && inp.value.trim()) sendChat(inp.value);
 });
 
 /* 改分类时，常见食材快选跟着换 */
