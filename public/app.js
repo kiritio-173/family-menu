@@ -15,8 +15,12 @@ const S = {
   memberFilter: '',
   pantryCat: '全部',
   pantryFilter: 'all', // all | soon | expired
-  pantryPick: false, // 库存批量删除：多选模式开关
-  pantrySel: new Set(), // 库存批量删除：勾中的 id
+  pick: '', // 正在多选哪个区域：'' | pantry | orders | plan | dishes
+  sel: {}, // 各区域勾中的 id：{ [区域]: Set }
+  shopList: [], // 当前页面渲染出来的那张买菜清单，批量入库时要用
+  orderPickSel: new Set(), // 点餐弹层里勾中的几道菜
+  planPickSel: new Set(), // 计划弹层里勾中的几道菜
+  planPickWeek: '', // 计划弹层是给哪一周开的
   planWeek: '', // 正在看的周（周一日期），空 = 本周
   authed: false, // 是否已解锁管理区（没设口令时恒为 true）
   cookPlanText: '', // 厨房助手结果的纯文本版，给「复制」用
@@ -1036,6 +1040,185 @@ document.addEventListener('keydown', (e) => {
 });
 
 /* =========================================================
+   通用多选
+
+   原来只有库存能做批量删除，选择状态也写死在 S.pantrySel 里。
+   这里抽成通用的：每个「区域」一个 key（pantry / orders / plan / dishes），
+   勾选集合放在 S.sel[key]，工具条统一由 pickBarHtml 渲染。
+
+   一条铁律：**全选只针对「当前看得见的那批」**，不是整个区域。
+   否则筛了「临期」再全选，就会出现「全选显示 10 样、删掉却是 12 样」。
+   ========================================================= */
+
+/** 各区域量词，用于确认弹窗里念名字（「删掉哪几样」） */
+const PICK_UNIT = { pantry: '样', orders: '条', plan: '道', dishes: '道' };
+
+function pickSel(key) {
+  return S.sel[key] || (S.sel[key] = new Set());
+}
+function pickHas(key, id) {
+  const s = S.sel[key];
+  return !!(s && s.has(id));
+}
+function pickIds(key) {
+  return [...(S.sel[key] || [])];
+}
+/** 当前多选模式下，哪些 id 是「看得见且勾中了」的 —— 算 N/M 和执行都用它 */
+function pickVisibleSel(key, visibleIds) {
+  const s = S.sel[key] || new Set();
+  return visibleIds.filter((id) => s.has(id));
+}
+function picking(key) {
+  return S.pick === key;
+}
+function pickOn(key) {
+  S.pick = key;
+  S.sel[key] = new Set();
+  render();
+}
+function pickOff() {
+  if (S.pick) S.sel[S.pick] = new Set();
+  S.pick = '';
+  render();
+}
+function pickToggle(key, id) {
+  const s = pickSel(key);
+  if (s.has(id)) s.delete(id);
+  else s.add(id);
+  render();
+}
+function pickSetAll(key, visibleIds) {
+  const s = pickSel(key);
+  const allOn = visibleIds.length > 0 && visibleIds.every((id) => s.has(id));
+  visibleIds.forEach((id) => (allOn ? s.delete(id) : s.add(id)));
+  render();
+}
+
+/** 各区域「当前看得见」的那一批。全选和 已选 N/M 都以它为准，不会和列表对不上。 */
+function pickVisibleIds(key) {
+  if (key === 'pantry') return visiblePantryIds();
+  if (key === 'orders') return visibleOrders().map((o) => o.id);
+  if (key === 'plan') return planItems(planWeek()).map((it) => it.id);
+  if (key === 'dishes') return manageDishRows().map((x) => x.id);
+  return [];
+}
+
+/** 点餐页当前真正列出来的那批（状态页签 + 成员筛选之后） */
+function visibleOrders() {
+  return householdOrders().filter(
+    (o) => o.status === S.orderStatus && (!S.memberFilter || o.requester === S.memberFilter)
+  );
+}
+
+/** 管理页「菜品管理」那一列的排序，渲染和多选必须用同一份 */
+function manageDishRows() {
+  return [...(S.data.dishes || [])].sort((a, b) =>
+    String(a.category).localeCompare(String(b.category), 'zh')
+  );
+}
+
+/** 库存可选的分类：预设顺序在前，家里自建的在后 */
+function pantryCategories() {
+  const extra = [...new Set(householdPantry().map((p) => p.category))]
+    .filter((c) => c && !PANTRY_ORDER.includes(c))
+    .sort((a, b) => a.localeCompare(b, 'zh'));
+  return PANTRY_ORDER.concat(extra);
+}
+
+/** 进入多选的入口按钮 */
+function pickOnBtn(key, label) {
+  return `<button class="btn ghost sm" data-act="pick-on" data-k="${esc(key)}">${esc(label || '☑ 批量操作')}</button>`;
+}
+
+/**
+ * 多选工具条。全选 / 已选 N / M / 批量动作 / 退出。
+ * 没勾东西时批量按钮自动禁用；N 和 M 都取自当前看得见的那一批，跟列表永远对得上。
+ */
+function pickBarHtml(key, visibleIds, buttons) {
+  const vis = pickVisibleSel(key, visibleIds);
+  const allOn = visibleIds.length > 0 && vis.length === visibleIds.length;
+  const dis = vis.length ? '' : 'disabled';
+  return `<div class="pick-bar">
+    <button class="btn ghost sm" data-act="pick-all" data-k="${esc(key)}">${allOn ? '☑ 全不选' : '☐ 全选'}</button>
+    <span class="pick-count">${visibleIds.length ? `已选 ${vis.length} / ${visibleIds.length}` : '没有可选的'}</span>
+    ${(buttons || [])
+      .map(
+        (b) =>
+          `<button class="btn ${b.cls || 'ghost'} sm" data-act="${esc(b.act)}" data-k="${esc(key)}"${
+            b.status ? ` data-status="${esc(b.status)}"` : ''
+          } ${dis}>${esc(b.label)}</button>`
+      )
+      .join('')}
+    <button class="btn ghost sm" data-act="pick-cancel">退出</button>
+  </div>`;
+}
+
+/** 多选模式下的一行：整行变成一个可点的勾选框 */
+function pickRowHtml(key, id, cls, inner) {
+  const on = pickHas(key, id);
+  return `<div class="${esc(cls)} pick ${on ? 'on' : ''}" role="checkbox" tabindex="0" aria-checked="${on}"
+    data-act="pick-item" data-k="${esc(key)}" data-id="${esc(id)}" aria-label="选择 ${esc(PICK_LABEL_OF(key, id))}">
+    <span class="pick-box">${on ? '✓' : ''}</span>
+    ${inner}
+  </div>`;
+}
+
+/** 勾选框的无障碍名字，得说清楚选中的是谁 */
+function PICK_LABEL_OF(key, id) {
+  const src =
+    key === 'pantry'
+      ? householdPantry()
+      : key === 'orders'
+      ? householdOrders()
+      : key === 'plan'
+      ? planItems(planWeek())
+      : key === 'dishes'
+      ? S.data.dishes || []
+      : [];
+  const hit = src.find((x) => x.id === id);
+  return hit ? hit.name || hit.dishName || '' : '';
+}
+
+/** 确认弹窗里念名字：只念前三个，别刷屏 */
+function pickPreview(names, unit) {
+  return names.slice(0, 3).join('、') + (names.length > 3 ? ` 等 ${names.length} ${unit}` : '');
+}
+
+/** 当前这张买菜清单里勾上了哪几样（点餐页和计划页是两张不同的单子） */
+function shopCheckedItems() {
+  return (S.shopList || []).filter((it) => S.shoppingChecked.has(it.name));
+}
+
+/** 「已买」的勾要存到服务端，刷新页面才不会丢 */
+async function saveShoppingChecked() {
+  await api('PUT', '/api/settings', { shoppingChecked: [...S.shoppingChecked] });
+  S.data.settings.shoppingChecked = [...S.shoppingChecked];
+}
+
+/**
+ * 把一样买菜清单上的东西记进当前家庭的库存。
+ * 单条「入库」和批量「全部入库」共用这一份，免得两处逻辑走偏。
+ */
+async function stockOne(name, parts) {
+  const { quantity, unit } = guessAmount(parts || []);
+  let category = '其他';
+  if (S.presets && S.presets.presets) {
+    const hit = S.presets.presets.find((p) => p.name === name);
+    if (hit) category = hit.category;
+  }
+  await api('POST', '/api/pantry', {
+    householdId: S.householdId,
+    name,
+    category,
+    quantity,
+    unit,
+    expireAt: '',
+    note: '从买菜清单入库',
+  });
+  return { name, quantity, unit };
+}
+
+/* =========================================================
    视图 1：菜单
    ========================================================= */
 
@@ -1420,6 +1603,25 @@ function orderItem(o) {
     actions = `<button class="btn ghost sm" data-act="del-order" data-id="${esc(o.id)}">删除</button>`;
   }
 
+  // 多选模式：状态按钮先让位，整行变成勾选框
+  if (picking('orders')) {
+    const on = pickHas('orders', o.id);
+    return `<div class="order-item pick ${on ? 'on' : ''}" role="checkbox" tabindex="0"
+      aria-checked="${on}" data-act="pick-item" data-k="orders" data-id="${esc(o.id)}"
+      aria-label="选择 ${esc(o.dishName)}">
+      <span class="pick-box">${on ? '✓' : ''}</span>
+      <div class="order-thumb">${thumb}</div>
+      <div class="order-main">
+        <div class="order-name">${esc(o.dishName)}</div>
+        <div class="order-meta">${esc(o.requester)} · ${o.people} 人份 · ${relTime(o.createdAt)}</div>
+        ${o.note ? `<div class="order-note">📝 ${esc(o.note)}</div>` : ''}
+      </div>
+      <div style="text-align:right">
+        <span class="status-pill status-${o.status}">${STATUS_TEXT[o.status]}</span>
+      </div>
+    </div>`;
+  }
+
   return `<div class="order-item">
     <div class="order-thumb">${thumb}</div>
     <div class="order-main${d ? ' link' : ''}" role="button" tabindex="0" ${d ? `data-act="open-dish" data-id="${esc(d.id)}"` : ''}
@@ -1525,11 +1727,35 @@ function buildShoppingList() {
 }
 
 /**
+ * 买菜清单的批量工具条。
+ *
+ * 这里刻意不另起一个「多选模式」：每行那个 ✓ 就是「已经买了」，也是勾选。
+ * 勾上一个就冒出这条工具条，买完一袋一袋点「全部入库」，入库完自动清掉勾选。
+ * 多造一个「选中但没买」的概念反而更容易点错。
+ */
+function shopBatchBar(list) {
+  const checked = list.filter((it) => S.shoppingChecked.has(it.name));
+  if (!checked.length) return '';
+  const allOn = checked.length === list.length;
+  const noStock = checked.some((it) => !it.stock.length);
+  return `<div class="pick-bar">
+    <button class="btn ghost sm" data-act="shop-all" data-on="${allOn ? '0' : '1'}">${allOn ? '☑ 全不勾' : '☐ 全勾'}</button>
+    <span class="pick-count">已勾 ${checked.length} / ${list.length}</span>
+    <button class="btn soft sm" data-act="shop-stock" ${noStock ? '' : 'disabled'}>🧊 全部入库</button>
+    <button class="btn ghost sm" data-act="shop-copy">复制勾中的</button>
+    <button class="btn ghost sm" data-act="shop-uncheck">取消勾选</button>
+  </div>`;
+}
+
+/**
  * 采购清单的通用渲染：点餐页和计划页共用
  * opts: { title, sub, hint, bare（不画标题行，直接接在别的小标题下面） }
  */
 function shopListHtml(list, opts) {
   const o = opts || {};
+  // 记住当前这张单子：批量入库、复制勾中的都得按它来。
+  // 点餐页和计划页汇总出来的是两张不同的单子，不能混着做。
+  S.shopList = list;
   if (!list.length) {
     return o.bare
       ? ''
@@ -1548,6 +1774,7 @@ function shopListHtml(list, opts) {
       <button class="btn ghost sm" style="margin-left:auto" data-act="copy-shopping" data-scope="${esc(o.scope || '')}">复制</button>
     </div>`;
   return `${head}
+    ${shopBatchBar(list)}
     ${list
       .map((it) => {
         const done = S.shoppingChecked.has(it.name);
@@ -1591,9 +1818,7 @@ function viewOrder() {
     .join('');
 
   let listHtml;
-  const list = all.filter(
-    (o) => o.status === S.orderStatus && (!S.memberFilter || o.requester === S.memberFilter)
-  );
+  const list = visibleOrders();
   if (!list.length) {
     listHtml = `<div class="empty">
       <span class="empty-emoji">🍽️</span>
@@ -1665,9 +1890,24 @@ function viewOrder() {
     <div class="status-tabs">${tabs}</div>
     ${memberFilterHtml}
     ${
-      list.length
+      picking('orders')
+        ? pickBarHtml(
+            'orders',
+            list.map((o) => o.id),
+            [
+              S.orderStatus === 'pending'
+                ? { act: 'batch-status', status: 'cooking', cls: 'soft', label: '🔥 开做' }
+                : '',
+              S.orderStatus === 'cooking'
+                ? { act: 'batch-status', status: 'done', cls: 'green', label: '✓ 完成' }
+                : '',
+              { act: 'pick-delete', cls: 'danger', label: '🗑 删除' },
+            ].filter(Boolean)
+          )
+        : list.length
         ? `<div class="list-toolbar">
              <span class="section-sub">${S.groupByMember ? '按家人分组' : '按时间排序'}</span>
+             ${pickOnBtn('orders', '☑ 批量操作')}
              <button class="btn ghost sm" data-act="toggle-group">
                ${S.groupByMember ? '⇅ 改成按时间' : '👨‍👩‍👧‍👦 按家人分组'}
              </button>
@@ -1675,7 +1915,7 @@ function viewOrder() {
         : ''
     }
     ${listHtml}
-    <button class="fab" data-act="new-order">＋ 我要点餐</button>`;
+    ${S.pick === 'orders' ? '' : '<button class="fab" data-act="new-order">＋ 我要点餐</button>'}`;
 }
 
 /** 按点餐人分组：一眼看清谁要吃什么、共几份 */
@@ -1740,6 +1980,8 @@ function openOrderForm(dish) {
     people: 2,
     note: '',
   };
+  // 弹层里的多选：点一下勾上，提交时一次下好几道
+  S.orderPickSel = new Set(d ? [d.id] : []);
 
   const picker = S.data.dishes
     .map((x) => {
@@ -1754,7 +1996,6 @@ function openOrderForm(dish) {
       </button>`;
     })
     .join('');
-
   const memberCards = members.length
     ? `<div class="member-cards">
         ${members
@@ -1774,7 +2015,7 @@ function openOrderForm(dish) {
     body: `
       ${houseOrderNote()}
       <div class="field">
-        <label class="field-label">选一道菜</label>
+        <label class="field-label">选菜<span class="field-hint">可以多选，一次下好几道</span></label>
         <div class="picker-list">${picker}</div>
       </div>
       <div class="field">
@@ -1795,11 +2036,20 @@ function openOrderForm(dish) {
         <textarea class="textarea" id="ordNote" placeholder="有什么要求写这里">${esc(S.draftOrder.note)}</textarea>
       </div>`,
     foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
-           <button class="btn" data-act="submit-order">提交点餐</button>`,
+           <button class="btn" data-act="submit-order" id="ordSubmitBtn">提交点餐</button>`,
   });
 
+  syncOrderPickBtn();
   const name = $('#ordName');
   if (name && !d) name.focus();
+}
+
+/** 提交按钮上的道数跟着勾选走 */
+function syncOrderPickBtn() {
+  const b = $('#ordSubmitBtn');
+  if (!b) return;
+  const n = (S.orderPickSel || new Set()).size;
+  b.textContent = n > 1 ? `提交点餐（${n} 道）` : '提交点餐';
 }
 
 function collectOrder() {
@@ -1828,6 +2078,20 @@ function planRow(it) {
   if (it.servings) meta.push(esc(it.servings));
   if (d && d.duration) meta.push(`⏱ ${d.duration}′`);
   if (it.note) meta.push(esc(it.note));
+
+  // 多选模式：✕ 先让位，整行变成勾选框
+  if (picking('plan')) {
+    return pickRowHtml(
+      'plan',
+      it.id,
+      'plan-item',
+      `<div class="plan-thumb">${thumb}</div>
+      <div class="plan-main">
+        <div class="plan-name">${esc(it.name)}</div>
+        ${meta.length ? `<div class="plan-meta">${meta.join(' · ')}</div>` : ''}
+      </div>`
+    );
+  }
 
   return `<div class="plan-item">
     <div class="plan-thumb">${thumb}</div>
@@ -1873,8 +2137,24 @@ function viewPlan() {
   } else {
     listHtml = `<div class="section-head">
         <h2 class="section-title">计划做 ${items.length} 道</h2>
-        <button class="btn ghost sm" style="margin-left:auto" data-act="clear-plan">清空这一周</button>
+        ${
+          picking('plan')
+            ? ''
+            : `<button class="btn ghost sm" style="margin-left:auto" data-act="clear-plan">清空这一周</button>`
+        }
       </div>
+      ${
+        picking('plan')
+          ? pickBarHtml(
+              'plan',
+              items.map((it) => it.id),
+              [{ act: 'pick-delete', cls: 'danger', label: '✕ 拿掉' }]
+            )
+          : `<div class="list-toolbar">
+               <span class="section-sub">点一下 ✕ 拿掉一道</span>
+               ${pickOnBtn('plan', '☑ 批量操作')}
+             </div>`
+      }
       ${items.map(planRow).join('')}`;
   }
 
@@ -1902,20 +2182,25 @@ function viewPlan() {
     ${weekNav}
     ${listHtml}
     ${shopSection}
-    <button class="fab" data-act="add-plan-dish">＋ 加一道菜</button>`;
+    ${S.pick === 'plan' ? '' : '<button class="fab" data-act="add-plan-dish">＋ 加一道菜</button>'}`;
 }
 
-/** 加菜：先选菜谱里的，也能自己写一道临时的 */
+/**
+ * 加菜：先选菜谱里的（可多选），也能自己写一道临时的。
+ * 周末排一周的菜，原来一道道点太慢，改成勾几道一次加进去。
+ */
 function openPlanPicker(weekOf) {
   const week = weekOf || planWeek();
   const planned = new Set(planItems(week).map((it) => it.name));
+  S.planPickWeek = week;
+  S.planPickSel = new Set();
 
   const picker = S.data.dishes
     .map((x) => {
       const on = planned.has(x.name);
       const t = x.images && x.images[0] ? `<img src="${esc(x.images[0])}" alt="" />` : dishEmoji(x.name);
-      return `<button class="picker-item" data-act="pick-plan-dish" data-id="${esc(x.id)}" aria-pressed="${on}"
-        ${on ? 'disabled style="opacity:.45"' : ''}>
+      return `<button class="picker-item" data-act="pick-plan-dish" data-id="${esc(x.id)}"
+        aria-pressed="${on}" ${on ? 'disabled style="opacity:.45"' : ''}>
         <span class="picker-thumb">${t}</span>
         <span style="flex:1;min-width:0">
           <span class="picker-name">${esc(x.name)}${on ? ' · 已加入' : ''}</span>
@@ -1929,7 +2214,7 @@ function openPlanPicker(weekOf) {
     title: `加到${planWeekTitle(week)}`,
     body: `
       <div class="field">
-        <label class="field-label">从菜单里选</label>
+        <label class="field-label">从菜单里选<span class="field-hint">可以多选</span></label>
         <div class="picker-list">${picker}</div>
       </div>
       <div class="field">
@@ -1937,9 +2222,19 @@ function openPlanPicker(weekOf) {
         <input class="input" id="planName" placeholder="例如：红烧排骨" />
       </div>`,
     foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
-           <button class="btn" data-act="save-plan-custom" data-week="${esc(week)}">加进去</button>`,
+           <button class="btn" data-act="save-plan-picks" id="planAddBtn" disabled>加进去</button>`,
+    onMount: syncPlanPickBtn,
   });
   $('#planName').focus();
+}
+
+/** 「加进去」按钮上的数量要跟着勾选实时变 */
+function syncPlanPickBtn() {
+  const b = $('#planAddBtn');
+  if (!b) return;
+  const n = (S.planPickSel || new Set()).size;
+  b.disabled = n === 0;
+  b.textContent = n ? `加 ${n} 道进去` : '加进去';
 }
 
 /** 「本周」「下周」「10月20日 那周」 */
@@ -1975,11 +2270,11 @@ function foodRow(p) {
   const flagText =
     st.key === 'none' ? (p.expireAt || '未填保质期') : st.label;
 
-  // 多选模式：整行变成一个勾选框，数量加减暂时让位（批量清理不需要先调数量）
-  if (S.pantryPick) {
-    const on = S.pantrySel.has(p.id);
+  // 多选模式：整行变成一个勾选框，数量加减暂时让位（批量操作不需要先调数量）
+  if (picking('pantry')) {
+    const on = pickHas('pantry', p.id);
     return `<div class="food-row pick ${on ? 'on' : ''}" role="checkbox" tabindex="0"
-      aria-checked="${on}" data-act="pick-food" data-id="${esc(p.id)}"
+      aria-checked="${on}" data-act="pick-item" data-k="pantry" data-id="${esc(p.id)}"
       aria-label="选择 ${esc(p.name)}">
       <span class="pick-box">${on ? '✓' : ''}</span>
       <div class="food-main">
@@ -2141,22 +2436,21 @@ function viewPantry() {
       .join('');
   }
 
-  // 多选模式的工具条：全选、已选几样、退出、删掉
-  const pickBar = S.pantryPick
-    ? (() => {
-        const visible = list.map((p) => p.id).filter((id) => S.pantrySel.has(id));
-        const allOn = list.length > 0 && visible.length === list.length;
-        return `<div class="pick-bar">
-          <button class="btn ghost sm" data-act="pick-all">${allOn ? '☑ 全不选' : '☐ 全选'}</button>
-          <span class="pick-count">${list.length ? `已选 ${visible.length} / ${list.length}` : '没有可选的'}</span>
-          <button class="btn ghost sm" data-act="pick-cancel">退出</button>
-          <button class="btn danger sm" data-act="pick-delete" ${visible.length ? '' : 'disabled'}>🗑 删除</button>
-        </div>`;
-      })()
+  // 多选模式的工具条：全选、已选几样、批量改、删掉
+  const pickBar = picking('pantry')
+    ? pickBarHtml(
+        'pantry',
+        list.map((p) => p.id),
+        [
+          { act: 'batch-expire', cls: 'soft', label: '📅 改保质期' },
+          { act: 'batch-cat', cls: 'soft', label: '🏷 改分类' },
+          { act: 'pick-delete', cls: 'danger', label: '🗑 删除' },
+        ]
+      )
     : all.length
     ? `<div class="list-toolbar">
         <span class="section-sub">${all.length} 样食材</span>
-        <button class="btn ghost sm" data-act="pick-on">☑ 批量删除</button>
+        ${pickOnBtn('pantry', '☑ 批量操作')}
       </div>`
     : '';
 
@@ -2171,7 +2465,7 @@ function viewPantry() {
     <div class="chip-row">${filterChips}</div>
     <div class="chip-row">${catChips}</div>
     ${body}
-    ${S.pantryPick ? '' : '<button class="fab" data-act="new-food">＋ 记一样食材</button>'}`;
+    ${S.pick === 'pantry' ? '' : '<button class="fab" data-act="new-food">＋ 记一样食材</button>'}`;
 }
 
 /* ---------------- 食材录入 / 编辑 ---------------- */
@@ -2370,11 +2664,22 @@ function viewManage() {
   const s = S.data.settings;
   const d = S.data.dishes;
 
-  const dishRows = d
-    .slice()
-    .sort((a, b) => String(a.category).localeCompare(String(b.category), 'zh'))
-    .map(
-      (x) => `<div class="list-row">
+  const dishRows = manageDishRows()
+    .map((x) => {
+      // 多选模式：编辑/复制/删除先让位，整行变成勾选框
+      if (picking('dishes')) {
+        return pickRowHtml(
+          'dishes',
+          x.id,
+          'list-row',
+          `<span class="icon-mini act">${x.images && x.images[0] ? '🖼️' : dishEmoji(x.name)}</span>
+          <span class="list-row-main">
+            <span class="list-row-title">${esc(x.name)}</span>
+            <span class="list-row-sub">${esc(x.category)} · ${(x.methods || []).length} 种做法 · ${(x.seasonings || []).length} 样调料</span>
+          </span>`
+        );
+      }
+      return `<div class="list-row">
         <span class="icon-mini act">${x.images && x.images[0] ? '🖼️' : dishEmoji(x.name)}</span>
         <span class="list-row-main">
           <span class="list-row-title">${esc(x.name)}</span>
@@ -2383,8 +2688,8 @@ function viewManage() {
         <button class="icon-mini" data-act="edit-dish" data-id="${esc(x.id)}" title="编辑">✏️</button>
         <button class="icon-mini" data-act="dup-dish" data-id="${esc(x.id)}" title="复制">⧉</button>
         <button class="icon-mini" data-act="del-dish" data-id="${esc(x.id)}" title="删除">🗑️</button>
-      </div>`
-    )
+      </div>`;
+    })
     .join('');
 
   const catRows = sortedCategories()
@@ -2435,8 +2740,30 @@ function viewManage() {
 
     <div class="section-head">
       <h2 class="section-title">菜品管理</h2>
-      <button class="btn soft sm" style="margin-left:auto" data-act="new-dish">＋ 新增</button>
+      ${
+        picking('dishes')
+          ? ''
+          : `<button class="btn soft sm" style="margin-left:auto" data-act="new-dish">＋ 新增</button>`
+      }
     </div>
+    ${
+      picking('dishes')
+        ? pickBarHtml(
+            'dishes',
+            manageDishRows().map((x) => x.id),
+            [
+              { act: 'batch-cat', cls: 'soft', label: '🏷 改分类' },
+              { act: 'batch-tags', cls: 'soft', label: '🏷 标签' },
+              { act: 'pick-delete', cls: 'danger', label: '🗑 删除' },
+            ]
+          )
+        : d.length
+        ? `<div class="list-toolbar">
+             <span class="section-sub">${d.length} 道菜</span>
+             ${pickOnBtn('dishes', '☑ 批量操作')}
+           </div>`
+        : ''
+    }
     ${dishRows || '<div class="empty"><p class="empty-text">还没有菜</p></div>'}
 
     <div class="section-head">
@@ -3379,16 +3706,19 @@ const ACTIONS = {
   'new-order'() {
     openOrderForm(null);
   },
+  /** 点餐弹层：勾选而不是单选，勾几道就下几道 */
   'pick-dish'(el) {
-    collectOrder();
-    const d = dishById(el.dataset.id);
-    if (!d) return;
-    S.draftOrder.dishId = d.id;
-    S.draftOrder.dishName = d.name;
-    $('#ordName').value = d.name;
-    document.querySelectorAll('.picker-item').forEach((b) => {
-      b.setAttribute('aria-pressed', b.dataset.id === d.id);
-    });
+    const id = el.dataset.id;
+    if (!S.orderPickSel) S.orderPickSel = new Set();
+    if (S.orderPickSel.has(id)) S.orderPickSel.delete(id);
+    else S.orderPickSel.add(id);
+    const names = [...S.orderPickSel].map((x) => (dishById(x) || {}).name).filter(Boolean);
+    document
+      .querySelectorAll('.sheet-body .picker-item[data-act="pick-dish"]')
+      .forEach((b) => b.setAttribute('aria-pressed', String(S.orderPickSel.has(b.dataset.id))));
+    const box = $('#ordName');
+    if (box && names.length) box.value = names.join('、');
+    syncOrderPickBtn();
   },
   'pick-member'(el) {
     $('#ordWho').value = el.dataset.name;
@@ -3401,15 +3731,26 @@ const ACTIONS = {
   },
   async 'submit-order'() {
     const o = collectOrder();
-    if (!o.dishName) return toast('先选一道菜，或者写上想吃的名字');
+    const picks = [...(S.orderPickSel || new Set())]
+      .map((id) => dishById(id))
+      .filter(Boolean);
+    if (!picks.length && !o.dishName) return toast('先勾几道菜，或者写上想吃的名字');
     try {
-      await api('POST', '/api/orders', o);
+      // 勾了几道就下几道：谁点的、几份、备注这些对每道都一样，统一填一次就行
+      const targets = picks.length ? picks : [{ id: null, name: o.dishName }];
+      for (const t of targets) {
+        await api('POST', '/api/orders', {
+          ...o,
+          dishId: t.id || null,
+          dishName: t.name,
+        });
+      }
       closeSheet();
       await loadState(true);
       S.view = 'order';
       S.orderStatus = 'pending';
       render();
-      toast(`🔔 已下单：${o.dishName}`);
+      toast(targets.length > 1 ? `🔔 已下单 ${targets.length} 道` : `🔔 已下单：${targets[0].name}`);
     } catch (err) {
       toast('提交失败：' + err.message);
     }
@@ -3612,10 +3953,38 @@ const ACTIONS = {
   'add-plan-dish'() {
     openPlanPicker(planWeek());
   },
-  async 'pick-plan-dish'(el) {
-    const dish = dishById(el.dataset.id);
-    if (!dish) return;
-    await addToPlan({ dishId: dish.id, name: dish.name, servings: dish.servings }, planWeek());
+  /** 计划弹层：点一下先勾上，不立刻加 —— 一次能勾好几道 */
+  'pick-plan-dish'(el) {
+    const id = el.dataset.id;
+    if (!S.planPickSel) S.planPickSel = new Set();
+    if (S.planPickSel.has(id)) S.planPickSel.delete(id);
+    else S.planPickSel.add(id);
+    document
+      .querySelectorAll('.sheet-body .picker-item[data-act="pick-plan-dish"]')
+      .forEach((b) => b.setAttribute('aria-pressed', String(S.planPickSel.has(b.dataset.id))));
+    syncPlanPickBtn();
+  },
+  /** 勾好的几道一次加进这一周 */
+  async 'save-plan-picks'() {
+    const ids = [...(S.planPickSel || new Set())];
+    if (!ids.length) return toast('先勾几道菜');
+    const week = S.planPickWeek || planWeek();
+    let n = 0;
+    for (const id of ids) {
+      const d = dishById(id);
+      if (!d) continue;
+      try {
+        await addToPlan({ dishId: d.id, name: d.name, servings: d.servings }, week, () => {});
+        n++;
+      } catch (_) {
+        /* 已经在计划里的那道跳过，不打断其余的 */
+      }
+    }
+    S.planPickSel = new Set();
+    closeSheet();
+    await loadState(true);
+    render();
+    toast(n ? `已加入 ${n} 道` : '这几道都已经在计划里了');
   },
   async 'toggle-plan-dish'(el) {
     const dish = dishById(el.dataset.id);
@@ -3741,47 +4110,282 @@ const ACTIONS = {
     toast(r.removed ? `已清理 ${r.removed} 样` : '没有需要清理的');
   },
 
-  /* ---- 库存批量删除 ---- */
+  /* ---- 通用多选 ---- */
 
-  'pick-on'() {
-    S.pantryPick = true;
-    S.pantrySel = new Set();
-    render();
+  'pick-on'(el) {
+    pickOn(el.dataset.k);
   },
   'pick-cancel'() {
-    S.pantryPick = false;
-    S.pantrySel = new Set();
-    render();
+    pickOff();
   },
-  'pick-food'(el) {
-    const id = el.dataset.id;
-    if (S.pantrySel.has(id)) S.pantrySel.delete(id);
-    else S.pantrySel.add(id);
-    render();
+  'pick-item'(el) {
+    pickToggle(el.dataset.k, el.dataset.id);
   },
-  /** 全选/全不选只针对「当前看得到的那批」，不是整个库存 */
+  /** 全选/全不选只针对「当前看得到的那批」，不是整个区域 */
   'pick-all'(el) {
-    const visible = visiblePantryIds();
-    const allOn = visible.length > 0 && visible.every((id) => S.pantrySel.has(id));
-    if (allOn) visible.forEach((id) => S.pantrySel.delete(id));
-    else visible.forEach((id) => S.pantrySel.add(id));
-    render();
+    pickSetAll(el.dataset.k, pickVisibleIds(el.dataset.k));
   },
-  async 'pick-delete'() {
-    const ids = [...S.pantrySel];
+
+  /* ---- 库存批量 ---- */
+
+  async 'pick-delete'(el) {
+    const key = (el && el.dataset.k) || 'pantry';
+    const ids = pickIds(key);
     if (!ids.length) return toast('还没勾选任何一样');
-    // 只把名字念出来，不念「家里有 12 样」这种会吓人的总数
-    const names = pantryNames(ids);
-    const preview = names.slice(0, 3).join('、') + (names.length > 3 ? ` 等 ${names.length} 样` : '');
-    if (!confirm(`删掉「${currentHousehold() ? currentHousehold().name : ''}」库存里的 ${preview}？删了就找不回来了。`))
+    if (key === 'pantry') {
+      const names = pantryNames(ids);
+      const preview = pickPreview(names, '样');
+      if (
+        !confirm(
+          `删掉「${currentHousehold() ? currentHousehold().name : ''}」库存里的 ${preview}？删了就找不回来了。`
+        )
+      )
+        return;
+      const r = await api('DELETE', `/api/pantry?ids=${ids.map(encodeURIComponent).join(',')}`);
+      S.sel.pantry = new Set();
+      await loadState(true);
+      // 先刷新再判断：原来在刷新前比数量，筛选状态下会误判「全删光了」
+      if (!householdPantry().length) S.pick = '';
+      render();
+      toast(r.removed ? `已删掉 ${r.removed} 样` : '没删掉任何东西');
       return;
-    const r = await api('DELETE', `/api/pantry?ids=${ids.map(encodeURIComponent).join(',')}`);
-    S.pantrySel = new Set();
+    }
+    if (key === 'orders') {
+      const names = householdOrders().filter((o) => ids.includes(o.id)).map((o) => o.dishName);
+      const preview = pickPreview(names, '条');
+      if (!confirm(`删掉这 ${preview} 点餐？删了就找不回来了。`)) return;
+      const r = await api('DELETE', `/api/orders?ids=${ids.map(encodeURIComponent).join(',')}`);
+      S.sel.orders = new Set();
+      await loadState(true);
+      render();
+      toast(r.removed ? `已删掉 ${r.removed} 条点餐` : '没删掉任何东西');
+      return;
+    }
+    if (key === 'plan') {
+      const names = planItems(planWeek()).filter((it) => ids.includes(it.id)).map((it) => it.name);
+      const preview = pickPreview(names, '道');
+      if (!confirm(`把 ${preview} 从本周计划里拿掉？`)) return;
+      const r = await api('DELETE', `/api/plans/items?ids=${ids.map(encodeURIComponent).join(',')}`);
+      S.sel.plan = new Set();
+      await loadState(true);
+      if (!planItems(planWeek()).length) S.pick = '';
+      render();
+      toast(r.removed ? `已拿掉 ${r.removed} 道` : '没拿掉任何东西');
+      return;
+    }
+    if (key === 'dishes') {
+      const names = (S.data.dishes || []).filter((d) => ids.includes(d.id)).map((d) => d.name);
+      const preview = pickPreview(names, '道');
+      if (!confirm(`删掉 ${preview}？相关的点餐和计划里的这道菜也会一起去掉。`)) return;
+      for (const id of ids) await api('DELETE', `/api/dishes/${encodeURIComponent(id)}`);
+      S.sel.dishes = new Set();
+      await loadState(true);
+      if (!(S.data.dishes || []).length) S.pick = '';
+      render();
+      toast(`已删掉 ${ids.length} 道菜`);
+    }
+  },
+
+  /** 批量改保质期：同一批买的，一次改完 */
+  'batch-expire'() {
+    const ids = pickIds('pantry');
+    if (!ids.length) return toast('先勾几样');
+    openSheet({
+      title: `给 ${ids.length} 样改保质期`,
+      body: `<div class="field">
+          <label class="field-label">快捷<span class="field-hint">相对今天算</span></label>
+          <div class="chip-row">
+            ${[
+              ['+3 天', 3],
+              ['+1 周', 7],
+              ['+2 周', 14],
+              ['+1 个月', 30],
+              ['+3 个月', 90],
+            ]
+              .map(
+                ([l, n]) =>
+                  `<button class="chip" data-act="set-ids-expire" data-days="${n}" data-k="pantry">${l}</button>`
+              )
+              .join('')}
+          </div>
+        </div>
+        <div class="field">
+          <label class="field-label">或者指定日期</label>
+          <input class="input" type="date" id="batchExpireDate" />
+          <button class="btn soft block" style="margin-top:8px" data-act="set-ids-expire" data-k="pantry">用它</button>
+        </div>
+        <div class="field">
+          <button class="btn ghost block" data-act="set-ids-expire" data-k="pantry" data-clear="1">清空保质期</button>
+        </div>`,
+      foot: `<button class="btn ghost" data-act="close-sheet">取消</button>`,
+    });
+  },
+
+  /** 批量改分类 */
+  'batch-cat'() {
+    const key = S.pick === 'dishes' ? 'dishes' : 'pantry';
+    const ids = pickIds(key);
+    if (!ids.length) return toast('先勾几样');
+    const cats = key === 'dishes' ? sortedCategories().map((c) => c.name) : pantryCategories();
+    openSheet({
+      title: `给 ${ids.length} ${PICK_UNIT[key]}改分类`,
+      body: `<div class="chip-row">
+          ${cats
+            .map(
+              (c) =>
+                `<button class="chip" data-act="set-ids-cat" data-k="${esc(key)}" data-cat="${esc(c)}">${esc(catEmoji(c) + ' ' + c)}</button>`
+            )
+            .join('')}
+        </div>
+        <div class="field" style="margin-top:14px">
+          <label class="field-label">新开一个分类</label>
+          <div style="display:flex;gap:8px">
+            <input class="input" id="batchNewCat" placeholder="分类名" />
+            <button class="btn" data-act="set-ids-cat" data-k="${esc(key)}" data-new="1">用这个</button>
+          </div>
+        </div>`,
+      foot: `<button class="btn ghost" data-act="close-sheet">取消</button>`,
+    });
+  },
+
+  async 'set-ids-expire'(el) {
+    const ids = pickIds('pantry');
+    if (!ids.length) return toast('先勾几样');
+    let date = '';
+    if (el.dataset.clear) date = '';
+    else if (el.dataset.days) date = addDays(todayStr(), Number(el.dataset.days));
+    else date = ($('#batchExpireDate') || {}).value || '';
+    for (const id of ids) {
+      const p = householdPantry().find((x) => x.id === id);
+      if (p) await api('PUT', `/api/pantry/${encodeURIComponent(id)}`, { ...p, expireAt: date });
+    }
+    closeSheet();
     await loadState(true);
-    // 先刷新再判断：原来在刷新前比数量，筛选状态下会误判「全删光了」
-    if (!householdPantry().length) S.pantryPick = false;
     render();
-    toast(r.removed ? `已删掉 ${r.removed} 样` : '没删掉任何东西');
+    toast(`${ids.length} 样的保质期改成 ${date || '（清空）'}`);
+  },
+
+  async 'set-ids-cat'(el) {
+    const key = el.dataset.k;
+    const ids = pickIds(key);
+    if (!ids.length) return toast('先勾几样');
+    let cat = el.dataset.cat || '';
+    if (el.dataset.new) {
+      cat = (($('#batchNewCat') || {}).value || '').trim();
+      if (!cat) return toast('写上分类名');
+      if (key === 'pantry' && !pantryCategories().includes(cat)) {
+        await api('POST', '/api/categories', { name: cat });
+      }
+      if (key === 'dishes' && !sortedCategories().some((c) => c.name === cat)) {
+        await api('POST', '/api/categories', { name: cat });
+      }
+      await loadState(true);
+    }
+    for (const id of ids) {
+      if (key === 'pantry') {
+        const p = householdPantry().find((x) => x.id === id);
+        if (p) await api('PUT', `/api/pantry/${encodeURIComponent(id)}`, { ...p, category: cat });
+      } else {
+        const d = dishById(id);
+        if (d) await api('PUT', `/api/dishes/${encodeURIComponent(id)}`, { ...d, category: cat });
+      }
+    }
+    closeSheet();
+    await loadState(true);
+    render();
+    toast(`${ids.length} ${PICK_UNIT[key]}归到「${cat}」了`);
+  },
+
+  /** 批量加/去标签、标拿手菜 */
+  'batch-tags'() {
+    const ids = pickIds('dishes');
+    if (!ids.length) return toast('先勾几道菜');
+    const tags = [...new Set((S.data.dishes || []).flatMap((d) => d.tags || []))];
+    openSheet({
+      title: `给 ${ids.length} 道菜加标签`,
+      body: `<div class="field">
+          <label class="field-label">加上<span class="field-hint">原来没有的才加</span></label>
+          <div style="display:flex;gap:8px">
+            <input class="input" id="batchTagIn" placeholder="下饭、快手、宴客…" />
+            <button class="btn" data-act="set-ids-tags" data-mode="add">加上</button>
+          </div>
+        </div>
+        <div class="field">
+          <label class="field-label">去掉</label>
+          <div class="chip-row">
+            ${
+              tags.length
+                ? tags
+                    .map(
+                      (t) =>
+                        `<button class="chip" data-act="set-ids-tags" data-mode="del" data-tag="${esc(t)}">✕ ${esc(t)}</button>`
+                    )
+                    .join('')
+                : '<span class="field-hint">这些菜现在还没有任何标签</span>'
+            }
+          </div>
+        </div>
+        <div class="field">
+          <label class="field-label">拿手菜星标</label>
+          <div style="display:flex;gap:8px">
+            <button class="btn soft" style="flex:1" data-act="set-ids-fav" data-v="1">⭐ 全标上</button>
+            <button class="btn ghost" style="flex:1" data-act="set-ids-fav" data-v="0">全部取消</button>
+          </div>
+        </div>`,
+      foot: `<button class="btn ghost" data-act="close-sheet">取消</button>`,
+    });
+  },
+
+  async 'set-ids-tags'(el) {
+    const ids = pickIds('dishes');
+    if (!ids.length) return toast('先勾几道菜');
+    const mode = el.dataset.mode;
+    const tag = el.dataset.tag || (($('#batchTagIn') || {}).value || '').trim();
+    if (!tag) return toast('写上标签');
+    for (const id of ids) {
+      const d = dishById(id);
+      if (!d) continue;
+      const list = (d.tags || []).slice();
+      const i = list.indexOf(tag);
+      if (mode === 'add' && i < 0) list.push(tag);
+      if (mode === 'del' && i >= 0) list.splice(i, 1);
+      await api('PUT', `/api/dishes/${encodeURIComponent(id)}`, { ...d, tags: list.slice(0, 8) });
+    }
+    await loadState(true);
+    render();
+    // 加完把弹层重开一遍，不然「去掉」那栏还是加之前的标签，想反悔都找不到
+    if (mode === 'del') closeSheet();
+    else ACTIONS['batch-tags']();
+    toast(mode === 'add' ? `${ids.length} 道菜加上了「${tag}」` : `${ids.length} 道菜去掉了「${tag}」`);
+  },
+
+  async 'set-ids-fav'(el) {
+    const ids = pickIds('dishes');
+    if (!ids.length) return toast('先勾几道菜');
+    const on = el.dataset.v === '1';
+    for (const id of ids) {
+      const d = dishById(id);
+      if (d) await api('PUT', `/api/dishes/${encodeURIComponent(id)}`, { ...d, isFavorite: on });
+    }
+    closeSheet();
+    await loadState(true);
+    render();
+    toast(on ? `${ids.length} 道菜标成拿手菜了` : `${ids.length} 道菜的星标取消了`);
+  },
+
+  /* ---- 点餐批量 ---- */
+
+  async 'batch-status'(el) {
+    const ids = pickIds('orders');
+    if (!ids.length) return toast('先勾几条');
+    const status = el.dataset.status;
+    if (status !== 'cooking' && status !== 'done') return toast('不认识的状态');
+    const r = await api('PATCH', '/api/orders', { status, ids });
+    S.sel.orders = new Set();
+    await loadState(true);
+    render();
+    const names = { cooking: '开始做', done: '完成' }[status] || status;
+    toast(r.changed ? `已${names} ${r.changed} 条` : '没改成');
   },
 
   /* ---- 点餐一键开做 ---- */
@@ -3810,24 +4414,44 @@ const ACTIONS = {
   async 'stock-it'(el) {
     const name = el.dataset.name;
     const parts = (el.dataset.parts || '').split('|').filter(Boolean);
-    const { quantity, unit } = guessAmount(parts);
-    let category = '其他';
-    if (S.presets && S.presets.presets) {
-      const hit = S.presets.presets.find((p) => p.name === name);
-      if (hit) category = hit.category;
-    }
-    await api('POST', '/api/pantry', {
-      householdId: S.householdId,
-      name,
-      category,
-      quantity,
-      unit,
-      expireAt: '',
-      note: '从买菜清单入库',
-    });
+    await stockOne(name, parts);
     await loadState(true);
     render();
-    toast(`已入库：${name} ${fmtQty(quantity)}${unit}`);
+  },
+
+  /* ---- 买菜清单批量 ---- */
+
+  async 'shop-all'(el) {
+    const on = el.dataset.on === '1';
+    (S.shopList || []).forEach((it) =>
+      on ? S.shoppingChecked.add(it.name) : S.shoppingChecked.delete(it.name)
+    );
+    await saveShoppingChecked();
+    render();
+  },
+  async 'shop-uncheck'() {
+    shopCheckedItems().forEach((it) => S.shoppingChecked.delete(it.name));
+    await saveShoppingChecked();
+    render();
+  },
+  /** 勾上的几样一起入库，入完把勾选清掉 —— 免得明天还带着今天的勾 */
+  async 'shop-stock'() {
+    const items = shopCheckedItems().filter((it) => !it.stock.length);
+    if (!items.length) return toast('勾上的这几样家里都有了，不用入库');
+    const preview = pickPreview(items.map((i) => i.name), '样');
+    if (!confirm(`把 ${preview} 记进「${currentHousehold() ? currentHousehold().name : ''}」的库存？`))
+      return;
+    for (const it of items) await stockOne(it.name, it.parts);
+    items.forEach((it) => S.shoppingChecked.delete(it.name));
+    await saveShoppingChecked();
+    await loadState(true);
+    render();
+    toast(`${items.length} 样已入库`);
+  },
+  async 'shop-copy'() {
+    const items = shopCheckedItems();
+    if (!items.length) return toast('还没勾任何一样');
+    await copyText(items.map((i) => `□ ${i.name}（${i.parts.join(' + ')}）`).join('\n'));
   },
 
   /* 设置 */

@@ -38,10 +38,26 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.7.0',
+    date: '2026-10-15',
+    title: '能多选的地方都能多选了',
+    items: [
+      '菜品管理：勾上几道菜就能批量改分类、加去标签、标拿手菜、删除，不用一道一道点',
+      '点餐单：勾上几条就能批量开做、批量完成、批量删除，按钮跟着当前页签变（待做给「开做」，制作中给「完成」）',
+      '本周计划：勾上几道批量拿掉；「加一道菜」改成能多选，一次把几道排进这一周',
+      '点餐弹层也改成多选：勾几道就一次下几道，不用点一次提交一次',
+      '买菜清单：每行那个 ✓ 就是勾选，勾上就冒出工具条 —— 全勾、复制勾中的、🧊 全部入库；入完库自动把勾清掉',
+      '库存：原来只能批量删除，现在还能批量改保质期（+3 天 / +1 周 / +1 月…或直接指定日期）和批量改分类',
+      '所有批量删除都必须真的勾了东西才动手，不会「没勾就当成全选」',
+      '全选只针对你眼前这一批 —— 筛了「临期」再全选，删掉的就是你看到的那几样，不会顺手删掉别的',
+      '删除确认框只念前三个名字，不会甩给你一个吓人的大数字',
+    ],
+  },
   {
     version: '1.6.0',
     date: '2026-10-15',
@@ -1814,6 +1830,28 @@ async function handleAPI(req, res, url) {
       return sendJSON(res, 200, { ok: true, data: { plan, item } });
     }
 
+    // 从计划里一次拿掉几道菜（计划页多选模式）
+    // 必须排在「按 id 删一道」前面，否则 /api/plans/items?ids= 会被当成删 id 为 ids 的项。
+    if (method === 'DELETE' && route[1] === 'items' && !route[2]) {
+      const raw = url.searchParams.get('ids');
+      if (!raw) return sendError(res, 400, '要拿掉哪几道？');
+      const ids = new Set(
+        raw.split(',').map((s) => safeText(s, 40)).filter(Boolean)
+      );
+      if (!ids.size) return sendError(res, 400, '没有选中任何一道');
+      let removed = 0;
+      for (const plan of state.plans) {
+        const keep = plan.items.filter((it) => !ids.has(it.id));
+        if (keep.length !== plan.items.length) {
+          removed += plan.items.length - keep.length;
+          plan.items = keep;
+          plan.updatedAt = nowISO();
+        }
+      }
+      if (removed) scheduleSave('plans');
+      return sendJSON(res, 200, { ok: true, data: { removed } });
+    }
+
     // 从计划里拿掉一道菜
     if (method === 'DELETE' && route[1] === 'items' && route[2]) {
       const target = route[2];
@@ -2070,6 +2108,20 @@ async function handleAPI(req, res, url) {
       state.orders = state.orders.filter(
         (o) => o.status !== 'done' || (hid && o.householdId !== hid)
       );
+      scheduleSave('orders');
+      return sendJSON(res, 200, { ok: true, data: { removed: before - state.orders.length } });
+    }
+    // 一次删掉勾选的那几条点餐（点餐页多选模式）。
+    // 和库存一样：必须明确给 ids，不能「不传参数就当全选」。
+    if (method === 'DELETE' && !id) {
+      const raw = url.searchParams.get('ids');
+      if (!raw) return sendError(res, 400, '要删哪几条？');
+      const ids = new Set(
+        raw.split(',').map((s) => safeText(s, 40)).filter(Boolean)
+      );
+      if (!ids.size) return sendError(res, 400, '没有选中任何一条');
+      const before = state.orders.length;
+      state.orders = state.orders.filter((o) => !ids.has(o.id));
       scheduleSave('orders');
       return sendJSON(res, 200, { ok: true, data: { removed: before - state.orders.length } });
     }

@@ -984,6 +984,70 @@ async function main() {
   eq('解锁后能读', unlocked.status, 200);
   await stop(bk);
 
+  /* ---------- 批量删除 ---------- */
+  console.log('\n[19] 批量删除：点餐 + 计划');
+  const bdDel = await boot('batchdel');
+
+  // ---- 点餐 ----
+  const dBatch = (await post('/api/dishes', { name: '批量测试菜', category: '家常菜' })).body.data;
+  const oA = (await post('/api/orders', { dishId: dBatch.id, dishName: dBatch.name, requester: '我' })).body.data;
+  const oB = (await post('/api/orders', { dishId: dBatch.id, dishName: dBatch.name, requester: '我' })).body.data;
+  const oC = (await post('/api/orders', { dishId: dBatch.id, dishName: dBatch.name, requester: '我' })).body.data;
+  eq('先记了 3 条点餐', (await get('/api/state')).body.data.orders.length, 3);
+
+  const delOrders = await del(`/api/orders?ids=${oA.id},${oB.id}`);
+  eq('批量删点餐返回 200', delOrders.status, 200);
+  eq('删掉了 2 条', delOrders.body.data.removed, 2);
+  eq('没勾的那条还在', (await get('/api/state')).body.data.orders.map((o) => o.id).join(), oC.id);
+
+  // 不给 ids 必须报错，不能偷偷当成「全删」
+  eq('不带 ids 明确报错', (await del('/api/orders')).status, 400);
+  eq('ids 为空明确报错', (await del('/api/orders?ids=')).status, 400);
+  ok('报错说的是「要删哪几条」', /要删哪几条/.test((await del('/api/orders')).body.error || ''), '要有话');
+  eq('不存在的 id 不报错，只是删不到', (await del('/api/orders?ids=o_没有,o_也没有')).body.data.removed, 0);
+  eq('重复删同一批也不报错', (await del(`/api/orders?ids=${oA.id},${oB.id}`)).body.data.removed, 0);
+
+  // 批量分支不能把 /api/orders/done 这种单段路由吃掉
+  await req('PATCH', `/api/orders/${oC.id}`, { status: 'done' });
+  eq('按家庭清空已完成仍认得', (await del('/api/orders/done')).status, 200);
+  eq('已完成那条真被清掉了', (await get('/api/state')).body.data.orders.length, 0);
+
+  // ---- 本周计划 ----
+  const bMonday = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    const p = (x) => String(x).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  })();
+  const iA = (await post('/api/plans/items', { weekOf: bMonday, name: '批量拿掉一' })).body.data.item;
+  const iB = (await post('/api/plans/items', { weekOf: bMonday, name: '批量拿掉二' })).body.data.item;
+  const iC = (await post('/api/plans/items', { weekOf: bMonday, name: '留着别动' })).body.data.item;
+  eq('本周排了 3 道', (await get(`/api/plans?weekOf=${bMonday}`)).body.data.items.length, 3);
+
+  const delPlan = await del(`/api/plans/items?ids=${iA.id},${iB.id}`);
+  eq('批量拿掉计划返回 200', delPlan.status, 200);
+  eq('拿掉了 2 道', delPlan.body.data.removed, 2);
+  eq(
+    '没勾的那道还在',
+    (await get(`/api/plans?weekOf=${bMonday}`)).body.data.items.map((i) => i.id).join(),
+    iC.id
+  );
+
+  eq('计划不带 ids 明确报错', (await del('/api/plans/items')).status, 400);
+  eq('计划 ids 为空明确报错', (await del('/api/plans/items?ids=')).status, 400);
+  ok(
+    '计划报错说的是「要拿掉哪几道」',
+    /要拿掉哪几道/.test((await del('/api/plans/items')).body.error || ''),
+    '要有话'
+  );
+  eq('不存在的计划项不报错', (await del('/api/plans/items?ids=p_没有')).body.data.removed, 0);
+
+  // 批量分支不能吃掉「按 id 拿掉一道」的老路由
+  eq('单条拿掉仍认得', (await del(`/api/plans/items/${iC.id}`)).status, 200);
+  eq('删完本周空了', (await get(`/api/plans?weekOf=${bMonday}`)).body.data.items.length, 0);
+  eq('拿掉不存在的那条报 404', (await del('/api/plans/items/p_没有')).status, 404);
+  await stop(bdDel);
+
   /* ---------- 收尾 ---------- */
   fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5 });
 

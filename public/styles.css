@@ -461,19 +461,22 @@ a { color: var(--primary-dark); }
 .tl-flag-seq { background: var(--primary-soft); color: var(--primary-dark); }
 .tl-why { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.55; }
 
-/* ---------- 库存批量选择 ---------- */
+/* ---------- 多选（库存 / 买菜 / 点餐 / 计划 / 菜品 共用） ---------- */
 .pick-bar {
   position: sticky; top: 0; z-index: 5;
   display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap;
   padding: 10px 12px; margin-bottom: 12px;
   background: var(--primary-soft);
+  border: 1px solid var(--primary);
   border-radius: var(--radius-sm);
 }
-.pick-bar .pick-count { flex: 1; font-size: 12.5px; font-weight: 650; color: var(--primary-dark); }
+.pick-bar .pick-count { flex: 1; font-size: 12.5px; font-weight: 650; color: var(--primary-dark); white-space: nowrap; }
 .pick-bar .btn[disabled] { opacity: 0.45; }
 
-.food-row.pick { cursor: pointer; align-items: center; }
-.food-row.pick.on { background: var(--primary-soft); border-color: var(--primary); }
+/* 多选模式下整行变成一个勾选框 */
+.pick { cursor: pointer; }
+.pick.on { background: var(--primary-soft); border-color: var(--primary); }
 .pick-box {
   flex: 0 0 22px; height: 22px;
   border: 1.5px solid var(--line-strong); border-radius: 6px;
@@ -481,8 +484,10 @@ a { color: var(--primary-dark); }
   display: grid; place-items: center;
   font-size: 13px; font-weight: 800; color: #fff;
 }
-.food-row.pick.on .pick-box { background: var(--primary); border-color: var(--primary); }
-.food-row.pick:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.pick.on .pick-box { background: var(--primary); border-color: var(--primary); }
+.pick:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+/* 各行原本类名不同，勾选框统一靠左占一个位，别把缩略图挤走 */
+.food-row.pick, .order-item.pick, .plan-item.pick, .list-row.pick { align-items: center; }
 
 /* ---------- 版本 ---------- */
 .version-tag {
