@@ -75,6 +75,10 @@ function relativeFiles(root, files) {
   return files.map((p) => path.relative(root, p).replace(/\\/g, '/'));
 }
 
+function publishDecision(staged) {
+  return { commit: !!String(staged || '').trim(), push: true };
+}
+
 function main() {
   const root = __dirname;
   const plan = buildPublishPlan({ root, message: process.env.PUBLISH_MESSAGE });
@@ -101,11 +105,12 @@ function main() {
   console.log('[4/5] 提交应用文件');
   git(root, ['add', '--', ...rel]);
   const staged = git(root, ['diff', '--cached', '--name-only'], true).trim();
-  if (!staged) {
-    console.log('没有新的应用文件改动，跳过提交和推送。');
-    return;
+  const decision = publishDecision(staged);
+  if (!decision.commit) {
+    console.log('没有新的应用文件改动，跳过提交，继续推送当前提交。');
+  } else {
+    git(root, ['commit', '-m', plan.commitMessage]);
   }
-  git(root, ['commit', '-m', plan.commitMessage]);
 
   console.log('[5/5] 推送 GitHub');
   git(root, ['push', 'origin', branch]);
@@ -122,4 +127,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { PUBLISH_FILES, buildPublishPlan, main };
+module.exports = { PUBLISH_FILES, buildPublishPlan, publishDecision, main };

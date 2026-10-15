@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('assert');
-const { PUBLISH_FILES, buildPublishPlan } = require('./publish-update');
+const { PUBLISH_FILES, buildPublishPlan, publishDecision } = require('./publish-update');
 
 assert.ok(Array.isArray(PUBLISH_FILES), 'publish file list must be exported');
 assert.ok(PUBLISH_FILES.includes('server.js'));
@@ -14,5 +14,7 @@ const plan = buildPublishPlan({ root: __dirname });
 assert.ok(plan.files.length >= 5);
 assert.ok(plan.files.every((p) => !p.includes('\\data\\') && !p.includes('\\package\\')));
 assert.ok(plan.commitMessage.includes('家庭菜单'));
+assert.deepStrictEqual(publishDecision(''), { commit: false, push: true });
+assert.deepStrictEqual(publishDecision('server.js'), { commit: true, push: true });
 
 console.log('publish workflow self-test passed');
