@@ -17,6 +17,7 @@ const S = {
   pantryFilter: 'all', // all | soon | expired
   planWeek: '', // 正在看的周（周一日期），空 = 本周
   authed: false, // 是否已解锁管理区（没设口令时恒为 true）
+  cookPlanText: '', // 厨房助手结果的纯文本版，给「复制」用
   householdId: '', // 当前家庭，存在本机 localStorage：每台设备各选各的
   data: {
     categories: [], dishes: [], orders: [], settings: {},
@@ -244,6 +245,78 @@ function memberStats(name) {
   return { count: list.length, people: list.reduce((s, o) => s + (o.people || 1), 0), last: list[0] || null };
 }
 
+/* ---------------- AI ---------------- */
+
+// AI 状态：页面加载时拉一次。没配 Key 就整个隐藏入口 ——
+// 与其让用户点了才报错，不如一开始就不给入口。
+let aiInfo = null;
+
+async function loadAIStatus() {
+  try {
+    aiInfo = await api('GET', '/api/ai');
+  } catch (_) {
+    aiInfo = { enabled: false };
+  }
+  return aiInfo;
+}
+
+const aiReady = () => !!(aiInfo && aiInfo.enabled);
+
+/**
+ * 调一次 AI。
+ * 失败时统一 toast + 返回 null，调用方拿到 null 就安静退回去，
+ * 绝不让 AI 的问题影响到菜谱/点餐这些主流程。
+ */
+async function askAI(task, prompt, imageUrl) {
+  if (!aiReady()) {
+    toast('还没配置 AI（data/ai.json 里填 API Key）');
+    return null;
+  }
+  try {
+    const r = await api('POST', '/api/ai/chat', { task, prompt, imageUrl });
+    if (!r || r.ok === false) {
+      toast((r && r.error) || 'AI 这次没成功');
+      return null;
+    }
+    return r.result;
+  } catch (err) {
+    toast('AI 这次没成功：' + err.message);
+    return null;
+  }
+}
+
+/**
+ * AI 干活时的忙碌遮罩。
+ *
+ * 这里刻意不用 openSheet() 当加载层：全局只有一个 #modalRoot，盖上去就把
+ * 正在编辑的表单冲掉了 —— 等结果回来 applyAIResult() 找不到 #fName，
+ * 表现为「点了规范化，弹层直接消失，菜谱一点没变」，且 Console 一片干净，
+ * 极难排查。改成在当前弹层上浮一层透明遮罩：表单原封不动，也顺手挡住
+ * 中途误触关闭（关掉了结果就白等一场）。
+ */
+let aiBusyOn = false;
+
+function aiBusy(title, hint) {
+  if (aiBusyOn) return; // 已经有一层了，别叠成两层
+  aiBusyOn = true;
+  const el = document.createElement('div');
+  el.id = 'aiBusy';
+  el.className = 'ai-busy';
+  el.innerHTML =
+    '<div class="ai-busy-card">' +
+    '<div class="ai-busy-ico">🧑‍🍳</div>' +
+    `<div class="ai-busy-title">${esc(title)}</div>` +
+    `<div class="ai-busy-hint">${esc(hint || '')}</div>` +
+    '</div>';
+  ($('#modalRoot') || document.body).appendChild(el);
+}
+
+function aiBusyDone() {
+  aiBusyOn = false;
+  const el = $('#aiBusy');
+  if (el) el.remove();
+}
+
 /* ---------------- API ---------------- */
 
 // 管理口令换来的会话 token，存在本机。服务端不再把口令明文下发给前端，
@@ -383,6 +456,8 @@ function stashSheetDraft() {
  * 静默存草稿 + 一句提示，内容一定能捞回来，也不用他做决定。
  */
 function requestCloseSheet() {
+  // AI 正在往这个表单里写结果，中途关掉等于白等一场，还白花一次额度
+  if (aiBusyOn) return;
   if (!sheetBaseline) return closeSheet();
   if (sheetIsDirty()) {
     stashSheetDraft();
@@ -425,6 +500,7 @@ function openSheet({ title, body, foot, onMount, draftKey }) {
 }
 
 function closeSheet() {
+  aiBusyDone(); // 弹层没了，忙碌遮罩不能留着
   const root = $('#modalRoot');
   root.hidden = true;
   root.innerHTML = '';
@@ -575,6 +651,72 @@ async function addToPlan(entry, weekOf, after) {
   }
 }
 
+/** 厨房助手的结果：备菜先行 + 顺序 + 提醒，可一键复制走 */
+function openCookPlanSheet(r) {
+  const prep = Array.isArray(r.prep) ? r.prep : [];
+  const seq = Array.isArray(r.sequence) ? r.sequence : [];
+  const tips = Array.isArray(r.tips) ? r.tips : [];
+
+  const body = `
+    ${
+      prep.length
+        ? `<div class="block">
+             <h3 class="block-title">🥕 先把这些备好</h3>
+             <div class="panel">
+               <ul class="prep-list">
+                 ${prep.map((p) => `<li>${esc(p)}</li>`).join('')}
+               </ul>
+             </div>
+           </div>`
+        : ''
+    }
+    ${
+      seq.length
+        ? `<div class="block">
+             <h3 class="block-title">👨‍🍳 下厨顺序</h3>
+             <ol class="cook-seq">
+               ${seq
+                 .map(
+                   (s) => `<li class="cook-step">
+                     <div class="cook-step-head">
+                       <span class="cook-step-n">${esc(s.step)}</span>
+                       <span class="cook-step-what">${esc(s.what)}</span>
+                     </div>
+                     ${s.dish ? `<div class="cook-step-dish">${esc(s.dish)}</div>` : ''}
+                     ${s.why ? `<div class="cook-step-why">💡 ${esc(s.why)}</div>` : ''}
+                   </li>`
+                 )
+                 .join('')}
+             </ol>
+           </div>`
+        : ''
+    }
+    ${
+      tips.length
+        ? `<div class="block">
+             <h3 class="block-title">📌 提醒</h3>
+             <div class="panel"><ul class="prep-list">${tips.map((t) => `<li>${esc(t)}</li>`).join('')}</ul></div>
+           </div>`
+        : ''
+    }
+    ${!prep.length && !seq.length ? '<div class="empty"><p class="empty-text">这次没排出来，试试换个说法</p></div>' : ''}`;
+
+  openSheet({
+    title: '厨房助手 · 怎么做最快',
+    body,
+    foot: `<button class="btn ghost" data-act="close-sheet">关闭</button>
+           <button class="btn" data-act="copy-cook-plan">复制</button>`,
+  });
+
+  S.cookPlanText = [
+    prep.length ? '【先备菜】\n' + prep.map((p, i) => `${i + 1}. ${p}`).join('\n') : '',
+    seq.length ? '【下厨顺序】\n' + seq.map((s) => `${s.step}. ${s.what}${s.dish ? '（' + s.dish + '）' : ''}`).join('\n') : '',
+    tips.length ? '【提醒】\n' + tips.map((t) => '· ' + t).join('\n') : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
 /** 复制文本，剪贴板不可用时退回弹层让人自己拷 */
 async function copyText(text) {
   try {
@@ -689,7 +831,8 @@ function orderItem(o) {
 
   return `<div class="order-item">
     <div class="order-thumb">${thumb}</div>
-    <div class="order-main">
+    <div class="order-main${d ? ' link' : ''}" role="button" tabindex="0" ${d ? `data-act="open-dish" data-id="${esc(d.id)}"` : ''}
+      ${d ? `aria-label="查看 ${esc(o.dishName)} 做法"` : ''}>
       <div class="order-name">${esc(o.dishName)}</div>
       <div class="order-meta">${esc(o.requester)} · ${o.people} 人份 · ${relTime(o.createdAt)}</div>
       ${o.note ? `<div class="order-note">📝 ${esc(o.note)}</div>` : ''}
@@ -896,6 +1039,12 @@ function viewOrder() {
       ${
         S.orderStatus === 'done' && doneCount
           ? `<button class="btn ghost sm" style="margin-left:auto" data-act="clear-done">清空已完成</button>`
+          : ''
+      }
+      ${
+        aiReady() && pendingOrders().length >= 2
+          ? `<button class="btn soft sm" style="margin-left:${S.orderStatus === 'done' && doneCount ? '8px' : 'auto'}"
+               data-act="ai-cook-plan" title="看这几道菜怎么并行着做最快">👨‍🍳 厨房助手</button>`
           : ''
       }
     </div>
@@ -1579,8 +1728,16 @@ function viewManage() {
     </span><button class="icon-mini" data-act="edit-settings">✏️</button></div>
     <div class="list-row"><span class="icon-mini">🔐</span><span class="list-row-main">
       <span class="list-row-title">管理口令</span>
-      <span class="list-row-sub">${s.adminPin ? '已开启' : '未开启'}</span>
+      <span class="list-row-sub">${s.hasPin ? '已开启' : '未开启'}</span>
     </span><button class="icon-mini" data-act="edit-settings">✏️</button></div>
+    <div class="list-row"><span class="icon-mini">🤖</span><span class="list-row-main">
+      <span class="list-row-title">AI 助手</span>
+      <span class="list-row-sub">${
+        aiReady()
+          ? `已就绪 · ${esc(aiInfo.model)} · 拍图识菜谱 / 规范化 / 厨房调度`
+          : '未配置（data/ai.json 里填上 API Key 就会出现在菜谱编辑和点餐页）'
+      }</span>
+    </span></div>
 
     <div class="section-head"><h2 class="section-title">数据</h2></div>
     <div class="row-2">
@@ -1710,6 +1867,17 @@ function openDishEditor(dish) {
             <input type="file" id="fImgFile" accept="image/*" multiple class="img-input" />
           </label>
         </div>
+        ${
+          aiReady()
+            ? `<label class="btn soft sm ai-btn" style="margin-top:10px">
+                 📷 拍张照，AI 帮我写这道菜
+                 <input type="file" id="fAiImgFile" accept="image/*" class="ai-file" />
+               </label>
+               <p class="field-hint" style="margin-top:6px">
+                 AI 认完会把菜名、调料、步骤填进表单，<b>由你确认后再保存</b>，它认错了可以直接改。
+               </p>`
+            : ''
+        }
       </div>
 
       <div class="row-2">
@@ -1770,6 +1938,13 @@ function openDishEditor(dish) {
         <label class="field-label">备注<span class="field-hint">经验、禁忌、替换方案…</span></label>
         <textarea class="textarea" id="fNotes" placeholder="例如：花生一定最后放，久炒会软">${esc(d.notes)}</textarea>
       </div>
+      ${
+        aiReady()
+          ? `<button class="btn soft sm ai-btn" data-act="ai-normalize" style="margin:4px 0 16px">
+               🧹 让 AI 把这份菜谱整理规范（用量、步骤格式）
+             </button>`
+          : ''
+      }
       <div class="field">
         <label class="field-label" style="display:flex;align-items:center;gap:8px">
           <input type="checkbox" id="fFav" ${d.isFavorite ? 'checked' : ''} style="width:18px;height:18px" />
@@ -1783,6 +1958,82 @@ function openDishEditor(dish) {
   });
 
   $('#fName').focus();
+}
+
+/**
+ * 拍一张照，AI 认出菜谱并填进当前表单。
+ *
+ * 关键约束：AI 的结果<b>只填表单、不入库</b>。它认错用量、认错配料是常事，
+ * 直接写库就是往你的菜谱里掺假数据。所以填完只弹一句「记得检查」，
+ * 保存动作仍然由用户点「保存」触发。
+ */
+async function recognizeDishFromImage(file) {
+  aiBusy('AI 认菜中', '正在看这张图，大概 10-30 秒');
+  let dataUrl;
+  try {
+    // 认图用压缩图就够了：1400px 太费 token，1024 足够看清配料和摆盘
+    dataUrl = await compressImage(file, 1024, 0.82);
+  } catch (_) {
+    aiBusyDone();
+    return toast('这张图读不出来，换一张试试');
+  }
+  // askAI 失败会自己 toast 并返回 null，这里只要把遮罩撤掉
+  const r = await askAI(
+    'recipe-from-image',
+    '这是我要收录的一道菜。请给出菜名、分类、调料用量、做法步骤。',
+    dataUrl
+  );
+  aiBusyDone();
+  if (!r) return;
+
+  applyAIResult(r);
+  toast('AI 填好了，认错了直接改，然后点保存', 3200);
+}
+
+/** 把 AI 返回的菜谱灌进当前编辑表单 */
+function applyAIResult(r) {
+  const g = (id) => $('#' + id);
+  if (!g('fName')) return; // 表单已经关了
+
+  if (r.name) g('fName').value = String(r.name).slice(0, 40);
+  if (r.category) {
+    const sel = g('fCat');
+    const wanted = String(r.category);
+    const has = [...sel.options].some((o) => o.value === wanted);
+    if (has) sel.value = wanted;
+    else sel.value = '其他';
+  }
+  if (r.description) g('fDesc').value = String(r.description).slice(0, 60);
+  if (r.servings) g('fServ').value = String(r.servings).slice(0, 30);
+  if (r.duration) g('fDur').value = Number(r.duration) || 0;
+  if (r.difficulty) {
+    const sel = g('fDiff');
+    const wanted = String(r.difficulty);
+    if ([...sel.options].some((o) => o.value === wanted)) sel.value = wanted;
+  }
+  if (Array.isArray(r.tags) && r.tags.length) {
+    g('fTags').value = r.tags.slice(0, 8).join(', ');
+  }
+
+  // 调料 / 步骤走结构化数据，再触发既有重绘
+  if (Array.isArray(r.seasonings) && r.seasonings.length) {
+    S.draft.dish.seasonings = r.seasonings
+      .filter((s) => s && s.name)
+      .slice(0, 40)
+      .map((s) => ({ name: String(s.name).slice(0, 30), amount: String(s.amount || '').slice(0, 30) }));
+    redrawSeasons();
+  }
+  if (Array.isArray(r.methods) && r.methods.length) {
+    S.draft.dish.methods = r.methods
+      .filter((m) => m && Array.isArray(m.steps) && m.steps.length)
+      .slice(0, 6)
+      .map((m, i) => ({
+        name: String(m.name || '做法 ' + (i + 1)).slice(0, 24),
+        steps: m.steps.map((s) => String(s).slice(0, 200)).slice(0, 30),
+      }));
+    redrawMethods();
+  }
+  if (r.notes) g('fNotes').value = String(r.notes).slice(0, 300);
 }
 
 function collectDish() {
@@ -2168,6 +2419,59 @@ const ACTIONS = {
     openDish(list[Math.floor(Math.random() * list.length)].id);
   },
 
+  /* 厨房助手：把待做的几道菜排成并行下厨的顺序 */
+  async 'ai-cook-plan'() {
+    if (!aiReady()) return toast('还没配置 AI');
+    const scope = pendingOrders().filter((o) => !S.memberFilter || o.requester === S.memberFilter);
+    // 去重：同一道菜被两个人点了，仍然只是一道菜
+    const dishes = [];
+    const seen = new Set();
+    for (const o of scope) {
+      const k = o.dishId || o.dishName;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const d = o.dishId ? dishById(o.dishId) : null;
+      dishes.push({
+        name: o.dishName,
+        duration: d ? d.duration : 0,
+        servings: d ? d.servings : o.people + ' 人份',
+        seasonings: (d ? d.seasonings || [] : []).map((s) => `${s.name} ${s.amount}`).join('；'),
+        steps: d ? (d.methods || []).flatMap((m) => m.steps || []) : [],
+      });
+    }
+    if (dishes.length < 2) return toast('至少有两道待做的菜才需要排顺序');
+
+    openSheet({
+      title: '厨房助手',
+      body: `<div class="empty" style="padding:32px">
+        <div class="empty-emoji" style="font-size:40px">👨‍🍳</div>
+        <p class="empty-title" style="margin-top:12px">正在排下厨顺序…</p>
+        <p class="empty-text">${dishes.length} 道菜，大概 5-15 秒</p>
+      </div>`,
+    });
+
+    const brief =
+      '今天要一起做这几道菜：\n\n' +
+      dishes
+        .map(
+          (d, i) =>
+            `${i + 1}. ${d.name}${d.duration ? `（约 ${d.duration} 分钟）` : ''}` +
+            (d.seasonings ? `\n   调料：${d.seasonings}` : '') +
+            (d.steps.length ? `\n   步骤：${d.steps.join(' ')}` : '')
+        )
+        .join('\n');
+    const r = await askAI('cook-plan', brief);
+    closeSheet();
+    if (!r) return;
+    openCookPlanSheet(r);
+  },
+
+  async 'copy-cook-plan'() {
+    if (!S.cookPlanText) return;
+    closeSheet();
+    copyText(S.cookPlanText);
+  },
+
   /* 菜品编辑 */
   'new-dish'() {
     openDishEditor(null);
@@ -2175,6 +2479,36 @@ const ACTIONS = {
   'edit-dish'(el) {
     const d = dishById(el.dataset.id);
     if (d) openDishEditor(d);
+  },
+  /* 菜谱规范化：让 AI 把现有菜谱整理成规范格式，逐字段给建议 */
+  async 'ai-normalize'() {
+    if (!aiReady()) return toast('还没配置 AI');
+    if (aiBusyOn) return;
+    // 先把当前表单里的内容收上来，AI 看到的是你眼前这份
+    collectDish();
+    const d = S.draft.dish;
+    const brief = [
+      `菜名：${d.name || '(空)'}`,
+      `分类：${d.category}`,
+      `介绍：${d.description || '(空)'}`,
+      `份量：${d.servings || '(空)'}`,
+      `耗时：${d.duration || '(空)'}`,
+      `难度：${d.difficulty}`,
+      `标签：${(d.tags || []).join('、') || '(空)'}`,
+      d.seasonings.length ? `调料：${d.seasonings.map((s) => s.name + ' ' + s.amount).join('；')}` : '调料：(空)',
+      d.methods.length
+        ? `做法：${d.methods.map((m) => `[${m.name}] ${m.steps.join(' ')}`).join(' | ')}`
+        : '做法：(空)',
+      d.notes ? `备注：${d.notes}` : '',
+    ].filter(Boolean).join('\n');
+
+    aiBusy('AI 整理中', '大概 5-15 秒');
+    const r = await askAI('recipe-normalize', brief);
+    aiBusyDone();
+    if (!r) return;
+    // 同样只填表单、不入库，由用户看过再决定
+    applyAIResult(r);
+    toast('整理好了，改动过的地方你再扫一眼', 3200);
   },
   async 'dup-dish'(el) {
     const d = await api('POST', `/api/dishes/${el.dataset.id}/duplicate`, {});
@@ -2796,6 +3130,13 @@ document.addEventListener('change', async (e) => {
     toast('图片已添加');
   }
 
+  if (e.target.id === 'fAiImgFile') {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    await recognizeDishFromImage(f);
+  }
+
   if (e.target.id === 'importFile') {
     const f = e.target.files[0];
     if (!f) return;
@@ -2818,12 +3159,15 @@ document.addEventListener('change', async (e) => {
   }
 });
 
-/* 菜品卡片可用键盘回车打开 */
+/* 菜品卡片、计划条目、点餐条目都能用键盘回车/空格打开菜谱 */
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter' && e.key !== ' ') return;
   const card =
-    (e.target.closest && e.target.closest('.card[data-act="open-dish"]')) ||
-    (e.target.closest && e.target.closest('.food-main[data-act="edit-food"]'));
+    e.target.closest &&
+    e.target.closest(
+      '.card[data-act="open-dish"], .plan-main[data-act="open-dish"],' +
+        ' .order-main[data-act="open-dish"], .food-main[data-act="edit-food"]'
+    );
   if (!card) return;
   e.preventDefault();
   if (card.dataset.act === 'open-dish') openDish(card.dataset.id);
@@ -2848,4 +3192,5 @@ window.addEventListener(
 );
 
 /* 启动 */
+loadAIStatus(); // 和 loadState 并行，不阻塞首屏
 loadState();

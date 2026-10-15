@@ -383,6 +383,23 @@ function main() {
   rmrf(path.join(APP, 'data', 'orders.json'));
   rmrf(path.join(APP, 'data', 'pantry.json'));
 
+  // ---- 密钥与口令绝不随包分发 ----------------------------------------
+  // 便携包是要发给别人、甚至挂到 GitHub Release 上的。
+  // ai.json 里有你的 MiniMax API Key，settings.json 里有管理口令：
+  // 两者都是「只属于这台电脑」的东西，跟着包走等于白送。
+  // （data/ 整个目录是被原样拷过去的，光排除 orders/pantry 不够。）
+  rmrf(path.join(APP, 'data', 'ai.json'));
+  try {
+    const sp = path.join(APP, 'data', 'settings.json');
+    const st = JSON.parse(fs.readFileSync(sp, 'utf8'));
+    if (st.adminPin) {
+      st.adminPin = ''; // 店名、欢迎语留着，口令抹掉
+      fs.writeFileSync(sp, JSON.stringify(st, null, 2) + '\n', 'utf8');
+    }
+  } catch (_) {
+    /* 没有 settings.json 也无所谓，服务端首次启动会自己生成 */
+  }
+
   log('[3/5] 内置 Node.js 运行时');
   const runtimeSize = collectNodeRuntime();
 

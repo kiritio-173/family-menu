@@ -41,6 +41,19 @@ async function main() {
   ok('包内有自带 runtime/node.exe', fs.existsSync(NODE));
   ok('没有分发 orders.json', !fs.existsSync(path.join(APP, 'data', 'orders.json')));
   ok('没有分发 pantry.json', !fs.existsSync(path.join(APP, 'data', 'pantry.json')));
+  // 便携包是要发出去的：API Key 和管理口令跟着走就是白送。
+  // 这条必须在冷启动之前查 —— 服务起来后 settings.json 会被重新生成。
+  ok('没有分发 ai.json（不带 API Key）', !fs.existsSync(path.join(APP, 'data', 'ai.json')));
+  ok(
+    '包内 settings.json 不含管理口令',
+    !(() => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(APP, 'data', 'settings.json'), 'utf8')).adminPin;
+      } catch (_) {
+        return '';
+      }
+    })()
+  );
   ok(
     isEmpty ? 'empty 包不分发 households.json' : 'full 包分发 households.json',
     isEmpty

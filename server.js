@@ -152,8 +152,9 @@ async function callAI(messages, opts = {}) {
         // 默认关掉思考：实测同一道调度题，开思考 20.3s/1628 tokens，
         // 关掉只要 5.0s/430 tokens，而 JSON 质量一样 —— 做饭时等 20 秒不可接受。
         // 需要仔细看图的任务可以单独开回来。
+        // 只有 adaptive / disabled 两种取值，没有 enabled。
         ...(opts.think
-          ? { thinking: { type: 'enabled' }, reasoning_split: true }
+          ? { thinking: { type: 'adaptive' }, reasoning_split: true }
           : { thinking: { type: 'disabled' }, reasoning_split: true }),
       }),
     });
