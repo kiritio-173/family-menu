@@ -493,6 +493,27 @@ a { color: var(--primary-dark); }
 .list-row[role="button"]:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .release.current .block-title { color: var(--primary-dark); }
 
+/* ---------- 自动备份 ---------- */
+.backup-list {
+  margin-top: 8px; display: flex; flex-direction: column; gap: 6px;
+}
+.backup-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border: 1px solid var(--line);
+  border-radius: var(--radius-sm); background: var(--surface);
+}
+.backup-when {
+  font-size: 13px; font-weight: 600; color: var(--text);
+  font-variant-numeric: tabular-nums; flex: none;
+}
+.backup-size {
+  font-size: 12px; color: var(--muted); margin-right: auto;
+  font-variant-numeric: tabular-nums;
+}
+.backup-item .btn.sm { flex: none; padding: 6px 11px; font-size: 12.5px; }
+.backup-item .btn.danger { color: #b4472e; }
+.backup-item .btn.danger:hover { background: rgba(180, 71, 46, 0.09); }
+
 /* ---------- 厨房助手（旧结构，保留兜底） ---------- */
 .prep-list { list-style: none; margin: 0; padding: 0; }
 .prep-list li {

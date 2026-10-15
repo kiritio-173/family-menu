@@ -21,6 +21,7 @@ const S = {
   authed: false, // 是否已解锁管理区（没设口令时恒为 true）
   cookPlanText: '', // 厨房助手结果的纯文本版，给「复制」用
   version: null, // /api/version 的结果，管理页显示版本和更新内容
+  backups: null, // /api/backups 的结果，管理页列出自动备份
   householdId: '', // 当前家庭，存在本机 localStorage：每台设备各选各的
   data: {
     categories: [], dishes: [], orders: [], settings: {},
@@ -279,6 +280,20 @@ async function loadVersion() {
 }
 
 /**
+ * 自动备份列表。
+ * 没解锁就拉不到（备份里存着管理口令），失败就安静空着 ——
+ * 备份区是加分项，不该在别处报错时跟着炸。
+ */
+async function loadBackups() {
+  try {
+    S.backups = await api('GET', '/api/backups');
+  } catch (_) {
+    S.backups = null;
+  }
+  return S.backups;
+}
+
+/**
  * 调一次 AI。
  * 失败时统一 toast + 返回 null，调用方拿到 null 就安静退回去，
  * 绝不让 AI 的问题影响到菜谱/点餐这些主流程。
@@ -365,11 +380,17 @@ function setAuthToken(t) {
   else localStorage.removeItem(LS_AUTH);
 }
 
-async function api(method, path, body) {
+async function api(method, path, body, rawContentType) {
   const opts = { method, headers: {} };
   if (body !== undefined) {
-    opts.headers['Content-Type'] = 'application/json';
-    opts.body = JSON.stringify(body);
+    if (rawContentType) {
+      // 恢复备份传的是 zip 本体，不能 JSON.stringify —— 服务端按字节嗅探格式
+      opts.headers['Content-Type'] = rawContentType;
+      opts.body = body;
+    } else {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
   }
   const t = authToken();
   if (t) opts.headers['X-Auth-Token'] = t;
@@ -1815,6 +1836,53 @@ function openChangelogSheet() {
   });
 }
 
+/**
+ * 自动备份列表。
+ *
+ * 服务端每次启动、以及每天凌晨 3 点会打一份快照到 backups/，
+ * 保留最近 7 份。这里把它们列出来，坏了可以一键回退 ——
+ * 比「想起来去导出」靠谱得多。
+ */
+/**
+ * 备份文件名 → 看得懂的时间。
+ * backup-20261015-114235.zip → 10/15 11:42
+ * （「backup-」占 7 个字符，年份占 4 位，别写成魔法数字容易差一位）
+ */
+function backupTime(name) {
+  const d = String(name).slice(7);
+  return `${d.slice(4, 6)}/${d.slice(6, 8)} ${d.slice(9, 11)}:${d.slice(11, 13)}`;
+}
+
+function backupsHtml() {
+  const b = S.backups;
+  if (!b || !b.list) return '';
+  const list = b.list;
+  return `<div class="list-row" style="margin-top:6px">
+      <span class="icon-mini">🗂️</span><span class="list-row-main">
+        <span class="list-row-title">自动备份</span>
+        <span class="list-row-sub">${
+          list.length
+            ? `${list.length} 份，每天凌晨 3 点存一次，保留最近 ${b.keep} 份`
+            : '还没生成，启动服务时会自动打第一份'
+        }</span>
+      </span><button class="icon-mini" data-act="backup-now" title="立刻打一份">💾</button>
+    </div>
+    ${
+      list.length
+        ? `<div class="backup-list">${list
+            .map(
+              (x) => `<div class="backup-item">
+      <span class="backup-when">${esc(backupTime(x.name))}</span>
+      <span class="backup-size">${Math.max(1, Math.round(x.size / 1024))}KB</span>
+      <button class="btn ghost sm" data-act="download-backup" data-name="${esc(x.name)}">⬇ 下载</button>
+      <button class="btn ghost sm danger" data-act="restore-backup" data-name="${esc(x.name)}">↩ 恢复</button>
+    </div>`
+            )
+            .join('')}</div>`
+        : ''
+    }`;
+}
+
 function viewManage() {
   // 前端拿不到口令明文了，改成看 hasPin 标记 + 本机有没有会话 token
   if (S.data.settings.hasPin && !S.authed) {
@@ -1956,11 +2024,12 @@ function viewManage() {
       <button class="btn ghost" data-act="export-data">⬇ 导出备份</button>
       <button class="btn ghost" data-act="import-data">⬆ 恢复备份</button>
     </div>
+    ${backupsHtml()}
     <p class="section-sub" style="margin-top:10px;line-height:1.6">
-      数据保存在本机 <code>data/</code> 目录，图片在 <code>uploads/</code>。
-      换电脑或重装系统前，记得导出一份备份。
+      数据保存在本机 <code>data/</code> 目录，图片在 <code>uploads/</code>，自动备份在 <code>backups/</code>。
+      导出的备份是一个 zip，菜谱和照片都在里面。
     </p>
-    <input type="file" id="importFile" accept="application/json,.json" hidden />`;
+    <input type="file" id="importFile" accept="application/zip,application/json,.zip,.json" hidden />`;
 }
 
 /* =========================================================
@@ -3276,33 +3345,92 @@ const ACTIONS = {
   },
 
   /* 数据 */
-  async 'export-data'() {
-    // 备份文件里含口令明文，所以服务端要求认证。
-    // window.open 带不了自定义请求头，只能 fetch 下来再存。
-    try {
-      const t = authToken();
-      const res = await fetch('/api/export', t ? { headers: { 'X-Auth-Token': t } } : undefined);
-      if (res.status === 401) {
-        setAuthToken('');
-        S.authed = false;
-        toast('需要管理口令，请先解锁');
-        promptPin();
-        return;
+
+  /**
+   * 把服务端返回的附件存到本地。
+   * window.open / <a download> 带不了 X-Auth-Token，只能 fetch 下来再存。
+   */
+  async saveAttachment(url, fallbackName) {
+    const t = authToken();
+    const res = await fetch(url, t ? { headers: { 'X-Auth-Token': t } } : undefined);
+    if (res.status === 401) {
+      setAuthToken('');
+      S.authed = false;
+      toast('需要管理口令，请先解锁');
+      promptPin();
+      throw new Error('需要管理口令');
+    }
+    if (!res.ok) {
+      let msg = `下载失败(${res.status})`;
+      try {
+        const j = await res.json();
+        if (j && j.error) msg = j.error;
+      } catch (_) {
+        /* 不是 JSON 就算了 */
       }
-      if (!res.ok) throw new Error(`导出失败(${res.status})`);
-      const blob = await res.blob();
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)
-        ? /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition'))[1]
-        : 'menu-backup.json';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      throw new Error(msg);
+    }
+    const cd = res.headers.get('Content-Disposition') || '';
+    const m = /filename="([^"]+)"/.exec(cd);
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = m ? m[1] : fallbackName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  },
+
+  async 'export-data'() {
+    // 备份文件里含口令明文 + 照片，所以服务端要求认证
+    try {
+      await this.saveAttachment('/api/export', 'menu-backup.zip');
+      toast('备份已下载（含照片）');
+    } catch (err) {
+      if (err.message !== '需要管理口令') toast('导出失败：' + err.message);
+    }
+  },
+
+  async 'backup-now'() {
+    try {
+      const r = await api('POST', '/api/backups');
+      await loadBackups();
+      render();
+      toast(`已存一份：${r.name}`);
+    } catch (err) {
+      toast('备份失败：' + err.message);
+    }
+  },
+
+  async 'download-backup'(el) {
+    try {
+      await this.saveAttachment('/api/backups/' + encodeURIComponent(el.dataset.name), el.dataset.name);
       toast('备份已下载');
     } catch (err) {
-      toast('导出失败：' + err.message);
+      if (err.message !== '需要管理口令') toast('下载失败：' + err.message);
+    }
+  },
+
+  async 'restore-backup'(el) {
+    const name = el.dataset.name;
+    if (
+      !confirm(
+        `恢复「${name}」会覆盖现在的菜单、点餐、库存和照片。\n\n` +
+          `（服务端会先给当前状态自动存一份，恢复错了还能退回去。）\n\n确定恢复？`
+      )
+    ) {
+      return;
+    }
+    try {
+      const r = await api('POST', '/api/backups/' + encodeURIComponent(name) + '/restore');
+      await loadBackups();
+      await loadState(true);
+      S.view = 'menu';
+      render();
+      toast(`已恢复到 ${name}：菜谱 ${r.dishes} 道${r.written ? `，照片 ${r.written} 张` : ''}`);
+    } catch (err) {
+      toast('恢复失败：' + err.message);
     }
   },
   'import-data'() {
@@ -3411,18 +3539,20 @@ document.addEventListener('change', async (e) => {
   if (e.target.id === 'importFile') {
     const f = e.target.files[0];
     if (!f) return;
-    if (!confirm('恢复备份会覆盖当前全部菜单、分类和点餐记录，确定继续？')) {
+    if (!confirm('恢复备份会覆盖当前全部菜单、分类、点餐记录和库存照片，确定继续？')) {
       e.target.value = '';
       return;
     }
     try {
-      const text = await f.text();
-      await api('POST', '/api/import', JSON.parse(text));
+      // 原样上传：zip 就让服务端解，老的纯 JSON 也能收（服务端按字节嗅探）
+      const bytes = new Uint8Array(await f.arrayBuffer());
+      const r = await api('POST', '/api/import', bytes, 'application/octet-stream');
       S.authed = true;
       await loadState(true);
       S.view = 'menu';
       render();
-      toast('备份已恢复');
+      const pics = r && r.written ? `，照片 ${r.written} 张` : '';
+      toast(`备份已恢复：菜谱 ${r.dishes} 道${pics}`);
     } catch (err) {
       toast('恢复失败：' + err.message);
     }
@@ -3465,4 +3595,5 @@ window.addEventListener(
 /* 启动 */
 loadAIStatus(); // 和 loadState 并行，不阻塞首屏
 loadVersion(); // 版本信息同理，拉不到也不影响使用
+loadBackups(); // 自动备份列表同理
 loadState();

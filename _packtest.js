@@ -44,6 +44,8 @@ async function main() {
   // 便携包是要发出去的：API Key 和管理口令跟着走就是白送。
   // 这条必须在冷启动之前查 —— 服务起来后 settings.json 会被重新生成。
   ok('没有分发 ai.json（不带 API Key）', !fs.existsSync(path.join(APP, 'data', 'ai.json')));
+  // 自动备份里存着 settings 全量（含管理口令明文），跟着包走等于把口令发出去
+  ok('没有分发 backups/（备份含口令明文）', !fs.existsSync(path.join(APP, 'backups')));
   ok(
     '包内 settings.json 不含管理口令',
     !(() => {

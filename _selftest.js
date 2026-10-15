@@ -57,6 +57,28 @@ const post = (p, b, t) => req('POST', p, b === undefined ? {} : b, t);
 const put = (p, b, t) => req('PUT', p, b, t);
 const del = (p, t) => req('DELETE', p, undefined, t);
 
+/**
+ * 发原始字节并把响应也按字节拿回来。
+ * 备份是 zip 本体，既不能 JSON.stringify 也不能按 text 读（读一次就没了）。
+ */
+async function reqRaw(method, p, buf, token) {
+  const opt = { method, headers: {} };
+  if (buf !== undefined) {
+    opt.headers['Content-Type'] = 'application/octet-stream';
+    opt.body = buf;
+  }
+  if (token) opt.headers['X-Auth-Token'] = token;
+  const res = await fetch(BASE + p, opt);
+  const ab = Buffer.from(await res.arrayBuffer());
+  let json = {};
+  try {
+    json = ab.length ? JSON.parse(ab.toString('utf8')) : {};
+  } catch (_) {
+    json = {};
+  }
+  return { status: res.status, body: json, buf: ab, res };
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -325,27 +347,30 @@ async function main() {
   /* ---------- 导出 / 导入往返 ---------- */
   console.log('\n[7] 导出导入');
   const before = (await get('/api/state')).body.data;
-  const backup = await (await fetch(BASE + '/api/export')).text();
-  const parsed = JSON.parse(backup);
-  ok('备份含 households', Array.isArray(parsed.households), typeof parsed.households);
-  ok('备份含 pantry', Array.isArray(parsed.pantry), typeof parsed.pantry);
-  ok('备份含 plans', Array.isArray(parsed.plans), typeof parsed.plans);
+  const backupZip = await reqRaw('GET', '/api/export');
+  ok('导出是 zip', backupZip.buf[0] === 0x50 && backupZip.buf[1] === 0x4b);
+  ok('备份里含 households', Array.isArray(before.households), typeof before.households);
+  ok('备份里含 pantry', Array.isArray(before.pantry), typeof before.pantry);
+  ok('备份里含 plans', Array.isArray(before.plans), typeof before.plans);
 
   const hh = (await post('/api/households', { name: '临时户' })).body.data;
   await post('/api/pantry', { householdId: hh.id, name: '临时菜', category: '蔬菜', quantity: 3, unit: '把' });
   eq('导入前多了一户', (await get('/api/state')).body.data.households.length, 2);
 
-  await post('/api/import', JSON.parse(backup));
+  // zip 原样喂回去：前端走的就是这条路（不用在测试里解 zip）
+  eq('zip 导入返回 200', (await reqRaw('POST', '/api/import', backupZip.buf)).status, 200);
   st = (await get('/api/state')).body.data;
   eq('导入后家庭数恢复', st.households.length, before.households.length);
   eq('导入后库存恢复', st.pantry.length, before.pantry.length);
   eq('导入后库存内容一致', st.pantry.map((p) => [p.name, p.quantity]), before.pantry.map((p) => [p.name, p.quantity]));
   eq('导入后计划恢复', st.plans.length, before.plans.length);
+  eq('导入后菜谱恢复', st.dishes.length, before.dishes.length);
 
   // 备份里带了已删除的家庭 id 时，点餐要拉回有效家庭，不能悬空
-  const orphan = JSON.parse(backup);
-  orphan.orders = [{ id: 'o_orphan', dishName: '测试菜', householdId: 'h_不存在', people: 2, status: 'pending', date: '2024-01-01', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }];
-  await post('/api/import', orphan);
+  const orphan = Object.assign({}, before, {
+    orders: [{ id: 'o_orphan', dishName: '测试菜', householdId: 'h_不存在', people: 2, status: 'pending', date: '2024-01-01', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }],
+  });
+  await reqRaw('POST', '/api/import', Buffer.from(JSON.stringify(orphan), 'utf8'));
   st = (await get('/api/state')).body.data;
   eq('悬空 householdId 被兜住', st.orders[0].householdId, st.households[0].id);
 
@@ -718,6 +743,112 @@ async function main() {
   const noIds = await req('PATCH', '/api/orders', { status: 'cooking' });
   eq('没选任何一条时明确报错', noIds.status, 400);
   await stop(bulkOrder);
+
+  console.log('\n[18] 备份：zip 带照片 + 自动快照');
+  const bk = await boot('backup');
+  const bkDir = path.join(TMP, 'backup');
+  const bkUploads = path.join(bkDir, 'uploads');
+
+  // 造一张真照片挂到菜上，才能验证「备份把照片带走了」而不是只测了 JSON
+  const TINY_PNG =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const upPhoto = await post('/api/upload', { dataUrl: 'data:image/png;base64,' + TINY_PNG });
+  eq('照片上传成功', upPhoto.status, 200);
+  const photoUrl = upPhoto.body.data.url;
+  const photoFile = path.join(bkUploads, path.basename(photoUrl));
+  ok('照片真落到 uploads/ 下了', fs.existsSync(photoFile), photoUrl);
+
+  const photoDish = await post('/api/dishes', {
+    name: '带照片的菜',
+    category: '家常菜',
+    images: [photoUrl],
+  });
+  eq('菜谱挂上了照片', JSON.stringify(photoDish.body.data.images), JSON.stringify([photoUrl]));
+
+  // ---- 导出是 zip ----
+  const exported = await reqRaw('GET', '/api/export');
+  eq('导出返回 200', exported.status, 200);
+  ok(
+    '导出的是 zip（PK 头）',
+    exported.buf.length > 4 && exported.buf[0] === 0x50 && exported.buf[1] === 0x4b,
+    exported.buf.slice(0, 4)
+  );
+  ok(
+    '文件名带 .zip',
+    /filename="menu-backup-\d{4}-\d{2}-\d{2}\.zip"/.test(exported.res.headers.get('Content-Disposition') || ''),
+    exported.res.headers.get('Content-Disposition')
+  );
+
+  // ---- 自动快照 ----
+  const list0 = await get('/api/backups');
+  eq('备份列表能读', list0.status, 200);
+  ok('启动时自动打了一份', list0.body.data.list.length >= 1, list0.body.data.list);
+  ok('保留份数是 7', list0.body.data.keep, 7);
+  ok('备份名格式对', /^backup-\d{8}-\d{6}\.zip$/.test(list0.body.data.list[0].name), list0.body.data.list[0].name);
+
+  // 启动快照是在建这道菜之前打的，得现在手动打一份才包含它
+  const manual = await post('/api/backups');
+  eq('手动打一份返回 200', manual.status, 200);
+  const snapName = manual.body.data.name;
+  ok('手动这份进了列表', (await get('/api/backups')).body.data.list.some((x) => x.name === snapName), snapName);
+
+  // ---- 破坏现场：改名 + 把照片删了 ----
+  await put('/api/dishes/' + photoDish.body.data.id, { name: '改坏了的菜' });
+  fs.unlinkSync(photoFile);
+  ok('现场已破坏：照片不在了', !fs.existsSync(photoFile));
+
+  // ---- 恢复 ----
+  const restored = await reqRaw(
+    'POST',
+    `/api/backups/${encodeURIComponent(snapName)}/restore`
+  );
+  eq('恢复返回 200', restored.status, 200);
+  const bkState = (await get('/api/state')).body.data;
+  eq(
+    '菜谱恢复回快照时的样子',
+    bkState.dishes.find((d) => d.id === photoDish.body.data.id).name,
+    '带照片的菜'
+  );
+  ok('照片也一起回来了', fs.existsSync(photoFile));
+  ok('恢复前自动留了一份现场', !!restored.body.data.safety, restored.body.data);
+
+  // ---- 上传 zip 恢复（前端走的是这条路）----
+  const reExported = await reqRaw('GET', '/api/export');
+  fs.unlinkSync(photoFile);
+  const imported = await reqRaw('POST', '/api/import', reExported.buf);
+  eq('上传 zip 恢复返回 200', imported.status, 200);
+  ok('zip 恢复把照片写回来了', imported.body.data.written === 1, imported.body.data);
+  ok('文件真的在', fs.existsSync(photoFile));
+
+  // ---- 老的纯 JSON 备份还得能收 ----
+  const legacyBackup = {
+    __app: 'family-menu',
+    dishes: [{ id: 'd_legacy1', name: '老备份的菜', category: '家常菜', images: [] }],
+    households: [{ id: 'h_legacy', name: '老家庭', emoji: '🏠', members: [] }],
+  };
+  const legRes = await reqRaw('POST', '/api/import', Buffer.from(JSON.stringify(legacyBackup), 'utf8'));
+  eq('老的纯 JSON 备份还能恢复', legRes.status, 200);
+  eq('老备份的菜进来了', (await get('/api/state')).body.data.dishes[0].name, '老备份的菜');
+
+  // ---- 不是备份的东西要说清楚 ----
+  const junk = await reqRaw('POST', '/api/import', Buffer.from('这不是备份', 'utf8'));
+  eq('乱传的文件被拒', junk.status, 400);
+  const notZip = await reqRaw('GET', '/api/backups/%2e%2e%2f%2e%2e%2fserver.js');
+  eq('备份名不认 ../ 这种', notZip.status, 400);
+  const noSuch = await reqRaw('GET', '/api/backups/backup-19700101-000000.zip');
+  eq('不存在的备份报 404', noSuch.status, 404);
+
+  // ---- 备份里存着口令，列表也要认证 ----
+  const pinRes = await put('/api/settings', { adminPin: '2468' });
+  eq('设了口令', pinRes.status, 200);
+  const auth = (await post('/api/auth', { pin: '2468' })).body.data.token;
+  const locked = await get('/api/backups');
+  eq('没解锁读不到备份列表', locked.status, 401);
+  const lockedExport = await get('/api/export');
+  eq('没解锁导不出备份', lockedExport.status, 401);
+  const unlocked = await get('/api/backups', auth);
+  eq('解锁后能读', unlocked.status, 200);
+  await stop(bk);
 
   /* ---------- 收尾 ---------- */
   fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5 });

@@ -12,15 +12,21 @@ const fsp = require('fs/promises');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const zlib = require('zlib');
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const UPLOAD_DIR = path.join(ROOT, 'uploads');
 const DATA_DIR = path.join(ROOT, 'data');
+const BACKUP_DIR = path.join(ROOT, 'backups');
 
 const PORT = Number(process.env.PORT) || 8787;
 const HOST = process.env.HOST || '0.0.0.0';
 const MAX_BODY = 16 * 1024 * 1024; // 16MB，够放压缩后的 base64 图片
+// 恢复备份走的是 zip 原样上传，里面装着 uploads/ 的照片，体积比单条请求大得多
+const MAX_IMPORT = 128 * 1024 * 1024;
+// 自动备份保留几份
+const BACKUP_KEEP = Number(process.env.BACKUP_KEEP) || 7;
 // node server.js --open  启动后自动打开浏览器
 const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '1';
 
@@ -41,11 +47,12 @@ const RELEASES = [
     date: '2026-10-15',
     title: '备餐流程时间轴 + 批量操作 + 版本页',
     items: [
-      '厨房助手升级成完整备餐时间轴：从开始洗菜到最后一道上标，每步带预计耗时，能并行的标「可并行」，必须等的标「要等」',
+      '厨房助手升级成完整备餐时间轴：从开始洗菜到最后一道上桌，每步带预计耗时，能并行的标「可离开」，要守着的标「要守灶」',
       '库存支持批量删除：进多选模式，勾选或全选后一次清掉',
       '点餐页新增「一键开做」：待做的菜一次全部转成制作中',
       '管理页新增版本信息，点开能看到每个版本都改了什么',
       '点餐单上的菜名现在可以直接点开菜谱（自定义菜除外）',
+      '导出备份改成 zip，照片一起带走；每天凌晨自动存一份快照，坏了可一键回退',
     ],
   },
   {
@@ -819,6 +826,400 @@ function saveNow() {
 }
 
 /* ------------------------------------------------------------------ *
+ * ZIP 读写 —— 自己手写的，零依赖
+ *
+ * 为什么不用现成的库：这个项目承诺「不需要 npm install」。而备份必须
+ * 能带上 uploads/ 里的照片，照片在磁盘上是独立文件，JSON 装不下
+ * （base64 撑爆 16MB 请求上限）。所以自己写一个够用的 ZIP：
+ * 写：store 或 deflate（压不小就不压，省 CPU）
+ * 读：从尾部找 EOCD，顺着中央目录逐个解
+ *
+ * 只支持标准 ZIP 的最常见形态，不做 ZIP64（4GB 以上）、不加密、不解压
+ * 带密码的包 —— 家庭菜单的备份用不上那些。
+ * ------------------------------------------------------------------ */
+
+const CRC_TABLE = (() => {
+  const t = new Int32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[i] = c;
+  }
+  return t;
+})();
+
+function crc32(buf) {
+  let c = -1;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+}
+
+/** ZIP 用的是 MS-DOS 时间（秒只有 2 秒精度，1980 年起） */
+function dosStamp(d) {
+  return {
+    time: ((d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1)) & 0xffff,
+    date: (((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate()) & 0xffff,
+  };
+}
+
+/**
+ * files: [{ name, data }]，data 可以是 Buffer 或字符串
+ * 返回整个 zip 的 Buffer
+ */
+function zipMake(files) {
+  const { time, date } = dosStamp(new Date());
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+
+  for (const f of files) {
+    const nameBuf = Buffer.from(f.name, 'utf8');
+    const raw = Buffer.isBuffer(f.data) ? f.data : Buffer.from(String(f.data), 'utf8');
+    const crc = crc32(raw);
+    // 压不小就原样存：省掉一次 inflate/deflate，家庭菜单的 JSON 本来就压不动
+    const deflated = raw.length > 64 ? zlib.deflateRawSync(raw, { level: 6 }) : raw;
+    const useDeflate = deflated.length < raw.length;
+    const method = useDeflate ? 8 : 0;
+    const payload = useDeflate ? deflated : raw;
+
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); // 本地文件头签名
+    local.writeUInt16LE(20, 4); // 解压所需版本
+    local.writeUInt16LE(0x0800, 6); // 标志位：文件名是 UTF-8
+    local.writeUInt16LE(method, 8);
+    local.writeUInt16LE(time, 10);
+    local.writeUInt16LE(date, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(payload.length, 18);
+    local.writeUInt32LE(raw.length, 22);
+    local.writeUInt16LE(nameBuf.length, 26);
+    local.writeUInt16LE(0, 28); // extra 长度
+    locals.push(local, nameBuf, payload);
+
+    const cd = Buffer.alloc(46);
+    cd.writeUInt32LE(0x02014b50, 0); // 中央目录签名
+    cd.writeUInt16LE(20, 4); // 生成版本
+    cd.writeUInt16LE(20, 6); // 解压所需版本
+    cd.writeUInt16LE(0x0800, 8);
+    cd.writeUInt16LE(method, 10);
+    cd.writeUInt16LE(time, 12);
+    cd.writeUInt16LE(date, 14);
+    cd.writeUInt32LE(crc, 16);
+    cd.writeUInt32LE(payload.length, 20);
+    cd.writeUInt32LE(raw.length, 24);
+    cd.writeUInt16LE(nameBuf.length, 28);
+    cd.writeUInt16LE(0, 30); // extra
+    cd.writeUInt16LE(0, 32); // comment
+    cd.writeUInt16LE(0, 34); // 起始磁盘号
+    cd.writeUInt16LE(0, 36); // 内部属性
+    cd.writeUInt32LE(0, 38); // 外部属性
+    cd.writeUInt32LE(offset, 42);
+    centrals.push(cd, nameBuf);
+
+    offset += local.length + nameBuf.length + payload.length;
+  }
+
+  const cdBuf = Buffer.concat(centrals);
+  if (cdBuf.length + offset > 0xffffffff) throw new Error('内容太大，超过 ZIP 上限');
+
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0); // 中央目录结束记录
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(files.length, 8);
+  eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt32LE(cdBuf.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  eocd.writeUInt16LE(0, 20); // 注释长度
+  return Buffer.concat([...locals, cdBuf, eocd]);
+}
+
+/**
+ * 读 zip，返回 Map<文件名, Buffer>。
+ * 刻意不做「目录穿越」防护在函数里 —— 调用方拿到名字后必须自己
+ * path.basename 消毒，否则一个 ../ 的条目就能把文件写到 uploads/ 外面。
+ */
+function zipRead(buf, maxTotalBytes) {
+  // 从尾部往前找 EOCD 签名（注释最长 65535，所以往后多扫一段）
+  let eocd = -1;
+  const from = Math.max(0, buf.length - 22 - 0xffff);
+  for (let i = buf.length - 22; i >= from; i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) throw new Error('这不是有效的备份文件（不是 zip）');
+
+  const count = buf.readUInt16LE(eocd + 10);
+  let p = buf.readUInt32LE(eocd + 16);
+  const out = new Map();
+  let total = 0;
+
+  for (let i = 0; i < count; i++) {
+    if (p + 46 > buf.length || buf.readUInt32LE(p) !== 0x02014b50) {
+      throw new Error('备份文件目录损坏');
+    }
+    const method = buf.readUInt16LE(p + 10);
+    const compSize = buf.readUInt32LE(p + 20);
+    const rawSize = buf.readUInt32LE(p + 24);
+    const nameLen = buf.readUInt16LE(p + 28);
+    const extraLen = buf.readUInt16LE(p + 30);
+    const cmtLen = buf.readUInt16LE(p + 32);
+    const localOff = buf.readUInt32LE(p + 42);
+    const name = buf.slice(p + 46, p + 46 + nameLen).toString('utf8');
+
+    // 本地文件头的 extra 长度可能和中央目录记录的不一样，必须去本地头重读，
+    // 直接拿中央目录的偏移算会差那么几个字节，图片就解不出来了
+    if (localOff + 30 > buf.length || buf.readUInt32LE(localOff) !== 0x04034b50) {
+      throw new Error('备份文件内容损坏');
+    }
+    const lNameLen = buf.readUInt16LE(localOff + 26);
+    const lExtraLen = buf.readUInt16LE(localOff + 28);
+    const start = localOff + 30 + lNameLen + lExtraLen;
+    if (start + compSize > buf.length) throw new Error('备份文件内容不完整');
+
+    total += rawSize;
+    if (maxTotalBytes && total > maxTotalBytes) {
+      throw new Error('备份文件解压后太大，已拒绝（可能是损坏文件）');
+    }
+
+    const payload = buf.slice(start, start + compSize);
+    if (method === 8) out.set(name, zlib.inflateRawSync(payload));
+    else if (method === 0) out.set(name, Buffer.from(payload));
+    else throw new Error(`备份文件里有不支持的压缩方式（method=${method}）`);
+
+    p += 46 + nameLen + extraLen + cmtLen;
+  }
+  return out;
+}
+
+/** 看看这坨字节是不是 zip（PK\x03\x04） */
+function looksLikeZip(buf) {
+  return buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04;
+}
+
+/* ------------------------------------------------------------------ *
+ * 备份 / 恢复
+ *
+ * 备份是一个 zip：backup.json（7 类数据）+ uploads/（照片）。
+ * 之前导出只给 JSON，照片全丢 —— 菜谱在、图没了，恢复完才发现，
+ * 等于备份了个寂寞。
+ * ------------------------------------------------------------------ */
+
+function backupPayload() {
+  return {
+    __app: 'family-menu',
+    exportedAt: nowISO(),
+    categories: state.categories,
+    dishes: state.dishes,
+    orders: state.orders,
+    settings: state.settings,
+    households: state.households,
+    pantry: state.pantry,
+    plans: state.plans,
+  };
+}
+
+/**
+ * 把一份备份灌进当前状态。返回恢复进去的条数。
+ * 上传恢复和备份恢复共用这一段，免得两条路修一个漏一个。
+ */
+function applyBackup(src) {
+  state.categories = Array.isArray(src.categories) ? src.categories : state.categories;
+  state.dishes = src.dishes.map((d) => normDish(d, undefined, true)).filter(Boolean);
+  if (Array.isArray(src.orders)) {
+    state.orders = src.orders.map((o) => normOrder(o, undefined, true));
+  }
+  // 家庭要先恢复，否则点餐/库存的 householdId 会指向不存在的家庭
+  if (Array.isArray(src.households)) {
+    const seen = new Set();
+    state.households = src.households
+      .map((h) => normHousehold(h, undefined))
+      .filter(Boolean)
+      .filter((h) => (seen.has(h.id) ? false : (seen.add(h.id), true)));
+    if (!state.households.length) state.households = defaultState().households;
+  }
+  if (Array.isArray(src.pantry)) {
+    const seen = new Set();
+    state.pantry = src.pantry
+      .map((p) => normPantryItem(p, undefined, true))
+      .filter(Boolean)
+      .filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true)));
+  }
+  if (Array.isArray(src.plans)) {
+    const seen = new Set();
+    state.plans = src.plans
+      .map((pl) => normPlan(pl, undefined))
+      .filter(Boolean)
+      .filter((pl) => (seen.has(pl.id) ? false : (seen.add(pl.id), true)));
+  }
+  if (src.settings && typeof src.settings === 'object') {
+    // hasPin 是给前端的派生标记，不是真配置，别让它进磁盘
+    const { hasPin: _ignored, ...incoming } = src.settings;
+    const prevPin = state.settings.adminPin;
+    state.settings = { ...defaultState().settings, ...incoming };
+    // 备份可能把口令换了或取消了，旧会话全部作废
+    if (state.settings.adminPin !== prevPin) sessions.clear();
+  }
+  // 兜底：任何指向已删除家庭的记录拉回第一个家庭
+  const hhIds = new Set(state.households.map((h) => h.id));
+  if (!hhIds.has(state.settings.currentHouseholdId)) {
+    state.settings.currentHouseholdId = state.households[0].id;
+  }
+  state.orders.forEach((o) => {
+    if (!hhIds.has(o.householdId)) o.householdId = state.households[0].id;
+  });
+  state.pantry.forEach((p) => {
+    if (!hhIds.has(p.householdId)) p.householdId = state.households[0].id;
+  });
+  state.plans.forEach((pl) => {
+    if (!hhIds.has(pl.householdId)) pl.householdId = state.households[0].id;
+  });
+
+  saveNow();
+  return {
+    dishes: state.dishes.length,
+    households: state.households.length,
+    pantry: state.pantry.length,
+    plans: state.plans.length,
+  };
+}
+const PHOTO_RE = /\.(jpg|jpeg|png|gif|webp|avif)$/i;
+
+/** 当前状态 + uploads/ 里的照片，打成一个 zip */
+function buildBackupZip() {
+  const files = [{ name: 'backup.json', data: JSON.stringify(backupPayload(), null, 2) }];
+  let photos = 0;
+  try {
+    for (const name of fs.readdirSync(UPLOAD_DIR)) {
+      if (!name || name.startsWith('.') || !PHOTO_RE.test(name)) continue;
+      const full = path.join(UPLOAD_DIR, name);
+      if (!fs.statSync(full).isFile()) continue;
+      files.push({ name: 'uploads/' + name, data: fs.readFileSync(full) });
+      photos++;
+    }
+  } catch (_) {
+    /* uploads/ 还没建，照片 0 张，不影响导出 */
+  }
+  return { zip: zipMake(files), photos };
+}
+
+/**
+ * 把 zip 里的照片写回 uploads/。
+ * 条目名一律 path.basename —— 备份文件可能来自别人，一个
+ * 「uploads/../../.bashrc」不能顺着写到 uploads/ 外面去。
+ */
+function restoreUploads(zipFiles) {
+  let written = 0;
+  let skipped = 0;
+  for (const [name, data] of zipFiles) {
+    if (!name.startsWith('uploads/')) continue;
+    const base = path.basename(name);
+    if (!base || base.startsWith('.') || !PHOTO_RE.test(base)) {
+      skipped++;
+      continue;
+    }
+    fs.writeFileSync(path.join(UPLOAD_DIR, base), data);
+    written++;
+  }
+  return { written, skipped };
+}
+
+function ensureBackupDir() {
+  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  return BACKUP_DIR;
+}
+
+function listBackups() {
+  try {
+    return fs
+      .readdirSync(BACKUP_DIR)
+      .filter((f) => /^backup-\d{8}-\d{6}\.zip$/.test(f))
+      .map((f) => {
+        const st = fs.statSync(path.join(BACKUP_DIR, f));
+        return { name: f, size: st.size, mtime: st.mtime.toISOString() };
+      })
+      .sort((a, b) => (a.name < b.name ? 1 : -1)); // 新的排前面
+  } catch (_) {
+    return [];
+  }
+}
+
+/** 备份名是外部来的，拼路径前必须认死格式，否则 ../ 就能读任意文件 */
+function safeBackupName(name) {
+  if (typeof name !== 'string' || !/^backup-\d{8}-\d{6}\.zip$/.test(name)) return null;
+  return name;
+}
+
+function pruneBackups() {
+  const all = listBackups();
+  let n = 0;
+  for (const old of all.slice(BACKUP_KEEP)) {
+    try {
+      fs.unlinkSync(path.join(BACKUP_DIR, old.name));
+      n++;
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  return n;
+}
+
+function makeBackup(reason) {
+  saveNow(); // 先把内存里的落盘，快照才是准的
+  ensureBackupDir();
+  const { zip, photos } = buildBackupZip();
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const name =
+    `backup-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
+    `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.zip`;
+  fs.writeFileSync(path.join(BACKUP_DIR, name), zip);
+  const pruned = pruneBackups();
+  console.log(
+    `[backup] ${name}  ${(zip.length / 1024).toFixed(0)}KB  照片 ${photos} 张` +
+      (reason ? `  (${reason})` : '') +
+      (pruned ? `  清理旧备份 ${pruned} 份` : '')
+  );
+  return { name, size: zip.length, photos };
+}
+
+let autoBackupTimer = null;
+
+function scheduleAutoBackup() {
+  // 启动先来一份：万一这之前的数据已经是坏的，至少留个现场
+  try {
+    makeBackup('启动');
+  } catch (err) {
+    console.error('[backup] 启动快照失败：', err.message);
+  }
+  // 每天凌晨 3 点打一份（家里没人改数据的时间）
+  const msUntilNext = () => {
+    const now = new Date();
+    const next = new Date(now);
+    next.setHours(3, 0, 0, 0);
+    if (next <= now) next.setDate(next.getDate() + 1);
+    return next.getTime() - now.getTime();
+  };
+  const run = () => {
+    autoBackupTimer = setTimeout(
+      () => {
+        try {
+          makeBackup('每日');
+        } catch (err) {
+          console.error('[backup] 定时快照失败：', err.message);
+        }
+        run();
+      },
+      msUntilNext()
+    );
+    if (autoBackupTimer.unref) autoBackupTimer.unref();
+  };
+  run();
+}
+
+/* ------------------------------------------------------------------ *
  * 菜品规范化
  * ------------------------------------------------------------------ */
 
@@ -1008,6 +1409,26 @@ function readBody(req) {
   });
 }
 
+/** 和 readBody 一样，但收原始字节（恢复备份传的是 zip 本体，不是 JSON） */
+function readBodyRaw(req, limit) {
+  const max = limit || MAX_BODY;
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > max) {
+        reject(new Error(`请求体过大（上限 ${Math.round(max / 1024 / 1024)}MB）`));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 async function serveStatic(req, res, filePath, cacheable) {
   try {
     const stat = await fsp.stat(filePath);
@@ -1048,8 +1469,11 @@ async function handleAPI(req, res, url) {
   // 管理类的写操作要有有效会话；导出/导入因为文件里含口令明文，同样要认证。
   // AI 调用要花钱，也不能让别人白用。
   // 点餐、库存、本周计划不在保护范围内 —— 那是家里人每天都要用的。
+  // 统一守卫。备份一律要认证，GET 也要 —— 备份里存着管理口令明文，
+  // 「只能下载不能看列表」等于没保护。
   const needsAuth =
     route[0] === 'export' ||
+    route[0] === 'backups' ||
     route[0] === 'ai' ||
     (method !== 'GET' && method !== 'HEAD' && ADMIN_WRITES.has(route[0]));
   if (needsAuth && !isAuthed(req)) {
@@ -1592,102 +2016,126 @@ async function handleAPI(req, res, url) {
     });
   }
 
-  // ---- 导入 / 导出 ----
+  // ---- 备份列表 / 立即打一份 / 下载 / 恢复 ----
+  if (route[0] === 'backups') {
+    const name = route[1];
+
+    if (method === 'GET' && !name) {
+      return sendJSON(res, 200, { ok: true, data: { keep: BACKUP_KEEP, list: listBackups() } });
+    }
+    if (method === 'GET' && name) {
+      const safe = safeBackupName(path.basename(decodeURIComponent(name)));
+      if (!safe) return sendError(res, 400, '备份文件名不对');
+      const file = path.join(ensureBackupDir(), safe);
+      if (!fs.existsSync(file)) return sendError(res, 404, '没有这份备份');
+      const buf = fs.readFileSync(file);
+      res.writeHead(200, {
+        'Content-Type': 'application/zip',
+        'Content-Disposition': `attachment; filename="${safe}"`,
+        'Content-Length': buf.length,
+      });
+      return res.end(buf);
+    }
+    if (method === 'POST' && !name) {
+      const r = makeBackup('手动');
+      return sendJSON(res, 200, {
+        ok: true,
+        data: { ...r, list: listBackups() },
+      });
+    }
+    if (method === 'POST' && route[2] === 'restore') {
+      const safe = safeBackupName(path.basename(decodeURIComponent(name)));
+      if (!safe) return sendError(res, 400, '备份文件名不对');
+      const file = path.join(ensureBackupDir(), safe);
+      if (!fs.existsSync(file)) return sendError(res, 404, '没有这份备份');
+
+      // 顺序很重要：先把要恢复的那份整个读进内存。
+      // 反过来先打「恢复前」快照的话，那一下会触发保留份数的清理 ——
+      // 手上正好只有 7 份、要恢复的是最老那份的话，它会被自己刚存的快照挤掉。
+      let zipFiles;
+      try {
+        zipFiles = zipRead(fs.readFileSync(file), MAX_IMPORT);
+      } catch (err) {
+        return sendError(res, 400, '备份文件读不出来：' + err.message);
+      }
+      const jsonBuf = zipFiles.get('backup.json');
+      if (!jsonBuf) return sendError(res, 400, '这份备份里没有 backup.json，可能不是本程序的备份');
+      let src;
+      try {
+        src = JSON.parse(jsonBuf.toString('utf8'));
+      } catch (_) {
+        return sendError(res, 400, '备份文件格式不正确');
+      }
+
+      // 恢复会覆盖现在的数据：先给现状留一份，免得用户后悔了没得退
+      let safety = null;
+      try {
+        safety = makeBackup('恢复前').name;
+      } catch (err) {
+        console.error('[backup] 恢复前快照失败：', err.message);
+      }
+
+      let photos;
+      try {
+        photos = restoreUploads(zipFiles);
+      } catch (err) {
+        return sendError(res, 500, '照片写回失败：' + err.message);
+      }
+      const r = applyBackup(src);
+      return sendJSON(res, 200, { ok: true, data: { ...r, ...photos, safety } });
+    }
+    return sendError(res, 405, '不支持的请求');
+  }
+
+  // ---- 导出（zip，含照片）----
   if (method === 'GET' && route[0] === 'export') {
-    const payload = JSON.stringify(
-      {
-        __app: 'family-menu',
-        exportedAt: nowISO(),
-        categories: state.categories,
-        dishes: state.dishes,
-        orders: state.orders,
-        settings: state.settings,
-        households: state.households,
-        pantry: state.pantry,
-        plans: state.plans,
-      },
-      null,
-      2
-    );
+    const { zip, photos } = buildBackupZip();
+    const filename = `menu-backup-${todayStr()}.zip`;
     res.writeHead(200, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Content-Disposition': `attachment; filename="menu-backup-${todayStr()}.json"`,
-      'Content-Length': Buffer.byteLength(payload),
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Content-Length': zip.length,
     });
-    return res.end(payload);
+    return res.end(zip);
   }
 
   if (method === 'POST' && route[0] === 'import') {
-    const body = await readBody(req);
-    const src = body && body.data ? body.data : body;
-    if (!src || !Array.isArray(src.dishes)) return sendError(res, 400, '备份文件格式不正确');
-    state.categories = Array.isArray(src.categories) ? src.categories : state.categories;
-    state.dishes = src.dishes.map((d) => normDish(d, undefined, true)).filter(Boolean);
-    if (Array.isArray(src.orders)) {
-      state.orders = src.orders.map((o) => normOrder(o, undefined, true));
-    }
-    // 家庭要先恢复，否则点餐/库存的 householdId 会指向不存在的家庭
-    if (Array.isArray(src.households)) {
-      const seen = new Set();
-      state.households = src.households
-        .map((h) => normHousehold(h, undefined))
-        .filter(Boolean)
-        .filter((h) => (seen.has(h.id) ? false : (seen.add(h.id), true)));
-      if (!state.households.length) state.households = defaultState().households;
-    }
-    if (Array.isArray(src.pantry)) {
-      const seen = new Set();
-      state.pantry = src.pantry
-        .map((p) => normPantryItem(p, undefined, true))
-        .filter(Boolean)
-        .filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true)));
-    }
-    if (Array.isArray(src.plans)) {
-      const seen = new Set();
-      state.plans = src.plans
-        .map((pl) => normPlan(pl, undefined))
-        .filter(Boolean)
-        .filter((pl) => (seen.has(pl.id) ? false : (seen.add(pl.id), true)));
-    }
-    if (src.settings && typeof src.settings === 'object') {
-      // hasPin 是给前端的派生标记，不是真配置，别让它进磁盘
-      const { hasPin: _ignored, ...incoming } = src.settings;
-      const prevPin = state.settings.adminPin;
-      state.settings = { ...defaultState().settings, ...incoming };
-      // 备份可能把口令换了或取消了，旧会话全部作废
-      if (state.settings.adminPin !== prevPin) sessions.clear();
-    }
-    // 兜底：任何指向已删除家庭的记录拉回第一个家庭
-    const hhIds = new Set(state.households.map((h) => h.id));
-    if (!hhIds.has(state.settings.currentHouseholdId)) {
-      state.settings.currentHouseholdId = state.households[0].id;
-    }
-    state.orders.forEach((o) => {
-      if (!hhIds.has(o.householdId)) o.householdId = state.households[0].id;
-    });
-    state.pantry.forEach((p) => {
-      if (!hhIds.has(p.householdId)) p.householdId = state.households[0].id;
-    });
-    state.plans.forEach((pl) => {
-      if (!hhIds.has(pl.householdId)) pl.householdId = state.households[0].id;
-    });
+    // 两种都收：新版 zip（含照片），以及旧版导出的纯 JSON
+    const raw = await readBodyRaw(req, MAX_IMPORT);
+    let src;
+    let photos = { written: 0, skipped: 0 };
 
-    scheduleSave('categories');
-    scheduleSave('dishes');
-    scheduleSave('orders');
-    scheduleSave('settings');
-    scheduleSave('households');
-    scheduleSave('pantry');
-    scheduleSave('plans');
-    return sendJSON(res, 200, {
-      ok: true,
-      data: {
-        dishes: state.dishes.length,
-        households: state.households.length,
-        pantry: state.pantry.length,
-        plans: state.plans.length,
-      },
-    });
+    if (looksLikeZip(raw)) {
+      let zipFiles;
+      try {
+        zipFiles = zipRead(raw, MAX_IMPORT);
+      } catch (err) {
+        return sendError(res, 400, '备份文件读不出来：' + err.message);
+      }
+      const jsonBuf = zipFiles.get('backup.json');
+      if (!jsonBuf) return sendError(res, 400, '这个 zip 里没有 backup.json，可能不是本程序的备份');
+      try {
+        src = JSON.parse(jsonBuf.toString('utf8'));
+      } catch (_) {
+        return sendError(res, 400, '备份文件格式不正确');
+      }
+      try {
+        photos = restoreUploads(zipFiles);
+      } catch (err) {
+        return sendError(res, 500, '照片写回失败：' + err.message);
+      }
+    } else {
+      try {
+        src = JSON.parse(raw.toString('utf8'));
+      } catch (_) {
+        return sendError(res, 400, '既不是备份 zip，也不是 JSON');
+      }
+      if (src && src.data) src = src.data;
+    }
+
+    if (!src || !Array.isArray(src.dishes)) return sendError(res, 400, '备份文件格式不正确');
+    const r = applyBackup(src);
+    return sendJSON(res, 200, { ok: true, data: { ...r, ...photos } });
   }
 
   // ---- 汇总统计（首页小卡片用）----
@@ -1776,6 +2224,7 @@ function banner(port) {
     `  菜品 ${state.dishes.length} 道 · 分类 ${state.categories.length} 个 · 家庭 ${state.households.length} 个`
   );
   console.log(`  数据目录 ${DATA_DIR}`);
+  console.log(`  自动备份 ${BACKUP_DIR}（每天凌晨 3 点，保留最近 ${BACKUP_KEEP} 份）`);
   console.log(`  按 Ctrl+C 停止服务`);
   console.log('');
 }
@@ -1797,11 +2246,12 @@ function openBrowser(port) {
 }
 
 function init() {
-  for (const dir of [DATA_DIR, UPLOAD_DIR, PUBLIC_DIR]) {
+  for (const dir of [DATA_DIR, UPLOAD_DIR, PUBLIC_DIR, BACKUP_DIR]) {
     fs.mkdirSync(dir, { recursive: true });
   }
   loadState();
   saveNow();
+  scheduleAutoBackup();
 }
 
 let shuttingDown = false;
