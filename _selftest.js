@@ -408,6 +408,36 @@ async function main() {
   eq('state 只告诉前端有没有锁', stLocked.settings.hasPin, true);
   ok('整个 state 里搜不到口令值', JSON.stringify(stLocked).indexOf('2468') === -1, '泄漏');
 
+  // 普通家人：可以维护当前家庭的私有菜，但不能碰共享菜谱或管理设置。
+  const ordinaryHouse = stLocked.households[0].id;
+  const ownCat = await post(
+    `/api/my-categories?householdId=${encodeURIComponent(ordinaryHouse)}`,
+    { name: '普通用户私房分类' }
+  );
+  eq('普通用户可以新增本家私有分类', ownCat.status, 200);
+  const ownDish = await post(
+    `/api/my-dishes?householdId=${encodeURIComponent(ordinaryHouse)}`,
+    { name: '普通用户私菜', category: ownCat.body.data.name }
+  );
+  eq('普通用户可以新增本家私菜', ownDish.status, 200);
+  eq(
+    '普通用户不能通过管理员接口改共享菜',
+    (await post('/api/dishes', { name: '普通用户越权共享菜', category: '其他' })).status,
+    401
+  );
+  const sharedForOrdinary = stLocked.dishes.find((d) => !d.householdId);
+  eq(
+    '普通用户不能通过自家接口改共享菜',
+    (
+      await put(
+        `/api/my-dishes/${encodeURIComponent(sharedForOrdinary.id)}?householdId=${encodeURIComponent(ordinaryHouse)}`,
+        { ...sharedForOrdinary, description: '越权修改' }
+      )
+    ).status,
+    403
+  );
+  eq('普通用户不能改系统设置', (await put('/api/settings', { shopName: '越权改名' })).status, 401);
+
   // 没 token 的写操作要被拒
   eq('没 token 改菜谱 401', (await post('/api/dishes', { name: '偷偷加的', category: '其他' })).status, 401);
   eq('没 token 删家庭 401', (await del(`/api/households/${h301.id}`)).status, 401);
@@ -416,7 +446,7 @@ async function main() {
   eq('没 token 导入 401', (await post('/api/import', { dishes: [] })).status, 401);
   const afterFail = (await get('/api/state')).body.data;
   eq('被拒的操作没真的生效', afterFail.settings.shopName, stLocked.settings.shopName);
-  eq('被拒的加菜没进菜单', afterFail.dishes.length, stLocked.dishes.length);
+  eq('被拒的加菜没进菜单', afterFail.dishes.length, stLocked.dishes.length + 1);
   eq('被拒的删家庭没生效', afterFail.households.length, stLocked.households.length);
 
   // 口令不对
@@ -610,55 +640,43 @@ async function main() {
           usage: { total_tokens: 200 },
         }));
       }
-      // 对话助手：现在要的是 {reply, actions}，而且 actions 必须是能落库的结构
-      if (body.includes('【当前页面】')) {
-        if (body.includes('【用户问】把红烧肉加到菜单')) {
-          return rs.end(JSON.stringify({
-            model: 'MiniMax-M3',
-            choices: [
-              {
-                message: {
-                  role: 'assistant',
-                  content:
-                    '```json\n{"reply":"给你记上这道红烧肉。",' +
-                    '"actions":[{"type":"add_dish","data":{' +
-                    '"name":"红烧肉","category":"家常菜","description":"肥而不腻，配饭一绝",' +
-                    '"servings":"3 人份","duration":90,"difficulty":"中等","tags":["下饭"],' +
-                    '"seasonings":[{"name":"五花肉","amount":"600g"},{"name":"冰糖","amount":"20g"}],' +
-                    '"methods":[{"name":"红烧","steps":["焯水","炒糖色","小火 50 分钟"],' +
-                    '"seasonings":[{"name":"八角","amount":"2 个"}]}]}}]}\n```',
-                },
-              },
-            ],
-            usage: { total_tokens: 88 },
-          }));
-        }
-        if (body.includes('【用户问】宫保鸡丁减盐怎么做')) {
-          return rs.end(JSON.stringify({
-            model: 'MiniMax-M3',
-            choices: [
-              {
-                message: {
-                  role: 'assistant',
-                  // 故意不给 JSON：验证降级路径不会把这一轮整句话吞掉
-                  content: '1. 少放半勺盐就行。\n2. 出锅前尝一下咸淡。',
-                },
-              },
-            ],
-            usage: { total_tokens: 40 },
-          }));
-        }
+      // 「粘贴菜单文字 → 菜谱」：要的是一道菜的完整结构
+      if (body.includes('麻婆豆腐')) {
         return rs.end(JSON.stringify({
           model: 'MiniMax-M3',
           choices: [
             {
               message: {
                 role: 'assistant',
-                content: '{"reply":"今晚做个宫保鸡丁吧，菜单里有这道。","actions":[]}',
+                content:
+                  '```json\n{"name":"麻婆豆腐","category":"家常菜","description":"麻辣下饭，嫩豆腐配肉末",' +
+                  '"servings":"2-3 人份","duration":20,"difficulty":"简单","tags":["下饭"],' +
+                  '"seasonings":[{"name":"嫩豆腐","amount":"1 盒"},{"name":"郫县豆瓣酱","amount":"1 勺"}],' +
+                  '"methods":[{"name":"家常做法","steps":["豆腐切块焯水","炒香豆瓣酱","下豆腐小火烧 5 分钟"],' +
+                  '"seasonings":[{"name":"花椒粉","amount":"1 小勺"}]}],"notes":"麻婆豆腐的关键是豆瓣酱"}\n```',
               },
             },
           ],
-          usage: { total_tokens: 30 },
+          usage: { total_tokens: 96 },
+        }));
+      }
+      // 拍照认菜：同样只出一份菜谱结构
+      if (body.includes('data:image')) {
+        return rs.end(JSON.stringify({
+          model: 'MiniMax-M3',
+          choices: [
+            {
+              message: {
+                role: 'assistant',
+                content:
+                  '```json\n{"name":"清蒸鲈鱼","category":"家常菜","description":"鲜嫩",' +
+                  '"servings":"3 人份","duration":25,"difficulty":"中等","tags":["清淡"],' +
+                  '"seasonings":[{"name":"鲈鱼","amount":"1 条"}],' +
+                  '"methods":[{"name":"清蒸","steps":["鱼身划刀","铺姜丝","大火蒸 8 分钟"]}],"notes":""}\n```',
+              },
+            },
+          ],
+          usage: { total_tokens: 77 },
         }));
       }
       // 正常回复：思考过程混在 content 里，外面还套了 ```json 围栏
@@ -725,43 +743,31 @@ async function main() {
   eq('必须守灶的步骤标成不可并行', tl.body.data.result.stages[1].parallel, false);
   eq('步骤属于哪道菜', tl.body.data.result.stages[1].dish, '番茄炒蛋');
 
-  // 对话助手：回 {reply, actions}，actions 要能直接拿去落库
-  const chat = await post('/api/ai/chat', {
-    task: 'assistant-chat',
-    prompt: '【当前页面】点餐单\n【用户问】今晚吃什么',
-    history: [
-      { role: 'user', text: '晚上做什么好' },
-      { role: 'assistant', text: '做个宫保鸡丁吧' },
-    ],
-  });
-  ok('对话助手调用成功', chat.body.data.ok === true, chat.body.data);
-  ok('有 reply 字段', typeof chat.body.data.result.reply === 'string', chat.body.data.result);
-  ok('纯问答不带动作', Array.isArray(chat.body.data.result.actions) && chat.body.data.result.actions.length === 0, chat.body.data.result);
+  // AI 现在的全部能力面：拍照认菜、粘贴文字生成菜谱、厨房助手排时间轴。
+  // 刻意没有「对话助手」—— 它能看整个菜单、能自己加菜下单，权限太大，已经拿掉。
+  const gone = await post('/api/ai/chat', { task: 'assistant-chat', prompt: '今晚吃什么' });
+  eq('对话助手这个任务已经没了', gone.status, 400);
 
-  const act = await post('/api/ai/chat', {
-    task: 'assistant-chat',
-    prompt: '【当前页面】菜单\n【用户问】把红烧肉加到菜单',
+  const fromText = await post('/api/ai/chat', {
+    task: 'recipe-from-text',
+    prompt: '麻婆豆腐\n嫩豆腐1盒、郫县豆瓣酱1勺\n1. 豆腐焯水 2. 炒香豆瓣 3. 小火烧5分钟',
   });
-  ok('动手请求调用成功', act.body.data.ok === true, act.body.data);
-  eq('回了一条可执行动作', act.body.data.result.actions.length, 1);
-  eq('动作类型认得', act.body.data.result.actions[0].type, 'add_dish');
-  eq('动作里带上了菜名', act.body.data.result.actions[0].data.name, '红烧肉');
-  eq('动作里的耗时是数字', act.body.data.result.actions[0].data.duration, 90);
-  eq(
-    '动作里各层调料都在',
-    act.body.data.result.actions[0].data.seasonings.length + '/' +
-      act.body.data.result.actions[0].data.methods[0].seasonings.length,
-    '2/1'
-  );
+  ok('粘贴文字生成菜谱调用成功', fromText.body.data.ok === true, fromText.body.data);
+  eq('菜名解析出来了', fromText.body.data.result.name, '麻婆豆腐');
+  eq('分类解析出来了', fromText.body.data.result.category, '家常菜');
+  eq('通用调料解析出来了', fromText.body.data.result.seasonings.length, 2);
+  eq('步骤解析出来了', fromText.body.data.result.methods[0].steps.length, 3);
+  eq('做法独有的调料也分得开', fromText.body.data.result.methods[0].seasonings[0].name, '花椒粉');
+  ok('AI 只给菜谱，不给可执行动作', fromText.body.data.result.actions === undefined, fromText.body.data.result);
 
-  // 模型偶尔不包 JSON 时，不能让这一轮整句话没回应
-  const fb = await post('/api/ai/chat', {
-    task: 'assistant-chat',
-    prompt: '【当前页面】点餐单\n【用户问】宫保鸡丁减盐怎么做',
+  const fromImg = await post('/api/ai/chat', {
+    task: 'recipe-from-image',
+    prompt: '这是我要收录的一道菜',
+    imageUrl: 'data:image/jpeg;base64,/9j/4AAQSkZJRg==',
   });
-  ok('AI 没包好 JSON 也不报错', fb.body.data.ok === true, fb.body.data);
-  ok('降级时原文当回复', String(fb.body.data.result.reply).indexOf('少放半勺盐') > 0, fb.body.data.result);
-  ok('降级时没有动作', fb.body.data.result.actions.length === 0, fb.body.data.result);
+  ok('拍照认菜调用成功', fromImg.body.data.ok === true, fromImg.body.data);
+  eq('菜名解析出来了', fromImg.body.data.result.name, '清蒸鲈鱼');
+  eq('耗时是数字', typeof fromImg.body.data.result.duration, 'number');
 
   await stop(ai);
   await new Promise((r) => mock.close(r));
@@ -1198,6 +1204,257 @@ async function main() {
   eq('备份里的留言内容还在', bkAfter.notes.notes[0].text, '这条要进备份');
   eq('备份里的投票也回来了', JSON.stringify(bkAfter.notes.votes), JSON.stringify({ [bkDish.id]: { want: ['我'], cook: [] } }));
   await stop(bkNote);
+
+  /* ---------- 菜单分家：共享菜 + 本家私菜 ---------- */
+  console.log('\n[21] 菜单分家');
+  const sc = await boot('scope');
+  const s0 = (await get('/api/state')).body.data;
+  const A = s0.households[0].id; // 我家
+  const sharedCat = s0.categories[0].name; // 家常菜
+
+  // ---- 老种子本来就是共享的 ----
+  eq('种子分类全是共享', s0.categories.every((c) => c.householdId === null), true);
+  eq('种子菜全是共享', s0.dishes.every((d) => d.householdId === null), true);
+
+  const hB = (await post('/api/households', { name: 'B 家', emoji: '🏡' })).body.data;
+  ok('第二个家庭建起来了', !!hB.id, hB);
+
+  // ---- 归属的默认值和改法 ----
+  const sDish = (await post('/api/dishes', { name: '共享菜', category: sharedCat })).body.data;
+  eq('新菜默认共享', sDish.householdId, null);
+  const pDish = (await post('/api/dishes', { name: '我家秘制', category: sharedCat, householdId: A })).body.data;
+  eq('私菜记下归属', pDish.householdId, A);
+
+  // 编辑器保存时会带上整份菜谱，但不会碰 householdId —— 不能被偷偷改成私菜
+  const p2 = await put(`/api/dishes/${pDish.id}`, { ...pDish, description: '改了个介绍' });
+  eq('没带 householdId 不会偷改归属', p2.body.data.householdId, A);
+  const s2 = await put(`/api/dishes/${sDish.id}`, { ...sDish, description: '改了个介绍' });
+  eq('共享菜也不会被偷偷私有化', s2.body.data.householdId, null);
+
+  eq('显式传 null 把私菜变回共享',
+    (await put(`/api/dishes/${pDish.id}`, { ...pDish, householdId: null })).body.data.householdId, null);
+  eq("传 'shared' 也算共享",
+    (await put(`/api/dishes/${pDish.id}`, { ...pDish, householdId: A, isFavorite: true })).body.data.householdId, A);
+  eq('认不出的家庭 id 当共享（别把菜弄丢）',
+    (await put(`/api/dishes/${pDish.id}`, { ...pDish, householdId: 'h_根本没有' })).body.data.householdId, null);
+
+  // ---- 分类也分家 ----
+  const catA = (await post('/api/categories', { name: '私房菜', householdId: A })).body.data;
+  const catB = await post('/api/categories', { name: '私房菜', householdId: hB.id });
+  eq('同名的分类不让建第二次（名字全局唯一）', catB.status, 400);
+  ok('报错提醒了可能是别的家庭的分类', /别的家庭|共享/.test(catB.body.error || ''), catB.body);
+  eq('私有分类记下归属', catA.householdId, A);
+  eq('改个名字不会把私分类悄悄改成共享的',
+    (await put(`/api/categories/${catA.id}`, { name: '私房菜' })).body.data.householdId, A);
+  const scratch = (await post('/api/categories', { name: '夜宵', householdId: hB.id })).body.data;
+  eq('分类也能改成共享',
+    (await put(`/api/categories/${scratch.id}`, { name: '夜宵', householdId: null })).body.data.householdId, null);
+  await del(`/api/categories/${scratch.id}`);
+
+  // ---- 菜与分类的组合 ----
+  const catBX = (await post('/api/categories', { name: 'B家专区', householdId: hB.id })).body.data;
+  eq('B 家的私有分类建起来了', catBX.householdId, hB.id);
+  eq('私菜 + 共享分类 放得进去',
+    (await post('/api/dishes', { name: '组合1', category: sharedCat, householdId: A })).status, 200);
+  eq('私菜 + 自家私有分类 放得进去',
+    (await post('/api/dishes', { name: '组合2', category: '私房菜', householdId: A })).status, 200);
+  const badShared = await post('/api/dishes', { name: '组合3', category: '私房菜' });
+  eq('共享菜 + 私有分类 被拒', badShared.status, 400);
+  ok('报错点明了是哪个分类', /私房菜/.test(badShared.body.error || ''), badShared.body);
+  ok('报错说了怎么改', /仅本家|共享分类/.test(badShared.body.error || ''), badShared.body);
+  const badOther = await post('/api/dishes', { name: '组合4', category: catBX.name, householdId: A });
+  eq('私菜 + 别人家私有分类 被拒', badOther.status, 400);
+  eq('被拒的组合没存进去',
+    (await get('/api/state')).body.data.dishes.filter((d) => d.name === '组合3').length, 0);
+  // PUT 上同样要拦：不能先存成共享菜再偷偷改成私有分类
+  const sharedFlip = await put(`/api/dishes/${sDish.id}`, { ...sDish, category: '私房菜' });
+  eq('改分类时同样拦共享菜进私有分类', sharedFlip.status, 400);
+
+  // ---- 复制继承归属 ----
+  // 前面那条「认不出的 id 当共享」把 pDish 改成共享了，先把它变回私菜再测复制
+  await put(`/api/dishes/${pDish.id}`, { ...pDish, householdId: A });
+  eq('复制私菜还是本家的',
+    (await post(`/api/dishes/${pDish.id}/duplicate`, {})).body.data.householdId, A);
+  eq('复制共享菜还是共享的',
+    (await post(`/api/dishes/${sDish.id}/duplicate`, {})).body.data.householdId, null);
+
+  // ---- 删分类只动同归属的菜 ----
+  // 场景一：删 A 家的私有分类
+  const privInA = (await post('/api/dishes', { name: 'A家私菜甲', category: '私房菜', householdId: A })).body.data;
+  const privInB = (await post('/api/dishes', { name: 'B家私菜甲', category: sharedCat, householdId: hB.id })).body.data;
+  await del(`/api/categories/${catA.id}`);
+  let stS = (await get('/api/state')).body.data;
+  eq('删私有分类后本家的私菜挪到「其他」', stS.dishes.find((d) => d.id === privInA.id).category, '其他');
+  eq('别家的私菜一点没动', stS.dishes.find((d) => d.id === privInB.id).category, sharedCat);
+  eq('私有分类真的没了', stS.categories.find((c) => c.id === catA.id), undefined);
+
+  // 场景二：删共享分类
+  const sharedCatId = stS.categories.find((c) => c.name === sharedCat).id;
+  const sharedInCat = (await post('/api/dishes', { name: '共享菜甲', category: sharedCat })).body.data;
+  const privateInShared = (await post('/api/dishes', { name: '私菜乙', category: sharedCat, householdId: A })).body.data;
+  await del(`/api/categories/${sharedCatId}`);
+  stS = (await get('/api/state')).body.data;
+  eq('删共享分类后共享菜挪到「其他」', stS.dishes.find((d) => d.id === sharedInCat.id).category, '其他');
+  eq('删共享分类不会拽走别家的私菜', stS.dishes.find((d) => d.id === privateInShared.id).category, sharedCat);
+  await stop(sc);
+
+  /* ---------- 删家庭带走它的私菜 ---------- */
+  console.log('\n[21·2] 删家庭带走私菜');
+  const sc2 = await boot('scope2');
+  const t0 = (await get('/api/state')).body.data;
+  const tA = t0.households[0].id;
+  const tB = (await post('/api/households', { name: 'B 家', emoji: '🏡' })).body.data;
+  const tCat = (await post('/api/categories', { name: '我家专区', householdId: tA })).body.data;
+  const tSharedCat = t0.categories[0].name;
+  const tPriv = (await post('/api/dishes', { name: '我家私菜', category: tCat.name, householdId: tA })).body.data;
+  const tShared = (await post('/api/dishes', { name: '大家的菜', category: tSharedCat })).body.data;
+  const tBPriv = (await post('/api/dishes', { name: 'B家私菜', category: tSharedCat, householdId: tB.id })).body.data;
+  // B 家曾经排过一道当时还共享的菜，后来 A 家把它改成了私菜 —— 删 A 家时这个引用不能留成悬空
+  const tOrder = (await post('/api/orders', { householdId: tB.id, dishId: tPriv.id, dishName: tPriv.name })).body.data;
+  const tNote = (await post('/api/notes', { kind: 'dish', dishId: tPriv.id, householdId: tB.id, author: '我', text: '好吃' })).body.data;
+  const tBNote = (await post('/api/notes', { author: '我', text: 'B 家的留言' , householdId: tB.id })).body.data;
+  await post('/api/dish-votes', { dishId: tShared.id, who: '我', role: 'want' });
+
+  const goneHouse = await del(`/api/households/${tA}`);
+  eq('删家庭 200', goneHouse.status, 200);
+  eq('回报删了几道私菜', goneHouse.body.data.removedDishes, 1);
+  eq('回报删了几个私有分类', goneHouse.body.data.removedCategories, 1);
+  const st2 = (await get('/api/state')).body.data;
+  eq('私菜被带走了', st2.dishes.find((d) => d.id === tPriv.id), undefined);
+  eq('私有分类被带走了', st2.categories.find((c) => c.id === tCat.id), undefined);
+  eq('共享菜留着', !!st2.dishes.find((d) => d.id === tShared.id), true);
+  eq('共享分类留着', !!st2.categories.find((c) => c.name === tSharedCat), true);
+  eq('别家的私菜没被牵连', !!st2.dishes.find((d) => d.id === tBPriv.id), true);
+  eq('别人家菜上的留言留着', !!st2.notes.notes.find((n) => n.id === tNote.id), true);
+  eq('悬空的点餐引用被清掉',
+    (await get('/api/state')).body.data.orders.find((o) => o.id === tOrder.id).dishId, null);
+  eq('菜还在，投票就留着', !!st2.notes.votes[tShared.id], true);
+  await stop(sc2);
+
+  /* ---------- 老数据的菜和分类都升级成共享 ---------- */
+  console.log('\n[21·3] 老数据升级成共享菜');
+  const legacyScope = await boot('legacyScope', (dataDir) => {
+    // 1.8 之前的 dishes.json / categories.json：根本没有 householdId 这个字段
+    fs.writeFileSync(
+      path.join(dataDir, 'dishes.json'),
+      JSON.stringify(
+        [
+          { id: 'd_1', name: '老菜甲', category: '家常菜', images: [] },
+          { id: 'd_2', name: '老菜乙', category: '主食', images: [], methods: [] },
+        ],
+        null,
+        2
+      ),
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(dataDir, 'categories.json'),
+      JSON.stringify([{ id: 'c_1', name: '家常菜', order: 1 }], null, 2),
+      'utf8'
+    );
+  });
+  st = (await get('/api/state')).body.data;
+  eq('老菜全部补成共享', st.dishes.map((d) => d.householdId), [null, null]);
+  eq('老分类也补成共享', st.categories.map((c) => c.householdId), [null]);
+  eq('老菜一道没少', st.dishes.length, 2);
+  ok('dishes.json 已回写成带 householdId',
+    /"householdId": null/.test(fs.readFileSync(path.join(TMP, 'legacyScope', 'data', 'dishes.json'), 'utf8')));
+  await stop(legacyScope);
+
+  /* ---------- 家里人 vs 管理员：谁能改什么 ---------- */
+  console.log('\n[22] 非管理员只能改自己家的菜');
+  const permInst = await boot('permInst');
+  const p0 = (await get('/api/state')).body.data;
+  const hhA = p0.households[0].id;
+  const ppCat = p0.categories[0].name;
+
+  // 还没设口令：谁都算管理员，装上就能用
+  eq('没设口令时加公共菜没人拦',
+    (await post('/api/dishes', { name: '公共菜', category: ppCat })).status, 200);
+
+  // 设上口令，走管理员流程
+  await put('/api/settings', { adminPin: '8888' });
+  eq('设了口令后没 token 加不了公共菜',
+    (await post('/api/dishes', { name: '偷偷加的', category: ppCat })).status, 401);
+  eq('口令错拿不到 token', (await post('/api/auth', { pin: '0000' })).status, 401);
+  const tokX = (await post('/api/auth', { pin: '8888' })).body.data.token;
+  eq('口令对就换到 token', (tokX || '').length > 10, true);
+
+  const hhB = (await post('/api/households', { name: 'B 家' }, tokX)).body.data.id;
+  const ppDish = (await post('/api/dishes', {
+    name: '公共菜', category: ppCat, duration: 20,
+    seasonings: [{ name: '五花肉', amount: '600g' }],
+    methods: [{ name: '红烧', steps: ['焯水', '炒糖色', '小火 50 分钟'], seasonings: [] }],
+  }, tokX)).body.data;
+  eq('管理员建出来的菜是共享的', ppDish.householdId, null);
+
+  // 家里人这边：my-dishes / my-categories 免口令
+  const pvCat = (await post('/api/my-categories?householdId=' + hhA, { name: '我家专区' })).body.data;
+  eq('家里人能建自家私有分类', pvCat.householdId, hhA);
+  const mwDish = (await post('/api/my-dishes?householdId=' + hhA, { name: '我家红烧肉', category: ppCat })).body.data;
+  eq('家里人能加自家私菜', mwDish.householdId, hhA);
+  const mwDish2B = (await post('/api/my-dishes?householdId=' + hhA, { name: '我家腌菜', category: pvCat.name })).body.data;
+  eq('私菜能放进自家私有分类', mwDish2B.householdId, hhA);
+  eq('body 里写别人家 id 也不管用',
+    (await post('/api/my-dishes?householdId=' + hhA, { name: '想混进别人家', category: ppCat, householdId: hhB })).body.data.householdId,
+    hhA);
+  eq('不说改哪一家会被挡住', (await post('/api/my-dishes', {})).status, 400);
+  eq('不存在的家庭会被挡住', (await post('/api/my-dishes?householdId=h_没有', { name: 'x' })).status, 400);
+
+  // 公共菜谱：非管理员改不动
+  const editPub = await put('/api/my-dishes/' + ppDish.id + '?householdId=' + hhA, { name: '公共菜被改了' });
+  eq('非管理员改不了公共菜谱', editPub.status, 403);
+  ok('报错告诉人家可以「收进我家」', /收进我家/.test(editPub.body.error || ''), editPub.body);
+  eq('非管理员删不了公共菜谱', (await del('/api/my-dishes/' + ppDish.id + '?householdId=' + hhA)).status, 403);
+  const batch = await del('/api/my-dishes?householdId=' + hhA + '&ids=' + mwDish.id + ',' + ppDish.id);
+  eq('批量删时公共菜被跳过', batch.body.data.removed, 1);
+  eq('批量删如实回报跳过了几条', batch.body.data.kept, 1);
+  eq('公共菜真的还在', !!(await get('/api/state')).body.data.dishes.find((d) => d.id === ppDish.id), true);
+  const ppCatId = (await get('/api/state')).body.data.categories[0].id;
+  eq('非管理员改不了公共分类',
+    (await put('/api/my-categories/' + ppCatId + '?householdId=' + hhA, { name: '改名字' })).status, 403);
+  eq('非管理员删不了公共分类',
+    (await del('/api/my-categories/' + ppCatId + '?householdId=' + hhA)).status, 403);
+
+  // 别人家的私菜：碰不到
+  const bCatX = (await post('/api/my-categories?householdId=' + hhB, { name: 'B 家专区' })).body.data;
+  const bDishX = (await post('/api/my-dishes?householdId=' + hhB, { name: 'B 家私菜', category: bCatX.name })).body.data;
+  eq('碰不到别人家的私菜',
+    (await put('/api/my-dishes/' + bDishX.id + '?householdId=' + hhA, { name: '偷改' })).status, 403);
+  eq('B 家私菜没被改',
+    (await get('/api/state')).body.data.dishes.find((d) => d.id === bDishX.id).name, 'B 家私菜');
+
+  // 收进我家：公共菜谱上普通人唯一的正当途径
+  const adopted = await post('/api/my-dishes/' + ppDish.id + '/adopt?householdId=' + hhA, {});
+  eq('收进我家成功', adopted.status, 200);
+  eq('抄出来的是自家私菜', adopted.body.data.householdId, hhA);
+  eq('菜名原样保留', adopted.body.data.name, '公共菜');
+  ok('抄出来是新的一条', adopted.body.data.id !== ppDish.id, adopted.body.data.id);
+  eq('做法也带过来了', (adopted.body.data.methods || []).length > 0, true);
+  eq('公共那份纹丝未动',
+    (await get('/api/state')).body.data.dishes.find((d) => d.id === ppDish.id).householdId, null);
+  eq('收进来的菜可以随便改',
+    (await put('/api/my-dishes/' + adopted.body.data.id + '?householdId=' + hhA, { name: '我家的红烧肉' })).status, 200);
+
+  // 管理员：什么都能动
+  eq('解锁后能加公共菜',
+    (await post('/api/dishes', { name: '管理员加的公共菜', category: ppCat }, tokX)).status, 200);
+  eq('解锁后能改公共菜', (await put('/api/dishes/' + ppDish.id, { name: '管理员改的公共菜' }, tokX)).status, 200);
+  eq('管理员也能碰别人家的私菜',
+    (await put('/api/dishes/' + bDishX.id, { name: '管理员改的 B 家菜' }, tokX)).status, 200);
+
+  // 自家私有分类：只挪自家的菜
+  eq('公共菜进不了私有分类（管理员也一样）',
+    (await post('/api/dishes', { name: '公共菜乙', category: pvCat.name }, tokX)).status, 400);
+  eq('非管理员的菜也进不了别人家私有分类',
+    (await post('/api/my-dishes?householdId=' + hhA, { name: 'X', category: bCatX.name })).status, 400);
+  await del('/api/my-categories/' + pvCat.id + '?householdId=' + hhA);
+  const after = (await get('/api/state')).body.data;
+  eq('删自家私有分类，本家的私菜挪到「其他」',
+    after.dishes.find((d) => d.id === mwDish2B.id).category, '其他');
+  eq('公共菜一点没动', after.dishes.find((d) => d.id === ppDish.id).category, ppCat);
+
+  await stop(permInst);
 
   /* ---------- 收尾 ---------- */
   fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5 });

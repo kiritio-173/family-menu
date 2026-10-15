@@ -23,8 +23,11 @@ const BACKUP_DIR = path.join(ROOT, 'backups');
 const PORT = Number(process.env.PORT) || 8787;
 const HOST = process.env.HOST || '0.0.0.0';
 const MAX_BODY = 16 * 1024 * 1024; // 16MB，够放压缩后的 base64 图片
-// 恢复备份走的是 zip 原样上传，里面装着 uploads/ 的照片，体积比单条请求大得多
-const MAX_IMPORT = 128 * 1024 * 1024;
+// 恢复备份走的是 zip 原样上传，里面装着 uploads/ 的照片，体积比单条请求大得多。
+// 上限从 128MB 降到 64MB：恢复时这份 zip 会先整体收进内存、再解出一份照片，
+// 128MB 的包意味着峰值 256MB 起。2G 的小机器上宁可早点报错让人分批处理，
+// 也不要悄悄把机器撑爆。照片特别多的话可以 MEM_IMPORT_MB=128 放宽。
+const MAX_IMPORT = Number(process.env.MEM_IMPORT_MB || 64) * 1024 * 1024;
 // 自动备份保留几份
 const BACKUP_KEEP = Number(process.env.BACKUP_KEEP) || 7;
 // node server.js --open  启动后自动打开浏览器
@@ -38,10 +41,22 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.9.0',
+    date: '2026-10-16',
+    title: '普通用户权限与一键发布流程',
+    items: [
+      '普通用户可以点餐、记库存、排计划、留言和申请加入家庭',
+      '普通用户可以维护当前家庭的私有菜谱和分类，但不能修改共享菜谱、共享分类或管理员设置',
+      '管理员口令继续保护家庭管理、共享菜单、系统设置、备份、上传和 AI 能力',
+      '新增 npm run publish：自检、打包便携版、提交并推送 GitHub',
+      '便携版输出固定更新到 package/家庭菜单-便携版/，同时生成 ZIP',
+    ],
+  },
   {
     version: '1.8.0',
     date: '2026-10-15',
@@ -344,6 +359,9 @@ const FILES = {
   // 留言板 + 菜品互动（想吃 / 我来做）。合成一个文件：这两样都是
   // 「家里人随手写的短内容」，拆成两个文件只会让备份/恢复多一条分支。
   notes: 'notes.json',
+  // 「申请加入家庭」的待办。单独一个文件是因为它跟菜单数据完全两套生命周期：
+  // 菜谱是长期内容，申请是几天内就该处理掉的一次性记录。
+  access: 'access.json',
 };
 
 const state = {};
@@ -513,6 +531,8 @@ function defaultState() {
     plans: [],
     // 留言板留言 + 每道菜的「想吃 / 我来做」投票
     notes: { notes: [], votes: {} },
+    // 申请加入别的家庭。普通用户不能直接把自己塞进别人家，得管理员点头。
+    access: { requests: [] },
     settings: {
       shopName: '家庭菜单',
       adminPin: '',
@@ -803,11 +823,27 @@ function loadState() {
   // 分类去重修正（菜品按分类名归属）
   state.categories = state.categories.filter((c) => c && c.name);
   state.dishes = state.dishes.filter((d) => d && d.name);
+  // 菜和分类分家是从 1.9 才有的。老数据没有 householdId 字段，
+  // 一律补成 null（= 共享）：升级之后你原来录的菜还是人人可见，
+  // 只是从今往后新加的菜可以只给自己家看。
+  state.categories.forEach((c) => {
+    if (c.householdId === undefined) c.householdId = null;
+    else if (c.householdId) c.householdId = resolveHouseholdId(c.householdId);
+  });
+  state.dishes.forEach((d) => {
+    if (d.householdId === undefined) d.householdId = null;
+    else if (d.householdId) d.householdId = resolveHouseholdId(d.householdId);
+  });
   // 按 id 去重：重复 id 会让删除/更新只命中一条
   const seenD = new Set();
   state.dishes = state.dishes.filter((d) => (seenD.has(d.id) ? false : (seenD.add(d.id), true)));
   const seenO = new Set();
   state.orders = state.orders.filter((o) => (seenO.has(o.id) ? false : (seenO.add(o.id), true)));
+  // 加入申请的归属兜底：指向已经不存在的家庭的申请直接清掉，免得管理员看到一堆点不亮的待办
+  const hhNow = new Set(state.households.map((h) => h.id));
+  state.access.requests = (state.access.requests || []).filter(
+    (r) => r && r.name && hhNow.has(r.householdId)
+  );
 
   /* ---- 家庭 / 库存：从旧版本平滑升级 ---- */
 
@@ -952,18 +988,25 @@ function dosStamp(d) {
 }
 
 /**
- * files: [{ name, data }]，data 可以是 Buffer 或字符串
- * 返回整个 zip 的 Buffer
+ * 把 entries 写成 zip，逐条喂给 write(buf)。
+ *
+ * entries: [{ name, read() }] —— read() 每次调用返回一份**新的** Buffer。
+ *   刻意不收「已经读好的 data」：几十张手机照片全读进来再拼一整个 zip，
+ *   峰值就是照片总量的两倍。2G 的小机器上，一张 5MB 的照片多存几十张，
+ *   每天凌晨那一次自动备份就足以把进程顶到几百 MB、被系统 OOM Killer 干掉。
+ *   这里一次只留一个条目，写完就松手，峰值降到「单张照片 + 它的压缩结果」。
+ *
+ * write(buf) 得是同步的（res.write 或 fs.writeSync）。
+ * 返回值是 zip 的总字节数，调用方拿它填 Content-Length。
  */
-function zipMake(files) {
+function zipWriteTo(entries, write) {
   const { time, date } = dosStamp(new Date());
-  const locals = [];
   const centrals = [];
   let offset = 0;
 
-  for (const f of files) {
-    const nameBuf = Buffer.from(f.name, 'utf8');
-    const raw = Buffer.isBuffer(f.data) ? f.data : Buffer.from(String(f.data), 'utf8');
+  for (const e of entries) {
+    const nameBuf = Buffer.from(e.name, 'utf8');
+    let raw = e.read();
     const crc = crc32(raw);
     // 压不小就原样存：省掉一次 inflate/deflate，家庭菜单的 JSON 本来就压不动
     const deflated = raw.length > 64 ? zlib.deflateRawSync(raw, { level: 6 }) : raw;
@@ -983,7 +1026,9 @@ function zipMake(files) {
     local.writeUInt32LE(raw.length, 22);
     local.writeUInt16LE(nameBuf.length, 26);
     local.writeUInt16LE(0, 28); // extra 长度
-    locals.push(local, nameBuf, payload);
+    write(local);
+    write(nameBuf);
+    write(payload);
 
     const cd = Buffer.alloc(46);
     cd.writeUInt32LE(0x02014b50, 0); // 中央目录签名
@@ -1015,12 +1060,31 @@ function zipMake(files) {
   eocd.writeUInt32LE(0x06054b50, 0); // 中央目录结束记录
   eocd.writeUInt16LE(0, 4);
   eocd.writeUInt16LE(0, 6);
-  eocd.writeUInt16LE(files.length, 8);
-  eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
   eocd.writeUInt32LE(cdBuf.length, 12);
   eocd.writeUInt32LE(offset, 16);
   eocd.writeUInt16LE(0, 20); // 注释长度
-  return Buffer.concat([...locals, cdBuf, eocd]);
+  write(cdBuf);
+  write(eocd);
+
+  return offset + cdBuf.length + eocd.length;
+}
+
+/**
+ * 一次性打包成 Buffer（自检里的小样本用得上）。
+ * 数据量大的路径一律别用它 —— 那正是把内存顶爆的那条路。
+ */
+function zipMake(files) {
+  const parts = [];
+  const size = zipWriteTo(
+    files.map((f) => ({
+      name: f.name,
+      read: () => (Buffer.isBuffer(f.data) ? f.data : Buffer.from(String(f.data), 'utf8')),
+    })),
+    (b) => parts.push(b)
+  );
+  return Buffer.concat(parts, size);
 }
 
 /**
@@ -1108,6 +1172,7 @@ function backupPayload() {
     pantry: state.pantry,
     plans: state.plans,
     notes: state.notes,
+    access: state.access,
   };
 }
 
@@ -1148,6 +1213,23 @@ function applyBackup(src) {
   if (src.notes && typeof src.notes === 'object') {
     state.notes = normBoard(src.notes);
   }
+  // 加入申请同理：家庭已经回来了，才能判断申请指向的家庭还在不在
+  if (src.access && typeof src.access === 'object' && Array.isArray(src.access.requests)) {
+    const ids = new Set(state.households.map((h) => h.id));
+    state.access = {
+      requests: src.access.requests
+        .filter((r) => r && r.id && r.name && ids.has(r.householdId))
+        .slice(0, 50)
+        .map((r) => ({
+          id: safeText(r.id, 40),
+          name: safeText(r.name, 20),
+          householdId: safeText(r.householdId, 40),
+          note: safeText(r.note, 100),
+          at: safeText(r.at, 30) || nowISO(),
+          status: r.status === 'ok' ? 'ok' : r.status === 'no' ? 'no' : 'pending',
+        })),
+    };
+  }
   if (src.settings && typeof src.settings === 'object') {
     // hasPin 是给前端的派生标记，不是真配置，别让它进磁盘
     const { hasPin: _ignored, ...incoming } = src.settings;
@@ -1185,22 +1267,29 @@ function applyBackup(src) {
 }
 const PHOTO_RE = /\.(jpg|jpeg|png|gif|webp|avif)$/i;
 
-/** 当前状态 + uploads/ 里的照片，打成一个 zip */
-function buildBackupZip() {
-  const files = [{ name: 'backup.json', data: JSON.stringify(backupPayload(), null, 2) }];
+/**
+ * 当前状态 + uploads/ 里的照片，列成待打包的条目。
+ *
+ * 照片只记**路径**，不读内容 —— 读的动作推迟到 zipWriteTo 真正写到那一条的时候。
+ * 这样不管 uploads/ 里攒了多少张照片，打包时的内存上限都是「一张照片」，
+ * 而不是「所有照片加起来」。见 zipWriteTo 的注释。
+ */
+function backupEntries() {
+  const json = JSON.stringify(backupPayload(), null, 2);
+  const entries = [{ name: 'backup.json', read: () => Buffer.from(json, 'utf8') }];
   let photos = 0;
   try {
     for (const name of fs.readdirSync(UPLOAD_DIR)) {
       if (!name || name.startsWith('.') || !PHOTO_RE.test(name)) continue;
       const full = path.join(UPLOAD_DIR, name);
       if (!fs.statSync(full).isFile()) continue;
-      files.push({ name: 'uploads/' + name, data: fs.readFileSync(full) });
+      entries.push({ name: 'uploads/' + name, read: () => fs.readFileSync(full) });
       photos++;
     }
   } catch (_) {
     /* uploads/ 还没建，照片 0 张，不影响导出 */
   }
-  return { zip: zipMake(files), photos };
+  return { entries, photos };
 }
 
 /**
@@ -1267,20 +1356,31 @@ function pruneBackups() {
 function makeBackup(reason) {
   saveNow(); // 先把内存里的落盘，快照才是准的
   ensureBackupDir();
-  const { zip, photos } = buildBackupZip();
+  const { entries, photos } = backupEntries();
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
   const name =
     `backup-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
     `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.zip`;
-  fs.writeFileSync(path.join(BACKUP_DIR, name), zip);
+  const full = path.join(BACKUP_DIR, name);
+  // 边压边写，不在内存里攒整个 zip
+  const fd = fs.openSync(full, 'w');
+  let size;
+  try {
+    size = zipWriteTo(entries, (b) => fs.writeSync(fd, b, 0, b.length));
+  } finally {
+    fs.closeSync(fd);
+  }
   const pruned = pruneBackups();
   console.log(
-    `[backup] ${name}  ${(zip.length / 1024).toFixed(0)}KB  照片 ${photos} 张` +
+    `[backup] ${name}  ${(size / 1024).toFixed(0)}KB  照片 ${photos} 张` +
+      // 打 RSS 而不是堆用量：照片是 Buffer，压根不在 JS 堆里，
+      // 只看 heapUsed 会得出「备份不吃内存」的错误结论。
+      `  内存 RSS ${Math.round(process.memoryUsage().rss / 1048576)}MB` +
       (reason ? `  (${reason})` : '') +
       (pruned ? `  清理旧备份 ${pruned} 份` : '')
   );
-  return { name, size: zip.length, photos };
+  return { name, size, photos };
 }
 
 let autoBackupTimer = null;
@@ -1331,6 +1431,10 @@ function normDish(input, prev, keepInputId) {
     id: base.id || (keepInputId && typeof input.id === 'string' && input.id ? input.id : uid('d_')),
     name: rawName || base.name || '未命名菜品',
     category: safeText(input.category ?? base.category, 24).trim() || '家常菜',
+    // 共享菜（householdId 为 null）= 全体家庭都能看到；
+    // 填了家庭 id = 只有那一家能看到。老数据没这个字段 → 当共享菜，
+    // 升级过来你原来那 6 道菜还跟以前一样人人可见。
+    householdId: normScope(input, base),
     description: safeText(input.description, 300),
     images: safeList(input.images ?? base.images)
       .map((s) => safeText(s, 300))
@@ -1384,6 +1488,40 @@ function normDish(input, prev, keepInputId) {
     updatedAt: nowISO(),
   };
   return d;
+}
+
+/**
+ * 菜品 / 分类的归属：null = 共享（全体家庭可见），字符串 = 只有那一家可见。
+ *
+ * 显式传 null / '' / 'shared' 才算「共享」；没传这个字段时沿用原来的归属，
+ * 这样编辑器不碰它就不会把一道共享菜偷偷改成私有的。
+ */
+function normScope(input, base) {
+  const raw = input.householdId;
+  if (raw === undefined) return base.householdId === undefined ? null : base.householdId;
+  if (raw === null || raw === '' || raw === 'shared') return null;
+  const id = safeText(raw, 40);
+  if (!id || !state.households.some((h) => h.id === id)) return null; // 认不出的当共享，别把人家的菜弄丢
+  return id;
+}
+
+/**
+ * 一道菜能不能放进它那个分类。
+ *
+ * 分了家之后菜和分类各有归属，只有「菜的范围 ⊇ 分类的范围」才说得通：
+ *   共享菜 + 共享分类        ✅ 大家都能看到
+ *   私菜   + 共享分类        ✅ 只有本家看得到，不影响别人
+ *   私菜   + 自家私有分类    ✅ 自家范围内自洽
+ *   共享菜 + 任意私有分类    ❌ 别人家看得见这道菜，却看不到它属于哪个分类，等于凭空多出一道菜
+ *   私菜   + 别人家私有分类  ❌ 存了谁都看不到
+ * 最后两种直接拒掉，免得用户以为菜存进去了，回头在菜单里找不到或者对不上号。
+ */
+function categoryProblem(dish) {
+  const cat = state.categories.find((c) => c.name === dish.category);
+  if (!cat) return null; // 分类不存在（比如老数据引用的分类被删了）不拦，兼容旧行为
+  if (!cat.householdId || cat.householdId === dish.householdId) return null;
+  const owner = (state.households.find((h) => h.id === cat.householdId) || {}).name || '别的家庭';
+  return `「${cat.name}」是「${owner}」的私有分类，只有同样仅本家可见的菜才能放进去。换一个共享分类，或者把这道菜也设成仅本家。`;
 }
 
 /** 只认已存在的家庭 id，认不出就落到当前/默认家庭，避免数据悬空 */
@@ -1704,6 +1842,8 @@ async function handleAPI(req, res, url) {
     route[0] === 'export' ||
     route[0] === 'backups' ||
     route[0] === 'ai' ||
+    // 加入申请：提交谁都能做（人总得有个申请入口），批准/拒绝是管理员的活
+    (route[0] === 'join-requests' && method !== 'GET' && !!route[1]) ||
     (method !== 'GET' && method !== 'HEAD' && ADMIN_WRITES.has(route[0]));
   if (needsAuth && !isAuthed(req)) {
     return sendError(res, 401, '需要管理口令，请先在「管理」页解锁');
@@ -1725,6 +1865,8 @@ async function handleAPI(req, res, url) {
     if (!prompt) return sendError(res, 400, '内容不能为空');
 
     const AI_TASKS = {
+      // 从一张照片生成菜谱草稿。这是 AI 现在唯一的「看东西」入口：
+      // 它只认菜，不知道这个家里已经有哪些菜，也不会替用户做决定。
       'recipe-from-image': {
         system:
           '你是中餐菜谱助手。用户会给你一道菜的照片（成品图或食材图）。' +
@@ -1741,6 +1883,27 @@ async function handleAPI(req, res, url) {
           '看不清的字段就留空字符串或空数组，不要编造。',
         wantJSON: true,
         think: true, // 看图要仔细判断，给它开思考
+      },
+      // 从一段纯文字（纸质菜单、外卖页面、群里转发的做法）生成菜谱草稿。
+      // 同样只填表单，存不存由人按。
+      'recipe-from-text': {
+        system:
+          '你是中餐菜谱助手。用户会给你一段文字，可能来自纸质菜单、外卖页面、' +
+          '或者群里转发的一段做法。请把它整理成一道菜的菜谱，只输出 JSON，' +
+          '不要任何解释、不要 markdown 代码块。格式：' +
+          '{"name":"菜名","category":"分类","description":"一句话介绍",' +
+          '"servings":"份量","duration":分钟数,"difficulty":"简单|中等|有点难",' +
+          '"tags":["标签"],"seasonings":[{"name":"食材","amount":"用量"}],' +
+          '"methods":[{"name":"做法名","seasonings":[{"name","amount"}],"steps":["一步一句"]}],' +
+          '"notes":"备注"}。' +
+          '要求：分类从家常菜/主食/汤羹/凉菜/早餐/小吃甜点/饮品/其他里挑一个；' +
+          '调料用量写「2 个」「400g」「1 小勺」这种能直接买菜的形式；步骤 4-8 步。' +
+          'seasonings 是所有做法都要用的通用调料；只有当这道菜有多种做法时，' +
+          '才把某几个做法独有的调料放进那个做法的 seasonings 里，通用调料不要重复放。' +
+          '原文里只有菜名没写做法时，按常见做法把 seasonings 和 methods 补完整，' +
+          '并在 notes 里写一句「用量和步骤是按常见做法补的」。' +
+          '原文没有的信息就留空字符串或空数组，不要编造。',
+        wantJSON: true,
       },
       'recipe-normalize': {
         system:
@@ -1785,59 +1948,6 @@ async function handleAPI(req, res, url) {
           '5) why 用一句话说明为什么这么排，不要空话。',
         wantJSON: true,
       },
-      // 全局对话助手：菜单/库存/点餐/计划哪都能问，能多轮接着聊，
-      // 还能回一句「加到菜单里」就真的给出一张待确认的操作卡。
-      // 前端把「当前在看什么」拼进 prompt，这里只管怎么回。
-      'assistant-chat': {
-        system:
-          '你是「家庭菜单」这个本地菜谱应用的助手，服务于一户普通人家。你不只是聊天，' +
-          '还能真的动手改这个应用里的数据。\n' +
-          '应用里有：菜单（菜谱）、点餐单、买菜清单、库存（食材/数量/保质期）、本周计划、家庭成员。\n\n' +
-          '用户消息前面有一段【当前页面】上下文，说明他在哪个页面、手上是什么。务必结合它回答。\n\n' +
-          '只输出 JSON，不要 markdown 代码块。格式：\n' +
-          '{"reply":"给用户看的话，纯文本","actions":[]}\n' +
-          'actions 里放你要执行的操作，最多 3 条：\n' +
-          '[{"type":"add_dish","data":{"name":"菜名","category":"分类","description":"一句话介绍",' +
-          '"servings":"2 人份","duration":20,"difficulty":"简单","tags":["下饭"],' +
-          '"seasonings":[{"name":"盐","amount":"2g"}],' +
-          '"methods":[{"name":"做法名","steps":["一步一行"],"seasonings":[{"name":"小米辣","amount":"1 勺"}]}]}}]\n' +
-          '[{"type":"order_dish","data":{"dishName":"菜名（必须和菜单里的完全一样）",' +
-          '"requester":"谁点的，没有就说匿名","people":2,"note":"备注"}}]\n' +
-          '[{"type":"add_to_plan","data":{"dishName":"菜名"}}]\n' +
-          '[{"type":"add_pantry","data":{"name":"食材名","category":"蔬菜","quantity":2,' +
-          '"unit":"根","expireAt":"2026-10-20","note":""}}]\n\n' +
-          '怎么用 actions：\n' +
-          '· 用户说「把…加到菜单 / 记一道菜 / 收录这道菜」→ add_dish\n' +
-          '· 用户说「我想吃… / 帮我点… / 加个单」→ order_dish\n' +
-          '· 用户说「这周做… / 排进计划」→ add_to_plan\n' +
-          '· 用户说「刚买了… / 记一下库存 / 进了几斤」→ add_pantry\n' +
-          '· 只是问「这道菜怎么做」「今晚吃什么」「还有几天过期」→ 不要 actions，actions 留空数组 []\n' +
-          '· 一次最多 3 条。\n' +
-          '· 参数不全不要反问一串：按下面的默认值补上，然后在 reply 里带一句\n' +
-          '  「缺的我先按…记的，不对告诉我」即可。\n' +
-          '  只有菜名缺了（用户压根没说做什么）才真的反问。\n' +
-          '  默认值：servings="2 人份"、difficulty="简单"、duration=30、people=2、\n' +
-          '  category="家常菜"、order_dish 的 requester="匿名"、add_pantry 的 unit="份"。\n' +
-          '· add_dish 特殊：用户常常只给一个菜名。这时候要像正常菜谱一样把\n' +
-          '  seasonings 和 methods 填完整 —— 通用调料给足量，每个做法写清步骤\n' +
-          '  （一行一步，4-8 步），这是这个功能最有用的地方，不要留空。\n' +
-          '  只有用户明说「先建个空壳」「别的我一会儿填」时才留空数组。\n' +
-          '  在 reply 里说明「用量和步骤我按常见做法填了，录进来后可以改」。\n' +
-          '  add_dish 里 duration 是分钟（数字），expireAt 是 YYYY-MM-DD。\n' +
-          '  category 从这些里选：家常菜、主食、汤羹、凉菜、早餐、小吃甜点、饮品。\n' +
-          '  order_dish / add_to_plan 的 dishName 必须能在菜单里找到，找不到就别放这条。\n\n' +
-          'reply 怎么写：\n' +
-          '1) 用中文，直接给答案，不要客套开场（「好的」「没问题」这类直接省掉）；\n' +
-          '2) 有 actions 时，reply 用一两句话说明「我准备做什么」，别把内容重复一遍；\n' +
-          '3) 步骤用编号列表，用量写「2 个」「400g」「1 小勺」这种具体形式；\n' +
-          '4) 上下文里没给的数字不要编。缺信息就直说「你没说几个人吃」并给个按 2 人份的答案；\n' +
-          '5) 简洁。一次别写超过 400 字，用户在手机上扫着看。',
-        wantJSON: true,
-        // 对话不能因为模型偶尔没包好 JSON 就整句没回应：
-        // 解析失败就把原文当 reply 返回，actions 照常是空。
-        jsonFallback: true,
-        think: false, // 对话要快，开思考会明显拖慢每一句
-      },
     };
 
     const t = AI_TASKS[task];
@@ -1846,32 +1956,12 @@ async function handleAPI(req, res, url) {
     const userContent = imageUrl
       ? [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: imageUrl } }]
       : prompt;
-    // 多轮对话：body.history 里的历史也是模型给的，不接受前端直接传消息数组
-    // （那等于把这个接口变成任意角色扮演的跳板）
-    const history = Array.isArray(body && body.history)
-      ? body.history
-          .slice(-12) // 只带最近几轮，太长会把每句都拖慢
-          .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string')
-          .map((m) => ({ role: m.role, content: safeText(m.text, 2000) }))
-      : [];
-    const messages = [{ role: 'system', content: t.system }, ...history, { role: 'user', content: userContent }];
+    // 不接受前端直接传消息数组 —— 那等于把这个接口变成任意角色扮演的跳板。
+    // AI 现在是单轮的「拍照/文字 → 菜谱草稿」，没有多轮对话可言。
+    const messages = [{ role: 'system', content: t.system }, { role: 'user', content: userContent }];
     const r = await callAI(messages, { wantJSON: t.wantJSON, think: !!t.think });
     if (!r.ok) return sendJSON(res, 200, { ok: true, data: { ok: false, error: r.error } });
     if (t.wantJSON && !r.json) {
-      // 对话任务不让「模型这轮没包好 JSON」把整句话吞掉：
-      // 原文照样当回复给用户，只是这轮没有可执行动作。
-      if (t.jsonFallback && r.text) {
-        return sendJSON(res, 200, {
-          ok: true,
-          data: {
-            ok: true,
-            result: { reply: r.text, actions: [] },
-            fallback: true,
-            usage: r.usage,
-            model: r.model,
-          },
-        });
-      }
       return sendJSON(res, 200, {
         ok: true,
         data: { ok: false, error: 'AI 的回复看不懂（不是合法 JSON），可以再试一次' },
@@ -1929,6 +2019,236 @@ async function handleAPI(req, res, url) {
     });
   }
 
+  // ---- 加入申请 ----
+  // 提交申请谁都能做（人总得有个申请入口）；批准/拒绝是管理员的活，要口令。
+  if (route[0] === 'join-requests') {
+    const id = route[1];
+    const body = method !== 'GET' ? await readBody(req) : {};
+
+    if (method === 'GET') {
+      return sendJSON(res, 200, { ok: true, data: state.access.requests });
+    }
+
+    if (method === 'POST' && !id) {
+      const name = safeText(body.name, 20).trim();
+      const householdId = safeText(body.householdId, 40);
+      if (!name) return sendError(res, 400, '写上你是谁，管理员才知道批给谁');
+      const house = state.households.find((h) => h.id === householdId);
+      if (!house) return sendError(res, 404, '这个家庭不存在');
+      if (house.members.some((m) => m.name === name)) {
+        return sendError(res, 409, `「${name}」已经是${house.name}的成员了`);
+      }
+      // 同一家的同名申请只留最新的一条，免得刷出一长串等价的待办
+      const dup = state.access.requests.find((r) => r.name === name && r.householdId === householdId);
+      if (dup) {
+        dup.at = nowISO();
+        dup.note = safeText(body.note, 100).trim();
+        return sendJSON(res, 200, { ok: true, data: dup, updated: true });
+      }
+      const req = {
+        id: uid('j_'),
+        name,
+        householdId,
+        note: safeText(body.note, 100).trim(),
+        at: nowISO(),
+        status: 'pending',
+      };
+      state.access.requests.unshift(req);
+      // 别无限堆：已处理的只留最近 20 条，待处理的全留
+      const done = state.access.requests.filter((r) => r.status !== 'pending');
+      if (done.length > 20) {
+        const drop = new Set(done.slice(20).map((r) => r.id));
+        state.access.requests = state.access.requests.filter((r) => !drop.has(r.id));
+      }
+      scheduleSave('access');
+      return sendJSON(res, 200, { ok: true, data: req });
+    }
+
+    if (method === 'PUT' && id) {
+      const req = state.access.requests.find((r) => r.id === id);
+      if (!req) return sendError(res, 404, '申请不存在');
+      const status = body.status === 'ok' ? 'ok' : 'no';
+      req.status = status;
+      req.at = nowISO();
+      // 批准 = 真的把人加进这个家庭。光改状态不生效的话，
+      // 被批准的人在成员列表里还是找不到自己，等于没批
+      if (status === 'ok') {
+        const house = state.households.find((h) => h.id === req.householdId);
+        if (house && !house.members.some((m) => m.name === req.name)) {
+          house.members.push({
+            id: uid('m_'),
+            name: req.name,
+            emoji: MEMBER_EMOJI[house.members.length % MEMBER_EMOJI.length],
+          });
+          scheduleSave('households');
+        }
+      }
+      scheduleSave('access');
+      return sendJSON(res, 200, { ok: true, data: req });
+    }
+
+    if (method === 'DELETE' && id) {
+      const before = state.access.requests.length;
+      state.access.requests = state.access.requests.filter((r) => r.id !== id);
+      scheduleSave('access');
+      return sendJSON(res, 200, { ok: true, data: { removed: before - state.access.requests.length } });
+    }
+    return sendError(res, 405, '不支持的请求');
+  }
+
+  // ------------------------------------------------------------------
+  // 自家菜单：给**没有管理员口令**的家里人用。
+  //
+  // 分工是这样的：
+  //   共享菜（householdId 为空）是管理员的地盘 —— 谁想改公共菜谱，先过口令。
+  //   本家私菜是家里人自己的 —— 不用口令，想加就加，想改就改，想删就删。
+  //
+  // 所以这组端点必须在上面的守卫**之前**处理（'my-dishes' / 'my-categories'
+  // 不在 ADMIN_WRITES 里），并且每一条都把 householdId 钉死在查询参数上：
+  // 客户端说什么不算数，只有它确实存在、且目标东西本来就属于这个家，才算数。
+  // ------------------------------------------------------------------
+
+  if (route[0] === 'my-dishes' || route[0] === 'my-categories') {
+    const mine = route[0] === 'my-dishes';
+    const id = route[1];
+    const hhId = url.searchParams.get('householdId');
+    const house = hhId && state.households.find((h) => h.id === hhId);
+    if (!house) return sendError(res, 400, '没说要改哪一家，先切换家庭');
+
+    /** 只认「本来就属于这一家」的东西 */
+    const owns = (o) => o.householdId === hhId;
+
+    if (mine) {
+      // 收进我家：把一道共享菜复制一份成自家私菜。
+      // 这是普通人碰公共菜谱的唯一正当途径 —— 不改它，只是抄一份自己改。
+      if (method === 'POST' && route[2] === 'adopt' && id) {
+        const src = state.dishes.find((d) => d.id === id);
+        if (!src) return sendError(res, 404, '菜品不存在');
+        const copy = normDish({ ...src, id: '', householdId: hhId });
+        copy.name = src.name;
+        copy.isFavorite = false;
+        copy.createdAt = nowISO();
+        const bad = categoryProblem(copy);
+        if (bad) return sendError(res, 400, bad);
+        state.dishes.unshift(copy);
+        scheduleSave('dishes');
+        return sendJSON(res, 200, { ok: true, data: copy });
+      }
+
+      if (method === 'POST' && !id) {
+        const dish = normDish({ ...(await readBody(req)), householdId: hhId });
+        if (!dish || !dish.name) return sendError(res, 400, '菜名不能为空');
+        const bad = categoryProblem(dish);
+        if (bad) return sendError(res, 400, bad);
+        state.dishes.unshift(dish);
+        scheduleSave('dishes');
+        return sendJSON(res, 200, { ok: true, data: dish });
+      }
+      if (method === 'PUT' && id) {
+        const idx = state.dishes.findIndex((d) => d.id === id);
+        if (idx < 0) return sendError(res, 404, '菜品不存在');
+        if (!owns(state.dishes[idx])) {
+          return sendError(res, 403, '这是公共菜谱（或别人家的菜），改不了。要改可以「收进我家」自己抄一份。');
+        }
+        const dish = normDish({ ...(await readBody(req)), householdId: hhId }, state.dishes[idx]);
+        const bad = categoryProblem(dish);
+        if (bad) return sendError(res, 400, bad);
+        state.dishes[idx] = dish;
+        scheduleSave('dishes');
+        return sendJSON(res, 200, { ok: true, data: dish });
+      }
+      if (method === 'DELETE') {
+        // 一律用 Set：数组没有 .size，下面那句 !ids.size 会永远成立
+        const ids = id
+          ? new Set([id])
+          : new Set(
+              String(url.searchParams.get('ids') || '')
+                .split(',')
+                .map((s) => safeText(s, 40))
+                .filter(Boolean)
+            );
+        if (!ids.size) return sendError(res, 400, '要删哪几条？');
+        // 删单条时直接说不行；批量时只跳过 —— 批量里混了公共菜是常事，
+        // 逐条报错会让人以为整批都没删掉
+        if (id) {
+          const one = state.dishes.find((d) => d.id === id);
+          if (!one) return sendError(res, 404, '菜品不存在');
+          if (!owns(one)) {
+            return sendError(res, 403, '这是公共菜谱（或别人家的菜），删不了。想改成自己的版本，用「收进我家」抄一份。');
+          }
+        }
+        // 只删真正属于这一家的。混进来的共享菜一条都不动 ——
+        // 非管理员不该有「顺手把公共菜删了」这种可能。
+        const kill = state.dishes.filter((d) => ids.has(d.id) && owns(d));
+        const shared = ids.size - kill.length;
+        state.dishes = state.dishes.filter((d) => !(ids.has(d.id) && owns(d)));
+        for (const gone of kill) {
+          state.orders = state.orders.filter((o) => !(o.dishId === gone.id && o.status !== 'done'));
+          state.plans.forEach((p) => {
+            p.items = p.items.filter((it) => it.dishId !== gone.id);
+          });
+          state.notes.notes.forEach((n) => {
+            if (n.kind === 'dish' && n.dishId === gone.id) {
+              n.kind = 'board';
+              n.dishId = null;
+            }
+          });
+          delete state.notes.votes[gone.id];
+        }
+        scheduleSave('dishes');
+        scheduleSave('orders');
+        scheduleSave('plans');
+        scheduleSave('notes');
+        return sendJSON(res, 200, {
+          ok: true,
+          data: { removed: kill.length, kept: shared, first: kill[0] || null },
+        });
+      }
+      return sendError(res, 405, '不支持的请求');
+    }
+
+    // ---- 自家私有分类 ----
+    if (method === 'POST' && !id) {
+      const body = await readBody(req);
+      const name = safeText(body.name, 24).trim();
+      if (!name) return sendError(res, 400, '分类名不能为空');
+      if (state.categories.some((c) => c.name === name)) {
+        return sendError(res, 400, '已经有同名的分类了（也可能属于别的家庭）。换个名字吧。');
+      }
+      const cat = { id: uid('c_'), name, householdId: hhId, order: state.categories.length + 1 };
+      state.categories.push(cat);
+      scheduleSave('categories');
+      return sendJSON(res, 200, { ok: true, data: cat });
+    }
+    if (method === 'PUT' && id) {
+      const cat = state.categories.find((c) => c.id === id);
+      if (!cat) return sendError(res, 404, '分类不存在');
+      if (!owns(cat)) return sendError(res, 403, '这是公共分类（或别人家的分类），改不了。');
+      const body = await readBody(req);
+      const name = safeText(body.name, 24).trim() || cat.name;
+      if (state.categories.some((c) => c.id !== id && c.name === name)) {
+        return sendError(res, 400, '已经有同名的分类了，换个名字吧。');
+      }
+      cat.name = name;
+      scheduleSave('categories');
+      return sendJSON(res, 200, { ok: true, data: cat });
+    }
+    if (method === 'DELETE' && id) {
+      const idx = state.categories.findIndex((c) => c.id === id);
+      if (idx < 0) return sendError(res, 404, '分类不存在');
+      if (!owns(state.categories[idx])) return sendError(res, 403, '这是公共分类（或别人家的分类），删不了。');
+      const [gone] = state.categories.splice(idx, 1);
+      // 只挪本家的菜：公共菜动不得，别人家的私菜也跟这里没关系
+      state.dishes.forEach((d) => {
+        if (d.category === gone.name && owns(d)) d.category = '其他';
+      });
+      scheduleSave('categories');
+      scheduleSave('dishes');
+      return sendJSON(res, 200, { ok: true, data: gone });
+    }
+    return sendError(res, 405, '不支持的请求');
+  }
+
   // ---- 家庭 ----
   if (route[0] === 'households') {
     const id = route[1];
@@ -1967,6 +2287,27 @@ async function handleAPI(req, res, url) {
       state.pantry = state.pantry.filter((p) => p.householdId !== id);
       state.plans = state.plans.filter((p) => p.householdId !== id);
       state.notes.notes = state.notes.notes.filter((n) => n.householdId !== id);
+      // 这个家的私菜和私有分类跟着走；共享的留给别的家继续用
+      const removedDishes = state.dishes.filter((d) => d.householdId === id).length;
+      const removedCats = state.categories.filter((c) => c.householdId === id).length;
+      state.dishes = state.dishes.filter((d) => d.householdId !== id);
+      state.categories = state.categories.filter((c) => c.householdId !== id);
+      // 删掉的私菜还挂着点餐 / 计划 / 留言的引用，一并清掉，别留悬空 id
+      state.orders.forEach((o) => {
+        if (o.dishId && !state.dishes.some((d) => d.id === o.dishId)) o.dishId = null;
+      });
+      state.plans.forEach((pl) => {
+        pl.items = pl.items.filter((it) => !it.dishId || state.dishes.some((d) => d.id === it.dishId));
+      });
+      state.notes.notes.forEach((n) => {
+        if (n.kind === 'dish' && n.dishId && !state.dishes.some((d) => d.id === n.dishId)) {
+          n.kind = 'board';
+          n.dishId = null;
+        }
+      });
+      Object.keys(state.notes.votes).forEach((dishId) => {
+        if (!state.dishes.some((d) => d.id === dishId)) delete state.notes.votes[dishId];
+      });
       if (state.settings.currentHouseholdId === id) {
         state.settings.currentHouseholdId = state.households[0].id;
       }
@@ -1975,10 +2316,19 @@ async function handleAPI(req, res, url) {
       scheduleSave('pantry');
       scheduleSave('plans');
       scheduleSave('notes');
+      scheduleSave('dishes');
+      scheduleSave('categories');
       scheduleSave('settings');
       return sendJSON(res, 200, {
         ok: true,
-        data: { ...gone, removedOrders, removedPantry, removedNotes },
+        data: {
+          ...gone,
+          removedOrders,
+          removedPantry,
+          removedNotes,
+          removedDishes,
+          removedCategories: removedCats,
+        },
       });
     }
   }
@@ -2278,6 +2628,8 @@ async function handleAPI(req, res, url) {
     if (method === 'POST' && !id) {
       const dish = normDish(await readBody(req));
       if (!dish) return sendError(res, 400, '菜名不能为空');
+      const bad = categoryProblem(dish);
+      if (bad) return sendError(res, 400, bad);
       state.dishes.unshift(dish);
       scheduleSave('dishes');
       return sendJSON(res, 200, { ok: true, data: dish });
@@ -2286,6 +2638,8 @@ async function handleAPI(req, res, url) {
       const idx = state.dishes.findIndex((d) => d.id === id);
       if (idx < 0) return sendError(res, 404, '菜品不存在');
       const dish = normDish(await readBody(req), state.dishes[idx]);
+      const bad = categoryProblem(dish);
+      if (bad) return sendError(res, 400, bad);
       state.dishes[idx] = dish;
       scheduleSave('dishes');
       return sendJSON(res, 200, { ok: true, data: dish });
@@ -2293,6 +2647,7 @@ async function handleAPI(req, res, url) {
     if (method === 'POST' && route[2] === 'duplicate' && id) {
       const src = state.dishes.find((d) => d.id === id);
       if (!src) return sendError(res, 404, '菜品不存在');
+      // 副本跟原菜一个归属：复制我家私菜不该把它变成全体共享
       const copy = normDish({ ...src, id: '', name: src.name + '（副本）' });
       copy.isFavorite = false;
       state.dishes.unshift(copy);
@@ -2329,15 +2684,26 @@ async function handleAPI(req, res, url) {
   }
 
   // ---- 分类 ----
+  // 分类也是分家的：null = 共享分类，全体家庭都能用；填了家庭 id = 只有那一家用。
+  // 名字全局唯一 —— 菜品是按名字挂到分类上的，撞名会让一道菜挂到谁身上说不清。
   if (route[0] === 'categories') {
     const id = route[1];
     if (method === 'POST' && !id) {
       const body = await readBody(req);
       const name = safeText(body.name, 24).trim();
       if (!name) return sendError(res, 400, '分类名不能为空');
+      const owner = normScope(body, {});
+      if (state.categories.some((c) => c.name === name)) {
+        return sendError(
+          res,
+          400,
+          '已经有同名的分类了（也可能属于别的家庭）。换个名字，或者把那个分类改成共享的。'
+        );
+      }
       const cat = {
         id: uid('c_'),
         name,
+        householdId: owner,
         order: state.categories.length + 1,
       };
       state.categories.push(cat);
@@ -2348,8 +2714,21 @@ async function handleAPI(req, res, url) {
       const cat = state.categories.find((c) => c.id === id);
       if (!cat) return sendError(res, 404, '分类不存在');
       const body = await readBody(req);
-      const name = safeText(body.name, 24).trim();
-      if (name) cat.name = name;
+      const nextName = safeText(body.name, 24).trim() || cat.name;
+      // 没传 householdId 就沿用原来的归属，别因为改个名字把私分类改成共享的
+      const nextOwner =
+        body.householdId === undefined ? cat.householdId || null : normScope(body, cat);
+      // 分类名全局唯一。菜品是按名字挂到分类上的，同名的两个分类会让一道菜
+      // 挂到谁身上变得说不清，所以宁可报错让人换个名字。
+      if (state.categories.some((c) => c.id !== id && c.name === nextName)) {
+        return sendError(
+          res,
+          400,
+          '已经有同名的分类了（也可能属于别的家庭）。换个名字，或者把那个分类改成共享的。'
+        );
+      }
+      cat.name = nextName;
+      cat.householdId = nextOwner;
       scheduleSave('categories');
       return sendJSON(res, 200, { ok: true, data: cat });
     }
@@ -2357,9 +2736,13 @@ async function handleAPI(req, res, url) {
       const idx = state.categories.findIndex((c) => c.id === id);
       if (idx < 0) return sendError(res, 404, '分类不存在');
       const [gone] = state.categories.splice(idx, 1);
-      // 该分类下菜品改为「其他」，不丢数据
+      // 该分类下菜品改为「其他」，不丢数据。
+      // 只动归属相同的菜：删共享分类别去拽别家私菜，删私有分类也别碰别人同名的那份
+      // （A 家和 B 家完全可以各有一个私有的「夜宵」，各装各的菜）
       state.dishes.forEach((d) => {
-        if (d.category === gone.name) d.category = '其他';
+        if (d.category !== gone.name) return;
+        if ((d.householdId || null) !== (gone.householdId || null)) return;
+        d.category = '其他';
       });
       scheduleSave('categories');
       scheduleSave('dishes');
@@ -2579,14 +2962,42 @@ async function handleAPI(req, res, url) {
 
   // ---- 导出（zip，含照片）----
   if (method === 'GET' && route[0] === 'export') {
-    const { zip, photos } = buildBackupZip();
+    const { entries } = backupEntries();
     const filename = `menu-backup-${todayStr()}.zip`;
-    res.writeHead(200, {
-      'Content-Type': 'application/zip',
-      'Content-Disposition': `attachment; filename="${filename}"`,
-      'Content-Length': zip.length,
-    });
-    return res.end(zip);
+    // 先落到临时文件，再流式发出去。
+    // 直接往 socket 上边打包边灌看着更省事，但客户端一慢，res.write 的积压
+    // 就会把照片重新堆回内存 —— 换个地方 OOM 而已。
+    const tmp = path.join(os.tmpdir(), `menu-export-${Date.now()}-${process.pid}.zip`);
+    try {
+      const fd = fs.openSync(tmp, 'w');
+      let size;
+      try {
+        size = zipWriteTo(entries, (b) => fs.writeSync(fd, b, 0, b.length));
+      } finally {
+        fs.closeSync(fd);
+      }
+      res.writeHead(200, {
+        'Content-Type': 'application/zip',
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        'Content-Length': size,
+      });
+      await new Promise((resolve, reject) => {
+        const stream = fs.createReadStream(tmp);
+        stream.on('error', reject);
+        res.on('close', resolve);
+        stream.pipe(res);
+      });
+    } catch (err) {
+      if (!res.headersSent) sendError(res, 500, '导出失败：' + err.message);
+      else res.destroy();
+    } finally {
+      try {
+        fs.unlinkSync(tmp);
+      } catch (_) {
+        /* 临时文件删不掉就算了，下次重启自然清 */
+      }
+    }
+    return;
   }
 
   if (method === 'POST' && route[0] === 'import') {
@@ -2700,8 +3111,57 @@ function lanAddresses() {
   return out;
 }
 
+/* ------------------------------------------------------------------ *
+ * 内存护栏
+ *
+ * 这个服务是给一台家用小机器跑的：2 核 2G 很常见。
+ * 64 位 Node 的 old space 上限默认跟机器内存一样大，V8 会以为自己有整个
+ * 内存可用，于是一路涨 —— 等它涨到把宿主机吃满，Linux 的 OOM Killer 会
+ * 直接把进程杀掉，连一行报错都来不及写，看起来就像「服务自己停了」。
+ *
+ * 真正省内存的是别处（备份打包已经改成一次只压一个文件了，见 zipWriteTo）；
+ * 这里只做两件事：
+ *   1) 启动时把「实际堆上限」打出来，让人一眼知道自己裸奔还是有限制的；
+ *   2) 小内存机器上没加参数就启动时，响亮地提醒一句该怎么加。
+ *
+ * 想自己定：node --max-old-space-size=256 server.js
+ * （package.json 的 npm start 已经带了默认值）
+ * ------------------------------------------------------------------ */
+
+function memoryReport() {
+  const v8 = require('v8');
+  const heapLimitMB = Math.round(v8.getHeapStatistics().heap_size_limit / 1048576);
+  const mem = process.memoryUsage();
+  const totalMB = Math.round(os.totalmem() / 1048576);
+  return {
+    heapLimitMB,
+    totalMB,
+    rssMB: Math.round(mem.rss / 1048576),
+    heapMB: Math.round(mem.heapUsed / 1048576),
+  };
+}
+
+/** 小内存机器裸奔时提醒；已经有限制就闭嘴 */
+function warnIfMemoryUnbounded(m) {
+  const smallBox = m.totalMB > 0 && m.totalMB <= 3072; // 3G 及以下算「小机器」
+  const unbounded = m.heapLimitMB > m.totalMB * 0.75;
+  if (!smallBox || !unbounded) return;
+  console.warn(
+    [
+      '',
+      `  ⚠️ 这台机器只有 ${m.totalMB}MB 内存，但 Node 的堆上限是 ${m.heapLimitMB}MB。`,
+      '     万一内存涨上去，Linux 会直接杀掉这个进程（OOM Killer），日志来不及写。',
+      '     建议这样起：',
+      '       node --max-old-space-size=384 server.js',
+      '     或者直接 npm start（package.json 里已经带上了）。',
+      '',
+    ].join('\n')
+  );
+}
+
 function banner(port) {
   const line = '─'.repeat(46);
+  const m = memoryReport();
   console.log('');
   console.log(`  ${state.settings.shopName || '家庭菜单'} 正在运行`);
   console.log(`  ${line}`);
@@ -2715,8 +3175,12 @@ function banner(port) {
   );
   console.log(`  数据目录 ${DATA_DIR}`);
   console.log(`  自动备份 ${BACKUP_DIR}（每天凌晨 3 点，保留最近 ${BACKUP_KEEP} 份）`);
+  console.log(
+    `  内存 堆上限 ${m.heapLimitMB}MB · 现在用 ${m.rssMB}MB（物理 ${m.totalMB}MB）`
+  );
   console.log(`  按 Ctrl+C 停止服务`);
   console.log('');
+  warnIfMemoryUnbounded(m);
 }
 
 /** 启动后自动打开浏览器（打包版用，省得家人自己敲地址） */

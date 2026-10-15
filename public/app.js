@@ -27,10 +27,7 @@ const S = {
   cookPlanText: '', // 厨房助手结果的纯文本版，给「复制」用
   version: null, // /api/version 的结果，管理页显示版本和更新内容
   backups: null, // /api/backups 的结果，管理页显示自动备份状态
-  chatOpenDish: '', // 打开对话时正在看/编辑的是哪道菜，AI 回答要贴着它
-  chatTurns: [], // 对话历史，{role:'user'|'assistant', text, actions:[{type,data,state}]}
-  chatOpen: false, // 底部悬浮窗是展开还是收起
-  chatDot: false, // 收起期间来了新回复，在 pill 上冒个红点
+  access: [], // 加入申请（/api/join-requests），管理页审批、管理员之外的人看自己的状态
   householdId: '', // 当前家庭，存在本机 localStorage：每台设备各选各的
   meName: '', // 留言板里「我是谁」，默认取当前家庭的第一个成员
   noteReplyTo: '', // 正在回复哪条留言的 id（空 = 只是新建一条）
@@ -94,8 +91,79 @@ function dishById(id) {
   return S.data.dishes.find((d) => d.id === id) || null;
 }
 
+/* =========================================================
+   菜单归属：共享菜 + 本家私菜
+   ------------------------------------------------------------
+   householdId 为空 = 共享，全体家庭都看得见；
+   有值 = 只属于那一家，别人家看不到也搜不到。
+   升级前的老数据没有这个字段，一律当共享 —— 升级后跟以前一模一样。
+   ========================================================= */
+
+function canSee(ownerId) {
+  return !ownerId || !S.householdId || ownerId === S.householdId;
+}
+
+/** 这道菜 / 这个分类是不是「只有本家看得见」 */
+function isPrivate(o) {
+  return !!(o && o.householdId);
+}
+
+/** 私有东西在列表上的角标，不然用户会纳闷「这道菜别人家怎么没有」 */
+function ownTag(o) {
+  return isPrivate(o) ? `<span class="pill-own" title="只有本家看得见">🔒 仅本家</span>` : '';
+}
+
+/** 当前家庭看得见的全部菜品（还没套分类 / 搜索筛选） */
+function scopeDishes() {
+  return (S.data.dishes || []).filter((d) => canSee(d.householdId));
+}
+
+/**
+ * 改一道菜 —— 按权限走不同端点。
+ *
+ * 管理员打 /api/dishes（有口令保护），家里人打 /api/my-dishes
+ * （只能改本家私菜，服务端会再验一遍归属）。
+ * patch 里只需要给要改的字段，归属不在其中时原样带过去。
+ */
+async function saveDishBody(dish, patch) {
+  const body = { ...dish, ...patch };
+  if (isAdmin()) {
+    await api('PUT', `/api/dishes/${encodeURIComponent(dish.id)}`, body);
+    return body;
+  }
+  return api(
+    'PUT',
+    `/api/my-dishes/${encodeURIComponent(dish.id)}?householdId=${encodeURIComponent(S.householdId)}`,
+    body
+  );
+}
+
+/* ---------------- 谁能改什么 ----------------
+   共享菜谱是管理员的地盘，本家私菜是家里人自己的。
+   没设口令时谁都算管理员（保持「装了就能用」），
+   设了口令之后，非管理员只能动自己家的私菜 —— 公共的只能看和抄。 */
+
+function isAdmin() {
+  return !S.data.settings.hasPin || S.authed;
+}
+
+/** 这道菜 / 这个分类当前用户能不能改、能删 */
+function canEdit(o) {
+  if (isAdmin()) return true;
+  return !!(o && o.householdId && o.householdId === S.householdId);
+}
+
+/** 不能改的共享菜上，改挂这个按钮 */
+function adoptBtn(d, cls) {
+  return `<button class="${cls || 'btn soft sm'}" data-act="adopt-dish" data-id="${esc(d.id)}"
+    title="抄一份到你家，改成自己的做法，公共菜谱原样不动">👇 收进我家</button>`;
+}
+
+/** 当前家庭看得见的分类，按 order 排 */
 function sortedCategories() {
-  return [...S.data.categories].sort((a, b) => (a.order || 0) - (b.order || 0));
+  return (S.data.categories || [])
+    .filter((c) => canSee(c.householdId))
+    .sort((a, b) => (a.order || 0) - (b.order || 0));
 }
 
 /* ---------------- 日期 ---------------- */
@@ -317,8 +385,6 @@ async function loadAIStatus() {
   } catch (_) {
     aiInfo = { enabled: false };
   }
-  // 没配 Key 就不给入口：与其点了才报错，不如一开始就没有那个悬浮窗
-  redrawChat();
   return aiInfo;
 }
 
@@ -373,460 +439,6 @@ async function askAI(task, prompt, imageUrl) {
     return null;
   }
 }
-
-/* =========================================================
-   全局 AI 对话助手（底部悬浮窗）
-
-   两件事，都是冲着「更好用」去的：
-
-   1) 入口从顶栏搬到底部。收起时是一条 pill，点开是贴着底部的面板。
-      顶栏那颗 💬 又小又靠上，单手拿手机够不着；放到底部随时能戳。
-
-   2) 它不只是聊天。模型可以回一句「我准备把这道菜加到菜单」并附一张
-      操作卡，用户点「确认」才真的落库 —— 问一句就能把菜记进来，
-      不用先去菜单页找「记一道菜」再抄一遍；但改数据这步仍然由人按。
-
-   关键不在于「能聊天」，而在于**它知道你在看什么**：当前哪个家庭、
-   手上这道菜是什么、点餐单上挂着哪几道、库存里什么快过期，
-   以及菜单里已经有哪些菜（不然它会一本正经地重复添加已有的那道）。
-   ========================================================= */
-
-const VIEW_LABEL = {
-  menu: '菜单（浏览菜谱）',
-  plan: '本周计划',
-  order: '点餐单',
-  pantry: '库存',
-  manage: '管理',
-};
-
-/** 把「当前页面上看得见的东西」摘要成一段话，贴在用户消息前面发给 AI */
-function chatContext() {
-  const L = [];
-  L.push(`【当前页面】${VIEW_LABEL[S.view] || S.view}`);
-
-  const house = currentHousehold();
-  if (house) {
-    const members = (house.members || []).map((m) => m.name).join('、');
-    L.push(`【当前家庭】${house.name}${members ? '，成员：' + members : '，成员还没登记'}`);
-  }
-
-  // 手上这道菜：AI 答「减盐怎么改」全靠这段，不然它根本不知道说的是哪道菜
-  const d = S.chatOpenDish ? dishById(S.chatOpenDish) : null;
-  if (d) {
-    const lines = [`【正在看的菜】${d.name}（${d.category}，${d.servings || '份量未填'}，约 ${d.duration || '?'} 分钟，难度${d.difficulty || '未填'}）`];
-    if (d.description) lines.push(`  介绍：${d.description}`);
-    const gs = collectDishSeasonings(d);
-    if (gs.length) {
-      lines.push('  调料：' + gs.map((s) => (s.method ? `${s.name} ${s.amount}（${s.method}独有）` : `${s.name} ${s.amount}`)).join('、'));
-    }
-    (d.methods || []).forEach((m) => {
-      if (m.steps && m.steps.length) lines.push(`  做法「${m.name}」：${m.steps.slice(0, 3).join(' ')}${m.steps.length > 3 ? ' …' : ''}`);
-    });
-    if (d.notes) lines.push(`  备注：${d.notes}`);
-    L.push(lines.join('\n'));
-  }
-
-  const pend = pendingOrders();
-  if (pend.length) {
-    L.push(
-      `【待做点餐】共 ${pend.length} 道：` +
-        pend.map((o) => `${o.dishName}（${o.people} 人份${o.requester ? '，' + o.requester + '点的' : ''}）`).join('、')
-    );
-  }
-
-  // 库存只给「要处理」的那些，全量倒进去既超长又没用
-  const p = householdPantry();
-  const soon = p.filter((x) => x.expireAt && daysToToday(x.expireAt) <= 3);
-  if (soon.length) {
-    L.push(
-      `【库存里快过期/已过期】${soon
-        .map((x) => `${x.name} ${x.quantity}${x.unit}（${x.expireAt < todayStr() ? '已过期' : '还剩 ' + daysToToday(x.expireAt) + ' 天'}）`)
-        .join('、')}`
-    );
-  } else if (p.length) {
-    L.push(`【库存】共 ${p.length} 样，暂时没有快过期的`);
-  }
-
-  // 菜单里已有哪些菜必须给全：不然它会一本正经地「添加」一道早就有的菜
-  const all = S.data.dishes || [];
-  L.push(
-    `【菜单里已有的 ${all.length} 道菜】` +
-      (all.length
-        ? all.map((x) => `${x.name}（${x.category}${x.methods && x.methods.length ? '，' + x.methods.length + ' 种做法' : ''}）`).join('、')
-        : '（还一道菜都没有）')
-  );
-  L.push('【可选分类】' + (S.data.categories || []).map((c) => c.name).join('、'));
-  return L.join('\n');
-}
-
-/** 距离今天还有几天（过期为负） */
-function daysToToday(dateStr) {
-  const t = new Date(todayStr() + 'T00:00:00');
-  const d = new Date(String(dateStr).slice(0, 10) + 'T00:00:00');
-  return Math.round((d - t) / 86400000);
-}
-
-/** 快捷指令：跟着当前页面走，减少用户自己想「该问什么」 */
-function chatChips() {
-  const base = [['清空对话', 'chat-clear']];
-  const d = S.chatOpenDish ? dishById(S.chatOpenDish) : null;
-  if (d) {
-    base.unshift([`${d.name} 还能怎么做`, '']);
-    base.unshift([`${d.name} 两个人吃要多少量`, '']);
-    base.unshift([`${d.name} 减盐怎么做`, '']);
-  }
-  if (S.view === 'order' && pendingOrders().length >= 2) {
-    base.unshift(['这几道菜先做哪个', '']);
-    base.unshift(['今晚几点能吃上', '']);
-  }
-  if (S.view === 'pantry') {
-    base.unshift(['这些能配出今晚的菜吗', '']);
-    base.unshift(['哪些该先处理', '']);
-  }
-  // 「让它动手」的例子放在最前面 —— 这是它跟普通聊天框最不一样的地方
-  base.unshift(['把今天做的菜都加到菜单里', '']);
-  base.unshift(['随便推荐今晚吃什么', '']);
-  return base;
-}
-
-/* ---------- 底部悬浮窗的显隐 ---------- */
-
-function openChat() {
-  // 这里不再判断 aiReady()：没配 Key 时整个 dock 本来就是 hidden，
-  // 多一层判断只会在「刚加载完、正好点进来」的时候白挡一次。
-  S.chatOpenDish = S.chatOpenDish || '';
-  S.chatOpen = true;
-  S.chatDot = false;
-  document.body.classList.add('chat-open');
-  redrawChat();
-  const inp = $('#chatInput');
-  if (inp && !('ontouchstart' in window)) inp.focus();
-}
-
-function closeChat() {
-  S.chatOpen = false;
-  document.body.classList.remove('chat-open');
-  redrawChat();
-}
-
-/* ---------- 可执行动作 ---------- */
-
-const ACTION_META = {
-  add_dish: { icon: '📖', verb: '加入菜单', label: '添加菜品' },
-  order_dish: { icon: '🔔', verb: '下单', label: '加入点餐单' },
-  add_to_plan: { icon: '🗓️', verb: '排进本周计划', label: '加入本周计划' },
-  add_pantry: { icon: '🧊', verb: '入库', label: '加入库存' },
-};
-
-/** 把模型给的 payload 收拾干净：只留本应用认识的字段，长度也卡住 */
-function cleanDishPayload(d) {
-  const seasons = (arr) =>
-    (Array.isArray(arr) ? arr : [])
-      .map((s) => ({
-        name: String((s && s.name) || '').trim().slice(0, 30),
-        amount: String((s && s.amount) || '').trim().slice(0, 30),
-      }))
-      .filter((s) => s.name)
-      .slice(0, 40);
-  const steps = (arr) =>
-    (Array.isArray(arr) ? arr : [])
-      .map((s) => String(s == null ? '' : s).trim().slice(0, 200))
-      .filter(Boolean)
-      .slice(0, 30);
-  return {
-    name: String(d.name || '').trim().slice(0, 40),
-    category: String(d.category || '').trim().slice(0, 24),
-    description: String(d.description || '').trim().slice(0, 300),
-    servings: String(d.servings || '').trim().slice(0, 30),
-    duration: Number(d.duration) || 0,
-    difficulty: String(d.difficulty || '').trim().slice(0, 12),
-    tags: (Array.isArray(d.tags) ? d.tags : [])
-      .map((t) => String(t).trim().slice(0, 12))
-      .filter(Boolean)
-      .slice(0, 8),
-    seasonings: seasons(d.seasonings),
-    methods: (Array.isArray(d.methods) ? d.methods : [])
-      .map((m) => ({
-        name: String((m && m.name) || '').trim().slice(0, 24),
-        steps: steps(m && m.steps),
-        seasonings: seasons(m && m.seasonings),
-      }))
-      .filter((m) => m.name || m.steps.length)
-      .slice(0, 6),
-  };
-}
-
-/** 动作卡上那几行摘要，让人一眼看清「它到底要改什么」 */
-function actionLines(a) {
-  const d = a.data || {};
-  const out = [];
-  if (a.type === 'add_dish') {
-    out.push([d.category, d.servings, d.duration ? `约 ${d.duration} 分钟` : '', d.difficulty].filter(Boolean).join(' · '));
-    if ((d.seasonings || []).length) {
-      out.push('通用调料 ' + d.seasonings.map((s) => `${s.name} ${s.amount || ''}`.trim()).join('、'));
-    }
-    (d.methods || []).forEach((m) => {
-      const extra = (m.seasonings || []).map((s) => `${s.name} ${s.amount || ''}`.trim()).join('、');
-      out.push(
-        `做法「${m.name || '未命名'}」${m.steps && m.steps.length ? m.steps.length + ' 步' : '（没写步骤）'}` +
-          (extra ? ` · 独有调料：${extra}` : '')
-      );
-    });
-  } else if (a.type === 'order_dish') {
-    out.push(`${d.people || 2} 人份${d.requester ? ' · ' + d.requester + ' 点的' : ''}`);
-    if (d.note) out.push(d.note);
-  } else if (a.type === 'add_to_plan') {
-    out.push('本周 · ' + (currentHousehold() ? currentHousehold().name : ''));
-  } else if (a.type === 'add_pantry') {
-    const bits = [d.category, d.quantity != null ? `${d.quantity}${d.unit || ''}` : ''];
-    if (d.expireAt) {
-      const left = daysToToday(d.expireAt);
-      bits.push('保质期到 ' + d.expireAt + (left < 0 ? '（那天就过期了）' : `（还有 ${left} 天）`));
-    }
-    out.push(bits.filter(Boolean).join(' · '));
-  }
-  return out.filter(Boolean);
-}
-
-function actionTitle(a) {
-  const d = a.data || {};
-  if (a.type === 'add_dish') return '加一道菜：' + (d.name || '（没名字）');
-  if (a.type === 'order_dish') return '点餐：' + (d.dishName || '（没写菜名）');
-  if (a.type === 'add_to_plan') return '排进本周计划：' + (d.dishName || '（没写菜名）');
-  if (a.type === 'add_pantry') return '入库：' + (d.name || '（没写食材）');
-  return '执行操作';
-}
-
-/**
- * 真的落库。只在用户点了卡上的「确认」之后才走到这里。
- *
- * 保守为上：菜名对不上菜单、库存没写名字这类情况一律不猜，直接报回去，
- * 让用户改一句话重新问 —— 宁可多问一句，也不要往菜单里塞错东西。
- */
-async function runChatAction(turnIdx, actIdx) {
-  const t = S.chatTurns[turnIdx];
-  const a = t && t.actions && t.actions[actIdx];
-  if (!a || a.state !== 'pending') return;
-  const d = a.data || {};
-  a.state = 'busy';
-  redrawChat();
-  try {
-    if (a.type === 'add_dish') {
-      const p = cleanDishPayload(d);
-      if (!p.name) throw new Error('这道菜没名字，没法加');
-      const dup = (S.data.dishes || []).find((x) => x.name === p.name);
-      if (dup) throw new Error(`菜单里已经有「${p.name}」了，不用再加一遍`);
-      const saved = await api('POST', '/api/dishes', p);
-      a.dishId = (saved && saved.id) || '';
-      a.done = `已加入菜单：${p.name}`;
-      toast(`📖 已加入菜单：${p.name}`);
-    } else if (a.type === 'order_dish') {
-      const name = String(d.dishName || '').trim();
-      if (!name) throw new Error('没说要吃哪道菜');
-      const dish = (S.data.dishes || []).find((x) => x.name === name);
-      if (!dish) throw new Error(`菜单里没有「${name}」，先让它加到菜单里`);
-      await api('POST', '/api/orders', {
-        householdId: S.householdId,
-        dishId: dish.id,
-        dishName: dish.name,
-        requester: String(d.requester || '').trim() || '匿名',
-        people: Number(d.people) || 2,
-        note: String(d.note || '').trim(),
-      });
-      a.done = `已下单：${dish.name}`;
-      toast(`🔔 已下单：${dish.name}`);
-    } else if (a.type === 'add_to_plan') {
-      const name = String(d.dishName || '').trim();
-      if (!name) throw new Error('没说要排哪道菜');
-      const dish = (S.data.dishes || []).find((x) => x.name === name);
-      await addToPlan(
-        dish ? { dishId: dish.id, name: dish.name, servings: dish.servings } : { name },
-        planWeek(),
-        () => {}
-      );
-      a.done = `已排进本周计划：${name}`;
-      toast(`🗓️ 已排进本周计划：${name}`);
-    } else if (a.type === 'add_pantry') {
-      const name = String(d.name || '').trim();
-      if (!name) throw new Error('没写食材名');
-      await api('POST', '/api/pantry', {
-        householdId: S.householdId,
-        name,
-        category: String(d.category || '其他').trim().slice(0, 20),
-        quantity: Number(d.quantity) || 1,
-        unit: String(d.unit || '份').trim().slice(0, 10),
-        expireAt: d.expireAt ? String(d.expireAt).slice(0, 10) : '',
-        note: String(d.note || '').trim(),
-      });
-      a.done = `已入库：${name}`;
-      toast(`🧊 已入库：${name}`);
-    } else {
-      throw new Error('不认识这个操作');
-    }
-    a.state = 'done';
-    await loadState(true);
-    render();
-  } catch (err) {
-    a.state = 'error';
-    a.done = (err && err.message) || '没能执行';
-    toast('没执行成功：' + a.done);
-  }
-  redrawChat();
-}
-
-/* ---------- 渲染 ---------- */
-
-/** 一张待确认的操作卡 */
-function actionCardHtml(a, ti, ai) {
-  const meta = ACTION_META[a.type] || { icon: '⚙️', label: '操作' };
-  let body = '';
-  if (a.state === 'pending' || a.state === 'busy') {
-    const main = meta.icon === '📖' ? 'btn' : 'btn soft';
-    body =
-      `<div class="act-card-lines">${actionLines(a).map((l) => `<div>${esc(l)}</div>`).join('')}</div>` +
-      `<div class="act-card-btns">` +
-      `<button class="${main} sm" data-act="chat-run" data-t="${ti}" data-a="${ai}" ${a.state === 'busy' ? 'disabled' : ''}>` +
-      `${a.state === 'busy' ? '执行中…' : esc(meta.icon + ' 确认' + meta.verb)}</button>` +
-      `<button class="btn ghost sm" data-act="chat-dismiss" data-t="${ti}" data-a="${ai}">算了</button>` +
-      `</div>`;
-  } else {
-    const cls = a.state === 'done' ? 'ok' : 'bad';
-    body =
-      `<div class="act-card-result ${cls}">${a.state === 'done' ? '✅' : '⚠️'} ${esc(a.done || '')}</div>` +
-      `<div class="act-card-btns">` +
-      (a.state === 'done' && a.dishId
-        ? `<button class="btn ghost sm" data-act="chat-view" data-d="${esc(a.dishId)}">去看看</button>`
-        : '') +
-      `<button class="btn ghost sm" data-act="chat-dismiss" data-t="${ti}" data-a="${ai}">知道了</button>` +
-      `</div>`;
-  }
-  return `<div class="act-card" data-state="${a.state}">
-    <div class="act-card-head">${esc(meta.icon)} <b>${esc(meta.label)}</b></div>
-    <div class="act-card-title">${esc(actionTitle(a))}</div>
-    ${body}
-  </div>`;
-}
-
-function redrawChat() {
-  const dock = $('#chatDock');
-  const panel = $('#chatPanel');
-  const pillTxt = $('#chatPillTxt');
-  const dot = $('#chatDot');
-  if (!dock) return;
-
-  dock.hidden = !aiReady();
-  if (!aiReady()) return;
-
-  const open = !!S.chatOpen;
-  if (panel) panel.hidden = !open;
-  // 展开时 pill 就没用了（面板自带标题栏），留着反而挡住上面的内容
-  const pill = document.querySelector('.chat-pill');
-  if (pill) pill.hidden = open;
-
-  // 收起状态下那一条 pill：没话就说「问问 AI」，有话就把最后一句露个脸
-  if (pillTxt) {
-    const last = S.chatTurns[S.chatTurns.length - 1];
-    pillTxt.textContent = open
-      ? '问问 AI'
-      : last
-      ? (last.role === 'user' ? '你：' : '') + String(last.text || '').replace(/\s+/g, ' ').slice(0, 18)
-      : '问问 AI';
-  }
-  if (dot) dot.hidden = !S.chatDot;
-
-  const box = $('#chatTurns');
-  if (box) {
-    box.innerHTML = S.chatTurns
-      .map((t, ti) => {
-        const bubble =
-          `<div class="chat-msg ${t.role}">${
-            t.role === 'user' ? esc(t.text) : esc(t.text).replace(/\n/g, '<br />')
-          }</div>`;
-        const acts =
-          t.actions && t.actions.length
-            ? `<div class="chat-acts">${t.actions.map((a, ai) => actionCardHtml(a, ti, ai)).join('')}</div>`
-            : '';
-        return bubble + acts;
-      })
-      .join('');
-    if (chatSending) box.insertAdjacentHTML('beforeend', '<div class="chat-msg assistant typing">正在想…</div>');
-    box.scrollTop = box.scrollHeight;
-  }
-
-  const chips = $('#chatChips');
-  if (chips) {
-    chips.innerHTML = chatChips()
-      .map(([label, act]) =>
-        act
-          ? `<button class="chip" data-act="${esc(act)}">${esc(label)}</button>`
-          : `<button class="chip" data-act="chat-chip" data-q="${esc(label)}">${esc(label)}</button>`
-      )
-      .join('');
-  }
-
-  const ctx = $('#chatCtx');
-  if (ctx) {
-    const h = currentHousehold();
-    ctx.textContent = [VIEW_LABEL[S.view] || '', h ? h.name : ''].filter(Boolean).join(' · ');
-  }
-  const send = $('#chatSendBtn');
-  if (send) send.disabled = chatSending;
-}
-
-/* ---------- 发消息 ---------- */
-
-/** 发一条。上下文每次重算 —— 用户可能在别的页面待了一会儿了 */
-async function sendChat(text) {
-  const q = String(text || '').trim();
-  if (!q) return;
-  if (chatSending) return;
-  chatSending = true;
-  const inp = $('#chatInput');
-  if (inp) inp.value = '';
-  S.chatTurns.push({ role: 'user', text: q });
-  redrawChat();
-
-  const prompt = chatContext() + '\n\n【用户问】' + q;
-  const history = S.chatTurns
-    .slice(0, -1)
-    .map((t) => ({ role: t.role, text: t.text }));
-
-  try {
-    const r = await api('POST', '/api/ai/chat', {
-      task: 'assistant-chat',
-      prompt,
-      history,
-    });
-    if (!r || r.ok === false) {
-      S.chatTurns.push({
-        role: 'assistant',
-        text: '（' + ((r && r.error) || '这次没答上来') + '）',
-        actions: [],
-      });
-    } else {
-      // 服务端给的是 { reply, actions }；万一是纯文本（老服务端或降级）也接得住
-      const res = r.result;
-      const reply = typeof res === 'string' ? res : String((res && res.reply) || '').trim();
-      const acts = typeof res === 'object' && res && Array.isArray(res.actions) ? res.actions : [];
-      S.chatTurns.push({
-        role: 'assistant',
-        text: reply || '（没说话）',
-        actions: acts
-          .filter((a) => a && typeof a.type === 'string' && ACTION_META[a.type])
-          .slice(0, 3)
-          .map((a) => ({ type: a.type, data: a.data || {}, state: 'pending' })),
-      });
-    }
-  } catch (err) {
-    S.chatTurns.push({ role: 'assistant', text: '（连不上：' + err.message + '）', actions: [] });
-  }
-  chatSending = false;
-  // 收着的时候别让用户干等：pill 上冒个红点，回来再看
-  S.chatDot = !S.chatOpen;
-  redrawChat();
-}
-
-let chatSending = false;
 
 /**
  * AI 干活时的忙碌遮罩。
@@ -925,6 +537,7 @@ async function loadState(silent) {
     const data = await api('GET', '/api/state');
     S.data = data;
     S.shoppingChecked = new Set(data.settings.shoppingChecked || []);
+    S.access = data.access && Array.isArray(data.access.requests) ? data.access.requests : [];
     // 没设口令 → 管理区本来就开着；设了 → 看本机有没有有效会话
     if (!data.settings.hasPin) S.authed = true;
     else if (!authToken()) S.authed = false;
@@ -1161,7 +774,7 @@ function visibleOrders() {
 
 /** 管理页「菜品管理」那一列的排序，渲染和多选必须用同一份 */
 function manageDishRows() {
-  return [...(S.data.dishes || [])].sort((a, b) =>
+  return [...scopeDishes()].sort((a, b) =>
     String(a.category).localeCompare(String(b.category), 'zh')
   );
 }
@@ -1222,7 +835,7 @@ function PICK_LABEL_OF(key, id) {
       : key === 'plan'
       ? planItems(planWeek())
       : key === 'dishes'
-      ? S.data.dishes || []
+      ? scopeDishes()
       : key === 'notes'
       ? allNotes()
       : [];
@@ -1291,7 +904,7 @@ function matchKeyword(dish, kw) {
 }
 
 function visibleDishes() {
-  return S.data.dishes.filter((d) => {
+  return scopeDishes().filter((d) => {
     const inCat = S.category === '全部' || d.category === S.category;
     return inCat && matchKeyword(d, S.keyword);
   });
@@ -1420,6 +1033,7 @@ function dishCard(d) {
       ${img}
       ${d.isFavorite ? `<span class="card-fav">⭐</span>` : ''}
       ${d.category ? `<span class="card-badge">${esc(d.category)}</span>` : ''}
+      ${isPrivate(d) ? '<span class="card-own" title="只有本家看得见">🔒</span>' : ''}
     </div>
     <div class="card-body">
       <div class="card-title">${esc(d.name)}</div>
@@ -1449,11 +1063,12 @@ function viewMenu() {
       <span class="plan-entry-go">›</span>
     </div>`;
 
-  const chips = [{ name: '全部', count: S.data.dishes.length }]
+  const all = scopeDishes();
+  const chips = [{ name: '全部', count: all.length }]
     .concat(
       cats.map((c) => ({
         name: c.name,
-        count: S.data.dishes.filter((d) => d.category === c.name).length,
+        count: all.filter((d) => d.category === c.name).length,
       }))
     )
     .map(
@@ -1487,7 +1102,7 @@ function viewMenu() {
         : ''
     }
     ${body}
-    <button class="fab" data-act="new-dish">＋ 记一道菜</button>`;
+    <button class="fab" data-act="new-dish">${isAdmin() ? '＋ 记一道菜' : '＋ 记我家私菜'}</button>`;
 }
 
 /* ---------------- 菜品详情 ---------------- */
@@ -1648,8 +1263,8 @@ async function copyText(text) {
 function openDish(id) {
   const d = dishById(id);
   if (!d) return;
-  // 记住手上这道菜：顶栏的 AI 助手要靠它知道你在问哪道菜
-  S.chatOpenDish = id;
+  // 别人家的私菜不该被打开（虽然 UI 上点不到，这里再挡一道，防止 id 被手工拼出来）
+  if (!canSee(d.householdId)) return toast('这道菜是别人家的私菜');
 
   const cover = d.images && d.images[0];
   const hero = cover
@@ -1658,6 +1273,7 @@ function openDish(id) {
 
   const meta = [];
   if (d.category) meta.push(`<span class="tag">${esc(d.category)}</span>`);
+  if (isPrivate(d)) meta.push('<span class="tag own">🔒 只有本家看得见</span>');
   if (d.servings) meta.push(`<span class="tag">👥 ${esc(d.servings)}</span>`);
   if (d.duration) meta.push(`<span class="tag">⏱ ${esc(d.duration)} 分钟</span>`);
   if (d.difficulty) meta.push(`<span class="tag">${esc(d.difficulty)}</span>`);
@@ -1733,7 +1349,11 @@ function openDish(id) {
       ${notesHtml}
       ${shots}`,
     foot: `
-      <button class="btn ghost" data-act="edit-dish" data-id="${esc(d.id)}">编辑</button>
+      ${
+        canEdit(d)
+          ? `<button class="btn ghost" data-act="edit-dish" data-id="${esc(d.id)}">编辑</button>`
+          : adoptBtn(d, 'btn ghost')
+      }
       <button class="btn soft" data-act="toggle-plan-dish" data-id="${esc(d.id)}" data-week="${esc(planWeek())}">
         ${inPlan ? '✓ 已在计划里' : '＋ 加入计划'}
       </button>
@@ -2142,7 +1762,7 @@ function openOrderForm(dish) {
   // 弹层里的多选：点一下勾上，提交时一次下好几道
   S.orderPickSel = new Set(d ? [d.id] : []);
 
-  const picker = S.data.dishes
+  const picker = scopeDishes()
     .map((x) => {
       const on = d && x.id === d.id;
       const t = x.images && x.images[0] ? `<img src="${esc(x.images[0])}" alt="" />` : dishEmoji(x.name);
@@ -2354,7 +1974,7 @@ function openPlanPicker(weekOf) {
   S.planPickWeek = week;
   S.planPickSel = new Set();
 
-  const picker = S.data.dishes
+  const picker = scopeDishes()
     .map((x) => {
       const on = planned.has(x.name);
       const t = x.images && x.images[0] ? `<img src="${esc(x.images[0])}" alt="" />` : dishEmoji(x.name);
@@ -2879,19 +2499,117 @@ function backupsHtml() {
     </div>`;
 }
 
+/**
+ * 家里人（没有管理员口令）看到的「管理」页。
+ *
+ * 规则很简单：**自己家的菜随便改，公共菜谱只读**。
+ * 想在公共菜谱上动土，按「👇 收进我家」抄一份到自己名下再改 ——
+ * 管理员维护的那份原样保留，谁也不会被别人的手滑改坏。
+ */
+function viewManageMember() {
+  const mine = manageDishRows().filter((x) => canEdit(x));
+  const shared = manageDishRows().filter((x) => !canEdit(x));
+  const house = currentHousehold();
+
+  const row = (x) => {
+    const ok = canEdit(x);
+    return `<div class="list-row">
+      <span class="icon-mini act">${x.images && x.images[0] ? '🖼️' : dishEmoji(x.name)}</span>
+      <span class="list-row-main">
+        <span class="list-row-title">${esc(x.name)}${ownTag(x)}</span>
+        <span class="list-row-sub">${esc(x.category)} · ${(x.methods || []).length} 种做法 · ${(x.seasonings || []).length} 样调料</span>
+      </span>
+      ${
+        ok
+          ? `<button class="icon-mini" data-act="edit-dish" data-id="${esc(x.id)}" title="编辑">✏️</button>
+             <button class="icon-mini" data-act="del-dish" data-id="${esc(x.id)}" title="删除">🗑️</button>`
+          : adoptBtn(x, 'icon-mini')
+      }
+    </div>`;
+  };
+
+  const myCats = sortedCategories().filter((c) => canEdit(c));
+  const publicCats = sortedCategories().filter((c) => !canEdit(c));
+
+  return `
+    <div class="admin-warn" style="background:#f1f6f2;border-color:#cfe3d4">
+      <div class="admin-warn-title" style="color:#2f6b45">🏠 ${esc(house ? house.name : '')}的厨房</div>
+      <p class="admin-warn-text" style="color:var(--text-mid)">
+        这里是你能改的地方：<b>只有本家的菜</b>可以随便增删改。
+        公共菜谱由管理员维护，改不动 —— 但你可以按「👇 收进我家」抄一份，改成自家的做法。
+      </p>
+    </div>
+
+    <div class="section-head">
+      <h2 class="section-title">我家私菜</h2>
+      <button class="btn soft sm" style="margin-left:auto" data-act="new-dish">＋ 记一道</button>
+    </div>
+    ${
+      mine.length
+        ? mine.map(row).join('')
+        : '<div class="empty" style="padding:28px"><p class="empty-text">还没记过自家私菜。点上面「＋ 记一道」，或者从下面的公共菜谱抄一份</p></div>'
+    }
+
+    <div class="section-head">
+      <h2 class="section-title">公共菜谱<span class="section-sub" style="margin-left:8px">只读</span></h2>
+    </div>
+    ${shared.length ? shared.map(row).join('') : '<div class="empty" style="padding:24px"><p class="empty-text">还没有公共菜谱</p></div>'}
+
+    <div class="section-head">
+      <h2 class="section-title">我的分类</h2>
+      <button class="btn soft sm" style="margin-left:auto" data-act="new-cat">＋ 新增</button>
+    </div>
+    ${
+      myCats.length
+        ? myCats
+            .map(
+              (c) => `<div class="list-row">
+                <span class="list-row-main">
+                  <span class="list-row-title">${esc(c.name)}${ownTag(c)}</span>
+                  <span class="list-row-sub">${scopeDishes().filter((x) => x.category === c.name).length} 道菜 · 只有本家看得见</span>
+                </span>
+                <button class="icon-mini" data-act="edit-cat" data-id="${esc(c.id)}">✏️</button>
+                <button class="icon-mini" data-act="del-cat" data-id="${esc(c.id)}">🗑️</button>
+              </div>`
+            )
+            .join('')
+        : '<div class="empty" style="padding:24px"><p class="empty-text">还没有私有分类</p></div>'
+    }
+
+    ${
+      publicCats.length
+        ? `<div class="section-head"><h2 class="section-title">公共分类<span class="section-sub" style="margin-left:8px">只读</span></h2></div>
+           ${publicCats
+             .map(
+               (c) => `<div class="list-row">
+                 <span class="list-row-main">
+                   <span class="list-row-title">${esc(c.name)}</span>
+                   <span class="list-row-sub">全体共享 · 管理员维护</span>
+                 </span>
+               </div>`
+             )
+             .join('')}`
+        : ''
+    }
+
+    <div class="section-head"><h2 class="section-title">关于</h2></div>
+    ${versionHtml()}
+
+    <div class="section-head"><h2 class="section-title">家庭设置</h2></div>
+    <div class="list-row"><span class="icon-mini">🔐</span><span class="list-row-main">
+      <span class="list-row-title">管理口令</span>
+      <span class="list-row-sub">已开启 · 你现在没解锁。点右上角锁图标可用口令进入管理员模式</span>
+    </span><button class="icon-mini" data-act="unlock">🔓</button></div>`;
+}
+
 function viewManage() {
   // 前端拿不到口令明文了，改成看 hasPin 标记 + 本机有没有会话 token
-  if (S.data.settings.hasPin && !S.authed) {
-    return `<div class="empty">
-      <span class="empty-emoji">🔒</span>
-      <p class="empty-title">管理区已加锁</p>
-      <p class="empty-text">需要家庭口令才能修改菜单</p>
-      <button class="btn" style="margin-top:16px" data-act="unlock">输入口令</button>
-    </div>`;
-  }
+  if (S.data.settings.hasPin && !S.authed) return viewManageMember();
 
   const s = S.data.settings;
-  const d = S.data.dishes;
+  const admin = isAdmin();
+  const d = scopeDishes();
+  const nPrivate = d.filter((x) => isPrivate(x)).length;
 
   const dishRows = manageDishRows()
     .map((x) => {
@@ -2903,7 +2621,7 @@ function viewManage() {
           'list-row',
           `<span class="icon-mini act">${x.images && x.images[0] ? '🖼️' : dishEmoji(x.name)}</span>
           <span class="list-row-main">
-            <span class="list-row-title">${esc(x.name)}</span>
+            <span class="list-row-title">${esc(x.name)}${ownTag(x)}</span>
             <span class="list-row-sub">${esc(x.category)} · ${(x.methods || []).length} 种做法 · ${(x.seasonings || []).length} 样调料</span>
           </span>`
         );
@@ -2911,12 +2629,16 @@ function viewManage() {
       return `<div class="list-row">
         <span class="icon-mini act">${x.images && x.images[0] ? '🖼️' : dishEmoji(x.name)}</span>
         <span class="list-row-main">
-          <span class="list-row-title">${esc(x.name)}</span>
+          <span class="list-row-title">${esc(x.name)}${ownTag(x)}</span>
           <span class="list-row-sub">${esc(x.category)} · ${(x.methods || []).length} 种做法 · ${(x.seasonings || []).length} 样调料</span>
         </span>
-        <button class="icon-mini" data-act="edit-dish" data-id="${esc(x.id)}" title="编辑">✏️</button>
-        <button class="icon-mini" data-act="dup-dish" data-id="${esc(x.id)}" title="复制">⧉</button>
-        <button class="icon-mini" data-act="del-dish" data-id="${esc(x.id)}" title="删除">🗑️</button>
+        ${
+          canEdit(x)
+            ? `<button class="icon-mini" data-act="edit-dish" data-id="${esc(x.id)}" title="编辑">✏️</button>
+               <button class="icon-mini" data-act="dup-dish" data-id="${esc(x.id)}" title="复制">⧉</button>
+               <button class="icon-mini" data-act="del-dish" data-id="${esc(x.id)}" title="删除">🗑️</button>`
+            : adoptBtn(x, 'icon-mini')
+        }
       </div>`;
     })
     .join('');
@@ -2925,14 +2647,40 @@ function viewManage() {
     .map(
       (c) => `<div class="list-row">
         <span class="list-row-main">
-          <span class="list-row-title">${esc(c.name)}</span>
-          <span class="list-row-sub">${d.filter((x) => x.category === c.name).length} 道菜</span>
+          <span class="list-row-title">${esc(c.name)}${ownTag(c)}</span>
+          <span class="list-row-sub">${d.filter((x) => x.category === c.name).length} 道菜${isPrivate(c) ? ' · 只有本家看得见' : ' · 全体共享'}</span>
         </span>
-        <button class="icon-mini" data-act="edit-cat" data-id="${esc(c.id)}">✏️</button>
-        <button class="icon-mini" data-act="del-cat" data-id="${esc(c.id)}">🗑️</button>
+        ${
+          canEdit(c)
+            ? `<button class="icon-mini" data-act="edit-cat" data-id="${esc(c.id)}">✏️</button>
+               <button class="icon-mini" data-act="del-cat" data-id="${esc(c.id)}">🗑️</button>`
+            : '<span class="pill-own" title="公共分类由管理员维护">🔒 管理员</span>'
+        }
       </div>`
     )
     .join('');
+
+  // 等管理员点头的加入申请
+  const waiting = (S.access || []).filter((r) => r.status === 'pending');
+  const joinRows = waiting.length
+    ? `<div class="join-box">
+         <div class="join-title">📨 ${waiting.length} 个加入申请</div>
+         ${waiting
+           .map((r) => {
+             const h = households().find((x) => x.id === r.householdId);
+             return `<div class="list-row">
+               <span class="member-avatar">🙋</span>
+               <span class="list-row-main">
+                 <span class="list-row-title">${esc(r.name)} 想加入 ${esc(h ? h.name : '（已删除）')}</span>
+                 <span class="list-row-sub">${esc(relTime(r.at))}${r.note ? ' · ' + esc(r.note) : ''}</span>
+               </span>
+               <button class="btn sm" data-act="join-decide" data-id="${esc(r.id)}" data-ok="1">批准</button>
+               <button class="icon-mini" data-act="join-decide" data-id="${esc(r.id)}" data-ok="0" title="拒绝">✕</button>
+             </div>`;
+           })
+           .join('')}
+       </div>`
+    : '';
 
   const houseRows = households()
     .map(
@@ -2947,23 +2695,40 @@ function viewManage() {
             ? ''
             : `<button class="icon-mini act" data-act="pick-house" data-id="${esc(h.id)}" title="切到这个家庭">→</button>`
         }
-        <button class="icon-mini" data-act="edit-household" data-id="${esc(h.id)}" title="重命名">✏️</button>
-        <button class="icon-mini" data-act="del-household" data-id="${esc(h.id)}" title="删除">🗑️</button>
+        ${
+          admin
+            ? `<button class="icon-mini" data-act="edit-household" data-id="${esc(h.id)}" title="重命名">✏️</button>
+               <button class="icon-mini" data-act="del-household" data-id="${esc(h.id)}" title="删除">🗑️</button>`
+            : ''
+        }
       </div>`
     )
     .join('');
 
   return `
+    ${
+      s.hasPin
+        ? ''
+        : `<div class="admin-warn">
+             <div class="admin-warn-title">⚠️ 还没设管理口令</div>
+             <p class="admin-warn-text">
+               现在<b>局域网里任何人都能改菜谱、加分类、删菜</b>。设一个口令之后，
+               就只有知道口令的那几位家人能编辑菜单 —— 其余人照样能浏览菜谱、点餐、留言、管库存。
+             </p>
+             <button class="btn sm" data-act="edit-settings">去设口令</button>
+           </div>`
+    }
     <div class="section-head">
       <h2 class="section-title">家庭</h2>
       <button class="btn soft sm" style="margin-left:auto" data-act="new-household">＋ 添加家庭</button>
     </div>
-    <p class="section-sub" style="margin:-6px 0 12px">菜谱所有家庭共享；点餐和库存各记各的。</p>
+    <p class="section-sub" style="margin:-6px 0 12px">菜单分共享菜和本家私菜：共享的全体家庭都看得见，私的只有本家看得见；点餐和库存一直各记各的。</p>
+    ${joinRows}
     ${houseRows}
 
     <div class="stat-row">
       <div class="stat"><div class="stat-num">${d.length}</div><div class="stat-label">道菜</div></div>
-      <div class="stat"><div class="stat-num">${S.data.categories.length}</div><div class="stat-label">个分类</div></div>
+      <div class="stat"><div class="stat-num">${sortedCategories().length}</div><div class="stat-label">个分类</div></div>
       <div class="stat"><div class="stat-num">${pendingOrders().length}</div><div class="stat-label">道待做</div></div>
     </div>
 
@@ -2972,7 +2737,7 @@ function viewManage() {
       ${
         picking('dishes')
           ? ''
-          : `<button class="btn soft sm" style="margin-left:auto" data-act="new-dish">＋ 新增</button>`
+          : `<button class="btn soft sm" style="margin-left:auto" data-act="new-dish">＋ ${admin ? '新增' : '记我家私菜'}</button>`
       }
     </div>
     ${
@@ -2988,12 +2753,19 @@ function viewManage() {
           )
         : d.length
         ? `<div class="list-toolbar">
-             <span class="section-sub">${d.length} 道菜</span>
+             <span class="section-sub">${d.length} 道菜${nPrivate ? `（其中 ${nPrivate} 道仅本家可见）` : ''}</span>
              ${pickOnBtn('dishes', '☑ 批量操作')}
            </div>`
         : ''
     }
     ${dishRows || '<div class="empty"><p class="empty-text">还没有菜</p></div>'}
+    ${
+      admin || !nPrivate
+        ? ''
+        : `<p class="section-sub" style="margin-top:12px">
+             上面标着 🔒 的是公共菜谱，由管理员维护。看得见改不了 —— 想要自己的版本，按「👇 收进我家」抄一份再改。
+           </p>`
+    }
 
     <div class="section-head">
       <h2 class="section-title">家庭成员<span class="section-sub" style="margin-left:8px">${esc(currentHousehold() ? currentHousehold().name : '')}</span></h2>
@@ -3023,9 +2795,9 @@ function viewManage() {
 
     <div class="section-head">
       <h2 class="section-title">分类管理</h2>
-      <button class="btn soft sm" style="margin-left:auto" data-act="new-cat">＋ 新增</button>
+      <button class="btn soft sm" style="margin-left:auto" data-act="new-cat">＋ ${admin ? '新增' : '新增私有分类'}</button>
     </div>
-    ${catRows}
+    ${catRows || '<div class="empty" style="padding:24px"><p class="empty-text">还没有分类</p></div>'}
 
     <div class="section-head"><h2 class="section-title">家庭设置</h2></div>
     <div class="list-row"><span class="icon-mini">🍽️</span><span class="list-row-main">
@@ -3034,13 +2806,15 @@ function viewManage() {
     </span><button class="icon-mini" data-act="edit-settings">✏️</button></div>
     <div class="list-row"><span class="icon-mini">🔐</span><span class="list-row-main">
       <span class="list-row-title">管理口令</span>
-      <span class="list-row-sub">${s.hasPin ? '已开启' : '未开启'}</span>
+      <span class="list-row-sub">${
+        s.hasPin ? '已开启 · 只有知道口令的人能改菜单' : '未开启 · 现在谁都能改菜单'
+      }</span>
     </span><button class="icon-mini" data-act="edit-settings">✏️</button></div>
     <div class="list-row"><span class="icon-mini">🤖</span><span class="list-row-main">
       <span class="list-row-title">AI 助手</span>
       <span class="list-row-sub">${
         aiReady()
-          ? `已就绪 · ${esc(aiInfo.model)} · 拍图识菜谱 / 规范化 / 厨房调度`
+          ? `已就绪 · ${esc(aiInfo.model)} · 只做菜谱录入（拍照 / 粘贴文字）和厨房调度建议`
           : '未配置（data/ai.json 里填上 API Key 就会出现在菜谱编辑和点餐页）'
       }</span>
     </span></div>
@@ -3108,12 +2882,18 @@ function openHouseholdEditor(house) {
    ========================================================= */
 
 function openDishEditor(dish) {
+  const cats = sortedCategories();
+  // 家里人记的菜一律是自家私菜：往公共菜谱里加东西是管理员的活儿
+  const admin = isAdmin();
   const d =
     dish ||
     {
       id: null,
       name: '',
-      category: sortedCategories()[0] ? sortedCategories()[0].name : '家常菜',
+      category: cats[0] ? cats[0].name : '家常菜',
+      // 管理员新菜默认共享 —— 升级前的行为就是全体家庭共享；
+      // 家里人新菜只能是私菜，这是权限规则决定的
+      householdId: admin ? null : S.householdId || null,
       description: '',
       images: [],
       servings: '',
@@ -3143,12 +2923,20 @@ function openDishEditor(dish) {
     },
   };
 
-  const catOptions = sortedCategories()
+  const catList = cats.slice();
+  // 分类可能已经不存在了（老数据、或手工改过 json）。
+  // 少了这一项的话 select 会静默显示第一项，用户随便改个别的字段保存，这道菜的分类就被偷偷改掉了
+  if (d.category && !catList.some((c) => c.name === d.category)) {
+    catList.push({ name: d.category, householdId: null, orphan: true });
+  }
+  const catOptions = catList
     .map(
       (c) =>
-        `<option value="${esc(c.name)}" ${d.category === c.name ? 'selected' : ''}>${esc(c.name)}</option>`
+        `<option value="${esc(c.name)}" ${d.category === c.name ? 'selected' : ''}>${esc(c.name)}${c.orphan ? '（分类已不存在）' : isPrivate(c) ? '（仅本家）' : ''}</option>`
     )
     .join('');
+
+  const houseName = (currentHousehold() || {}).name || '当前家庭';
 
   openSheet({
     title: dish ? '编辑菜品' : '记一道菜',
@@ -3160,6 +2948,26 @@ function openDishEditor(dish) {
       <div class="field">
         <label class="field-label">分类</label>
         <select class="select" id="fCat">${catOptions}<option value="其他">其他</option></select>
+      </div>
+      <div class="field">
+        <label class="field-label">谁看得见<span class="field-hint">${
+          admin
+            ? '共享的菜所有家庭都能翻到；私的只有「' + esc(houseName) + '」看得见'
+            : '你记的菜只有本家看得见。想放进公共菜谱，得找管理员'
+        }</span></label>
+        ${
+          admin
+            ? `<select class="select" id="fScope">
+                 <option value="shared" ${isPrivate(d) ? '' : 'selected'}>🌏 共享 · 所有家庭</option>
+                 <option value="own" ${isPrivate(d) ? 'selected' : ''} ${S.householdId ? '' : 'disabled'}>🔒 仅本家 · ${esc(houseName)}</option>
+               </select>
+               ${
+                 cats.some((c) => isPrivate(c))
+                   ? `<p class="field-hint" style="margin-top:6px">共享的菜只能放进共享分类。要放进标了「仅本家」的分类，得把上面「谁看得见」也改成仅本家。</p>`
+                   : ''
+               }`
+            : `<div class="scope-fixed">🔒 仅本家 · ${esc(houseName)}</div>`
+        }
       </div>
       <div class="field">
         <label class="field-label">一句话介绍<span class="field-hint">家人一看就知道是什么</span></label>
@@ -3184,12 +2992,21 @@ function openDishEditor(dish) {
         </div>
         ${
           aiReady()
-            ? `<label class="btn soft sm ai-btn" style="margin-top:10px">
-                 📷 拍张照，AI 帮我写这道菜
-                 <input type="file" id="fAiImgFile" accept="image/*" class="ai-file" />
-               </label>
+            ? `<div style="display:flex;gap:8px;margin-top:10px">
+                 <label class="btn soft sm ai-btn" style="flex:1">
+                   📷 拍张照，AI 帮我写这道菜
+                   <input type="file" id="fAiImgFile" accept="image/*" class="ai-file" />
+                 </label>
+                 <button class="btn soft sm ai-btn" style="flex:1" data-act="ai-text-open">📋 粘贴文字，AI 帮我写</button>
+               </div>
+               <div id="aiPasteBox" hidden style="margin-top:10px">
+                 <textarea class="textarea" id="fAiText" rows="8"
+                   placeholder="把菜单/做法整段贴进来，纸质菜单、外卖页面、群里转发的做法都行"></textarea>
+                 <button class="btn sm block" style="margin-top:8px" data-act="ai-from-text">让 AI 整理成菜谱</button>
+               </div>
                <p class="field-hint" style="margin-top:6px">
-                 AI 认完会把菜名、调料、步骤填进表单，<b>由你确认后再保存</b>，它认错了可以直接改。
+                 AI 只负责把照片或文字<b>填进这个表单</b>，<b>不会自己加进菜单</b>；
+                 它不知道你家已经有哪些菜，填完由你确认、保存。
                </p>`
             : ''
         }
@@ -3294,6 +3111,28 @@ async function recognizeDishFromImage(file) {
   toast('AI 填好了，认错了直接改，然后点保存', 3200);
 }
 
+/**
+ * 把一段文字（纸质菜单、外卖页面、群里转发的做法）变成菜谱草稿。
+ *
+ * 和拍照那条一个规矩：**只填表单、不入库**。AI 不知道这个家里已经有哪些菜，
+ * 也不会替用户决定这道菜该不该进菜单，填完照样由人逐项看过再保存。
+ */
+async function recognizeDishFromText() {
+  const box = $('#fAiText');
+  const text = (box ? box.value : '').trim();
+  if (!text) return toast('先把菜单文字贴进来');
+  if (text.length < 4) return toast('这段太短了，多贴一点');
+  aiBusy('AI 在整理这段文字', '大概 5-15 秒');
+  const r = await askAI('recipe-from-text', text);
+  aiBusyDone();
+  if (!r) return;
+  applyAIResult(r);
+  if (box) box.value = '';
+  const wrap = $('#aiPasteBox');
+  if (wrap) wrap.hidden = true;
+  toast('AI 填好了，对不上原文的地方直接改，然后点保存', 3200);
+}
+
 /** 把 AI 返回的菜谱灌进当前编辑表单 */
 function applyAIResult(r) {
   const g = (id) => $('#' + id);
@@ -3350,6 +3189,10 @@ function collectDish() {
   const d = S.draft.dish;
   d.name = g('fName').value.trim();
   d.category = g('fCat').value;
+  // 非管理员没有「谁看得见」这个选择权：写死成本家私菜
+  const scopeSel = g('fScope');
+  d.householdId =
+    scopeSel && scopeSel.value === 'own' && S.householdId ? S.householdId : isAdmin() ? null : S.householdId || null;
   d.description = g('fDesc').value.trim();
   d.servings = g('fServ').value.trim();
   d.duration = Number(g('fDur').value) || 0;
@@ -3469,13 +3312,34 @@ function compressImage(file, maxSize = 1400, quality = 0.82) {
    ========================================================= */
 
 function openCatEditor(cat) {
+  const houseName = (currentHousehold() || {}).name || '当前家庭';
+  const admin = isAdmin();
   openSheet({
     title: cat ? '重命名分类' : '新增分类',
     body: `<div class="field">
       <label class="field-label">分类名称</label>
       <input class="input" id="catName" value="${cat ? esc(cat.name) : ''}" placeholder="例如：夜宵" />
     </div>
-    ${cat ? '' : '<p class="section-sub">新分类会自动出现在菜单顶部的筛选条上。</p>'}`,
+    <div class="field">
+      <label class="field-label">谁看得见<span class="field-hint">${
+        admin
+          ? '私有分类只有本家看得见，别人家连这个名字都看不到'
+          : '你建的分类只有本家看得见。公共分类由管理员维护'
+      }</span></label>
+      ${
+        admin
+          ? `<select class="select" id="catScope">
+               <option value="shared" ${isPrivate(cat) ? '' : 'selected'}>🌏 共享 · 所有家庭</option>
+               <option value="own" ${isPrivate(cat) ? 'selected' : ''} ${S.householdId ? '' : 'disabled'}>🔒 仅本家 · ${esc(houseName)}</option>
+             </select>`
+          : `<div class="scope-fixed">🔒 仅本家 · ${esc(houseName)}</div>`
+      }
+    </div>
+    ${
+      cat
+        ? ''
+        : '<p class="section-sub">新分类会自动出现在菜单顶部的筛选条上。同一个名字只能有一个。</p>'
+    }`,
     foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
            <button class="btn" data-act="save-cat" data-id="${cat ? esc(cat.id) : ''}">保存</button>`,
   });
@@ -3493,8 +3357,8 @@ function openSettings() {
         <input class="input" id="setWelcome" value="${esc(s.welcome || '')}" /></div>
       <div class="field"><label class="field-label">管理口令<span class="field-hint">${
         s.hasPin
-          ? '已开启。填新口令即可更换；不知道旧口令的话找回来在 data/settings.json 里删掉 adminPin'
-          : '留空表示不锁；开启后只有知道口令的人能改菜谱和家庭'
+          ? '已开启。知道口令的那几位家人就是管理员，能增删改菜谱和分类；其他人照样能浏览、点餐、留言、管库存。换口令填新的就行；不知道旧口令了就去 data/settings.json 里把 adminPin 删掉'
+          : '没设 = 局域网里任何人都能改菜谱。建议设一个，让菜单的编辑只落在几个管理员手上'
       }</span></label>
         <input class="input" id="setPin" type="password" placeholder="${
           s.hasPin ? '已设置口令，留空表示不修改' : '例如 1234'
@@ -3614,9 +3478,6 @@ function render() {
   else if (S.view === 'board') view.innerHTML = viewBoard();
   else if (S.view === 'pantry') view.innerHTML = viewPantry();
   else view.innerHTML = viewManage();
-
-  // 悬浮窗面板头上那行「当前页面 · 当前家庭」跟着一起更新
-  redrawChat();
 }
 
 /** 顶栏上的「当前家庭」按钮 */
@@ -3666,12 +3527,26 @@ function householdBadge() {
   return { pending, urgent };
 }
 
-/** 家庭选择弹层：一眼看到每家的待做和库存状况 */
+/**
+ * 家庭选择弹层。
+ *
+ * 管理员想切哪切哪；家里人只能待在自己是成员的那几家，
+ * 想进别人家得发申请 —— 申请由管理员批，批了才真的是成员。
+ */
 function openHouseholdPicker() {
   const list = households();
+  const admin = isAdmin();
+  const me = meName();
+  const myAccess = (h) => admin || (h.members || []).some((m) => m.name === me);
+  const pendingFor = (h) => (S.access || []).filter((r) => r.householdId === h.id && r.status === 'pending' && r.name === me);
+
   const body = `
     <p class="section-sub" style="margin:-2px 0 14px">
-      菜谱所有家庭共享，点餐和库存各记各的。选一个切过去。
+      ${
+        admin
+          ? '菜谱分共享菜和本家私菜；点餐和库存各记各的。选一个切过去。'
+          : '共享的菜谱所有家庭都能翻；点餐和库存各记各的。想进别人家，发个申请等管理员点头。'
+      }
     </p>
     ${list
       .map((h) => {
@@ -3683,22 +3558,53 @@ function openHouseholdPicker() {
           return k === 'expired' || k === 'soon' || k === 'today';
         }).length;
         const bits = [`${h.members.length} 位家人`, `${pending} 道待做`, `${food.length} 样库存`];
+        const here = h.id === S.householdId;
+        const mine = myAccess(h);
+        const waiting = !mine && !here && pendingFor(h).length;
         return `<button class="house-pick" data-act="pick-house" data-id="${esc(h.id)}"
-          aria-pressed="${h.id === S.householdId}">
+          aria-pressed="${here}">
           <span class="house-pick-emoji">${esc(h.emoji)}</span>
           <span class="house-pick-main">
-            <span class="house-pick-name">${esc(h.name)}</span>
+            <span class="house-pick-name">${esc(h.name)}${
+              here ? '' : mine ? '' : waiting ? ' <span class="pill-now">等批准</span>' : ' <span class="pill-own">未加入</span>'
+            }</span>
             <span class="house-pick-sub">${esc(bits.join(' · '))}${urgent ? ` · ⚠ ${urgent} 样要处理` : ''}${h.note ? ` · ${esc(h.note)}` : ''}</span>
           </span>
-          ${h.id === S.householdId ? '<span class="house-pick-tag">✓</span>' : ''}
+          ${here ? '<span class="house-pick-tag">✓</span>' : waiting ? '<span class="house-pick-tag">…</span>' : ''}
         </button>`;
       })
       .join('')}`;
   openSheet({
     title: '切换家庭',
     body,
-    foot: `<button class="btn soft" data-act="new-household">＋ 添加家庭</button>
-           <button class="btn ghost" data-act="edit-settings">服务设置</button>`,
+    foot: admin
+      ? `<button class="btn soft" data-act="new-household">＋ 添加家庭</button>
+         <button class="btn ghost" data-act="edit-settings">服务设置</button>`
+      : '<button class="btn ghost" data-act="close-sheet">关闭</button>',
+  });
+}
+
+/** 申请加入某个家庭（非管理员点别人家时走这条） */
+function openJoinSheet(houseId) {
+  const h = households().find((x) => x.id === houseId);
+  if (!h) return;
+  openSheet({
+    title: `申请加入「${h.name}」`,
+    body: `
+      <div class="field">
+        <label class="field-label">你是谁<span class="field-hint">这个家里的人一眼就能认出你</span></label>
+        <input class="input" id="joinName" maxlength="20" placeholder="例如：姑姑" value="${esc(meName())}" />
+      </div>
+      <div class="field">
+        <label class="field-label">想说的话<span class="field-hint">选填</span></label>
+        <textarea class="textarea" id="joinNote" rows="3" maxlength="100" placeholder="例如：我来做饭的时候想看看你家的菜谱"></textarea>
+      </div>
+      <p class="section-sub">
+        申请会送到管理员那里，批准之后你就是这个家的成员了。在那之前，
+        你只能浏览共享菜谱 —— 别人家的私菜本来就看不见。
+      </p>`,
+    foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
+           <button class="btn" data-act="send-join" data-id="${esc(houseId)}">发出申请</button>`,
   });
 }
 
@@ -3760,7 +3666,7 @@ const ACTIONS = {
     openDish(el.dataset.id);
   },
   async random() {
-    const list = S.data.dishes;
+    const list = scopeDishes();
     if (!list.length) return toast('还没有菜可以抽哦');
     openDish(list[Math.floor(Math.random() * list.length)].id);
   },
@@ -3819,6 +3725,18 @@ const ACTIONS = {
     const d = dishById(el.dataset.id);
     if (d) openDishEditor(d);
   },
+  /** 展开「粘贴菜单文字」那块 */
+  'ai-text-open'() {
+    const box = $('#aiPasteBox');
+    if (box) box.hidden = false;
+    const ta = $('#fAiText');
+    if (ta && !('ontouchstart' in window)) ta.focus();
+  },
+  async 'ai-from-text'() {
+    if (!aiReady()) return toast('还没配置 AI');
+    if (aiBusyOn) return;
+    await recognizeDishFromText();
+  },
   /* 菜谱规范化：让 AI 把现有菜谱整理成规范格式，逐字段给建议 */
   async 'ai-normalize'() {
     if (!aiReady()) return toast('还没配置 AI');
@@ -3861,14 +3779,40 @@ const ACTIONS = {
   async 'dup-dish'(el) {
     const d = await api('POST', `/api/dishes/${el.dataset.id}/duplicate`, {});
     await loadState(true);
-    toast(`已复制「${d.name}」`);
+    // 复制只继承归属，不继承「共享」：复制我家私菜不该把它变成全体共享
+    toast(`已复制「${d.name}」${isPrivate(d) ? '，仍是仅本家可见' : ''}`);
     render();
+  },
+  /**
+   * 「收进我家」：普通人碰公共菜谱的唯一正当途径。
+   * 不是改它，是抄一份到自家名下 —— 管理员维护的那份原样保留。
+   */
+  async 'adopt-dish'(el) {
+    const src = dishById(el.dataset.id);
+    if (!src) return toast('这道菜已经不在菜单里了');
+    try {
+      const r = await api(
+        'POST',
+        `/api/my-dishes/${encodeURIComponent(src.id)}/adopt?householdId=${encodeURIComponent(S.householdId)}`,
+        {}
+      );
+      await loadState(true);
+      render();
+      closeSheet();
+      toast(`「${r.name}」已经收进你家了，改成你自己的做法吧`, 3200);
+      openDishEditor(r);
+    } catch (err) {
+      toast('收不进来：' + err.message);
+    }
   },
   async 'del-dish'(el) {
     const d = dishById(el.dataset.id);
     if (!d) return;
+    if (!canEdit(d)) return toast('这是公共菜谱，管理员才能删。想改成自己的版本，用「👇 收进我家」');
     if (!confirm(`确定删除「${d.name}」？\n相关的待做点餐也会一起删掉，此操作不可撤销。`)) return;
-    await api('DELETE', `/api/dishes/${el.dataset.id}`);
+    const q = `?householdId=${encodeURIComponent(S.householdId)}`;
+    if (isAdmin()) await api('DELETE', `/api/dishes/${el.dataset.id}`);
+    else await api('DELETE', `/api/my-dishes/${el.dataset.id}${q}`);
     await loadState(true);
     toast('已删除');
     render();
@@ -3919,15 +3863,23 @@ const ACTIONS = {
   async 'save-dish'() {
     const d = collectDish();
     if (!d.name) return toast('先给这道菜起个名字吧');
+    // 管理员走 /api/dishes（有口令保护），家里人走 /api/my-dishes（只能写自家私菜）
+    const mine = !isAdmin();
+    const q = `?householdId=${encodeURIComponent(S.householdId)}`;
     try {
       if (S.draft.isNew) {
-        await api('POST', '/api/dishes', d);
-        toast(`「${d.name}」已加入菜单`);
+        if (mine) await api('POST', `/api/my-dishes${q}`, d);
+        else await api('POST', '/api/dishes', d);
+        toast(mine ? `「${d.name}」记进你家了` : `「${d.name}」已加入菜单`);
         // 新菜已经有自己的 id 了，__new__ 草稿顺手清掉，
         // 否则下次「记一道菜」会捞出刚存进去的那份
         dishDrafts.delete('__new__');
       } else {
-        await api('PUT', `/api/dishes/${S.draft.id}`, d);
+        if (!canEdit(dishById(S.draft.id))) {
+          return toast('这道菜是公共菜谱，改不了。先「收进我家」再改');
+        }
+        if (mine) await api('PUT', `/api/my-dishes/${S.draft.id}${q}`, d);
+        else await api('PUT', `/api/dishes/${S.draft.id}`, d);
         toast('已保存');
         dishDrafts.delete(S.draft.id);
       }
@@ -4090,7 +4042,23 @@ const ACTIONS = {
     const name = $('#catName').value.trim();
     if (!name) return toast('给分类起个名字');
     const id = el.dataset.id;
-    await (id ? api('PUT', `/api/categories/${id}`, { name }) : api('POST', '/api/categories', { name }));
+    const mine = !isAdmin();
+    const sel = $('#catScope');
+    const body = {
+      name,
+      householdId: mine
+        ? S.householdId || null
+        : sel && sel.value === 'own' && S.householdId
+        ? S.householdId
+        : null,
+    };
+    const q = `?householdId=${encodeURIComponent(S.householdId)}`;
+    try {
+      if (mine) await (id ? api('PUT', `/api/my-categories/${id}${q}`, body) : api('POST', `/api/my-categories${q}`, body));
+      else await (id ? api('PUT', `/api/categories/${id}`, body) : api('POST', '/api/categories', body));
+    } catch (err) {
+      return toast('保存失败：' + err.message);
+    }
     closeSheet();
     await loadState(true);
     render();
@@ -4099,12 +4067,16 @@ const ACTIONS = {
   async 'del-cat'(el) {
     const c = S.data.categories.find((x) => x.id === el.dataset.id);
     if (!c) return;
-    const n = S.data.dishes.filter((d) => d.category === c.name).length;
+    if (!canEdit(c)) return toast('这是公共分类，管理员才能改');
+    // 只数本家看得见的菜：服务端也只把同归属的菜挪走，提示得跟实际发生的一致
+    const n = scopeDishes().filter((x) => x.category === c.name).length;
     const msg = n
       ? `删除分类「${c.name}」？\n该分类下 ${n} 道菜会移到「其他」，菜品不会丢。`
       : `删除分类「${c.name}」？`;
     if (!confirm(msg)) return;
-    await api('DELETE', `/api/categories/${el.dataset.id}`);
+    const q = `?householdId=${encodeURIComponent(S.householdId)}`;
+    if (isAdmin()) await api('DELETE', `/api/categories/${el.dataset.id}`);
+    else await api('DELETE', `/api/my-categories/${el.dataset.id}${q}`);
     if (S.category === c.name) S.category = '全部';
     await loadState(true);
     render();
@@ -4117,19 +4089,62 @@ const ACTIONS = {
   'pick-house'(el) {
     const id = el.dataset.id;
     if (id === S.householdId) return;
+    const h = households().find((x) => x.id === id);
+    // 家里人不能直接切进别人家 —— 得管理员批了才算成员
+    if (h && !isAdmin() && !(h.members || []).some((m) => m.name === meName())) {
+      return openJoinSheet(id);
+    }
     S.householdId = id;
     localStorage.setItem(LS_HOUSE, id);
-    // 换家庭后原来的筛选多半没意义了，清掉免得看着空
+    // 换家庭后原来的筛选多半没意义了，清掉免得看着空。
+    // 分类筛选也得清：当前选中的分类可能正是「只有刚离开那家看得见」的私有分类
     S.memberFilter = '';
     S.pantryCat = '全部';
     S.pantryFilter = 'all';
+    S.category = '全部';
     closeSheet();
     render();
-    const h = currentHousehold();
-    if (h) toast(`已切到 ${h.emoji} ${h.name}`);
+    const now = currentHousehold();
+    if (now) toast(`已切到 ${now.emoji} ${now.name}`);
   },
   'new-household'() {
+    // 增删改家庭是管理员的活：家里人说「应用里的东西随便改」就没意义了
+    if (!isAdmin()) return toast('添加/删除家庭要管理员口令');
     openHouseholdEditor(null);
+  },
+  /** 申请加入别人家 */
+  async 'send-join'(el) {
+    const name = ($('#joinName') || {}).value?.trim();
+    if (!name) return toast('先写上你是谁');
+    try {
+      const r = await api('POST', '/api/join-requests', {
+        name,
+        householdId: el.dataset.id,
+        note: (($('#joinNote') || {}).value || '').trim(),
+      });
+      S.meName = name;
+      S.access = S.access || [];
+      if (!S.access.some((x) => x.id === r.data.id)) S.access.unshift(r.data);
+      closeSheet();
+      render();
+      toast('申请已送到管理员那里，等他点头', 3200);
+    } catch (err) {
+      toast('没发出去：' + err.message);
+    }
+  },
+  /** 管理员批准加入申请 */
+  async 'join-decide'(el) {
+    const id = el.dataset.id;
+    try {
+      const r = await api('PUT', `/api/join-requests/${encodeURIComponent(id)}`, {
+        status: el.dataset.ok === '1' ? 'ok' : 'no',
+      });
+      await loadState(true);
+      render();
+      toast(r.data.status === 'ok' ? `已批准，${r.data.name} 现在是这个家的成员了` : '已拒绝');
+    } catch (err) {
+      toast('处理失败：' + err.message);
+    }
   },
   'edit-household'(el) {
     openHouseholdEditor(households().find((h) => h.id === el.dataset.id));
@@ -4171,7 +4186,14 @@ const ACTIONS = {
     if (households().length <= 1) return toast('至少要保留一个家庭');
     const nOrder = householdOrders(h.id).length;
     const nFood = householdPantry(h.id).length;
-    const extra = nOrder || nFood ? `\n它名下的 ${nOrder} 条点餐、${nFood} 样库存会一起删掉，` : '';
+    const nDish = (S.data.dishes || []).filter((d) => d.householdId === h.id).length;
+    const nCat = (S.data.categories || []).filter((c) => c.householdId === h.id).length;
+    const mine = [];
+    if (nDish) mine.push(`${nDish} 道私菜`);
+    if (nCat) mine.push(`${nCat} 个私有分类`);
+    if (nOrder || nFood) mine.push(`${nOrder} 条点餐、${nFood} 样库存`);
+    // 共享菜不在其中：它们是全体家庭的，换一家照样看得到
+    const extra = mine.length ? `\n只有「${h.name}」能看到的 ${mine.join('、')}会一起删掉，` : '';
     if (!confirm(`删除家庭「${h.name}」？${extra}删了找不回来。`)) return;
     await api('DELETE', `/api/households/${h.id}`);
     if (S.householdId === h.id) {
@@ -4414,15 +4436,32 @@ const ACTIONS = {
       return;
     }
     if (key === 'dishes') {
-      const names = (S.data.dishes || []).filter((d) => ids.includes(d.id)).map((d) => d.name);
-      const preview = pickPreview(names, '道');
+      // 只批量处理真正有权动的那些：共享菜混在里面就跳过，
+      // 而不是让服务端逐条报错（家人删个菜结果弹三次「公共菜谱改不了」太烦）
+      const targets = ids
+        .map((x) => dishById(x))
+        .filter((d) => d && canEdit(d));
+      const skipped = ids.length - targets.length;
+      if (!targets.length) return toast('选中的都是公共菜谱，管理员才能删');
+      const preview = pickPreview(targets.map((d) => d.name), '道');
       if (!confirm(`删掉 ${preview}？相关的点餐和计划里的这道菜也会一起去掉。`)) return;
-      for (const id of ids) await api('DELETE', `/api/dishes/${encodeURIComponent(id)}`);
+      if (isAdmin()) {
+        for (const d of targets) await api('DELETE', `/api/dishes/${encodeURIComponent(d.id)}`);
+      } else {
+        await api(
+          'DELETE',
+          `/api/my-dishes?householdId=${encodeURIComponent(S.householdId)}&ids=${targets
+            .map((d) => encodeURIComponent(d.id))
+            .join(',')}`
+        );
+      }
       S.sel.dishes = new Set();
       await loadState(true);
-      if (!(S.data.dishes || []).length) S.pick = '';
+      if (!scopeDishes().length) S.pick = '';
       render();
-      toast(`已删掉 ${ids.length} 道菜`);
+      toast(
+        `已删掉 ${targets.length} 道菜` + (skipped ? `，${skipped} 道公共菜谱原样留着（管理员才能删）` : '')
+      );
       return;
     }
     if (key === 'notes') {
@@ -4710,37 +4749,60 @@ const ACTIONS = {
     const ids = pickIds(key);
     if (!ids.length) return toast('先勾几样');
     let cat = el.dataset.cat || '';
-    if (el.dataset.new) {
-      cat = (($('#batchNewCat') || {}).value || '').trim();
-      if (!cat) return toast('写上分类名');
-      if (key === 'pantry' && !pantryCategories().includes(cat)) {
-        await api('POST', '/api/categories', { name: cat });
+    let toPrivate = false;
+    // 公共菜谱不参与批量改：它不属于「自己家的菜」，混进来只会一半成功一半失败
+    const dishTargets = key === 'dishes' ? ids.map((id) => dishById(id)).filter((d) => d && canEdit(d)) : null;
+    if (dishTargets && !dishTargets.length) return toast('选中的都是公共菜谱，管理员才能改');
+    try {
+      if (el.dataset.new) {
+        cat = (($('#batchNewCat') || {}).value || '').trim();
+        if (!cat) return toast('写上分类名');
+        // 新开的分类一律共享 —— 批量整理分类不该顺手把一批共享菜改成私有的
+        if (key === 'pantry' && !pantryCategories().includes(cat)) {
+          await api('POST', '/api/categories', { name: cat });
+        }
+        if (key === 'dishes' && !sortedCategories().some((c) => c.name === cat)) {
+          // 家里人开的新分类只能是自己的私有分类
+          if (isAdmin()) await api('POST', '/api/categories', { name: cat });
+          else await api('POST', `/api/my-categories?householdId=${encodeURIComponent(S.householdId)}`, { name: cat });
+        }
+        await loadState(true);
       }
-      if (key === 'dishes' && !sortedCategories().some((c) => c.name === cat)) {
-        await api('POST', '/api/categories', { name: cat });
-      }
-      await loadState(true);
-    }
-    for (const id of ids) {
+      // 挪进私有分类的菜如果还是共享的，就跟着变成私菜 ——
+      // 否则会撞上「共享菜 + 别人家私有分类」这个存了谁都看不到的组合
+      const target = sortedCategories().find((c) => c.name === cat);
+      toPrivate = !!(target && isPrivate(target));
       if (key === 'pantry') {
-        const p = householdPantry().find((x) => x.id === id);
-        if (p) await api('PUT', `/api/pantry/${encodeURIComponent(id)}`, { ...p, category: cat });
+        for (const id of ids) {
+          const p = householdPantry().find((x) => x.id === id);
+          if (p) await api('PUT', `/api/pantry/${encodeURIComponent(id)}`, { ...p, category: cat });
+        }
       } else {
-        const d = dishById(id);
-        if (d) await api('PUT', `/api/dishes/${encodeURIComponent(id)}`, { ...d, category: cat });
+        for (const d of dishTargets) {
+          const body = { ...d, category: cat };
+          if (toPrivate && !isPrivate(d)) body.householdId = target.householdId;
+          await saveDishBody(d, body);
+        }
       }
+    } catch (err) {
+      return toast('改不进去：' + err.message);
     }
     closeSheet();
     await loadState(true);
     render();
-    toast(`${ids.length} ${PICK_UNIT[key]}归到「${cat}」了`);
+    const n = dishTargets ? dishTargets.length : ids.length;
+    toast(
+      `${n} ${PICK_UNIT[key]}归到「${cat}」了` +
+        (toPrivate ? '，共享的那几道也跟着改成仅本家可见' : '') +
+        (dishTargets && dishTargets.length < ids.length ? `，${ids.length - dishTargets.length} 道公共菜谱没动` : '')
+    );
   },
 
   /** 批量加/去标签、标拿手菜 */
   'batch-tags'() {
     const ids = pickIds('dishes');
     if (!ids.length) return toast('先勾几道菜');
-    const tags = [...new Set((S.data.dishes || []).flatMap((d) => d.tags || []))];
+    const tags = [...new Set(scopeDishes().flatMap((d) => d.tags || []))];
     openSheet({
       title: `给 ${ids.length} 道菜加标签`,
       body: `<div class="field">
@@ -4782,31 +4844,33 @@ const ACTIONS = {
     const mode = el.dataset.mode;
     const tag = el.dataset.tag || (($('#batchTagIn') || {}).value || '').trim();
     if (!tag) return toast('写上标签');
-    for (const id of ids) {
-      const d = dishById(id);
-      if (!d) continue;
+    const targets = ids.map((id) => dishById(id)).filter((d) => d && canEdit(d));
+    if (!targets.length) return toast('选中的都是公共菜谱，改不了');
+    for (const d of targets) {
       const list = (d.tags || []).slice();
       const i = list.indexOf(tag);
       if (mode === 'add' && i < 0) list.push(tag);
       if (mode === 'del' && i >= 0) list.splice(i, 1);
-      await api('PUT', `/api/dishes/${encodeURIComponent(id)}`, { ...d, tags: list.slice(0, 8) });
+      await saveDishBody(d, { tags: list.slice(0, 8) });
     }
     await loadState(true);
     render();
     // 加完把弹层重开一遍，不然「去掉」那栏还是加之前的标签，想反悔都找不到
     if (mode === 'del') closeSheet();
     else ACTIONS['batch-tags']();
-    toast(mode === 'add' ? `${ids.length} 道菜加上了「${tag}」` : `${ids.length} 道菜去掉了「${tag}」`);
+    toast(
+      `${targets.length} 道菜${mode === 'add' ? '加上了' : '去掉了'}「${tag}」` +
+        (targets.length < ids.length ? `，${ids.length - targets.length} 道公共菜谱没动` : '')
+    );
   },
 
   async 'set-ids-fav'(el) {
     const ids = pickIds('dishes');
     if (!ids.length) return toast('先勾几道菜');
     const on = el.dataset.v === '1';
-    for (const id of ids) {
-      const d = dishById(id);
-      if (d) await api('PUT', `/api/dishes/${encodeURIComponent(id)}`, { ...d, isFavorite: on });
-    }
+    const targets = ids.map((id) => dishById(id)).filter((d) => d && canEdit(d));
+    if (!targets.length) return toast('选中的都是公共菜谱，改不了');
+    for (const d of targets) await saveDishBody(d, { isFavorite: on });
     closeSheet();
     await loadState(true);
     render();
@@ -4896,6 +4960,8 @@ const ACTIONS = {
 
   /* 设置 */
   'edit-settings'() {
+    // 店名、口令、AI 配置这些是管理员的活
+    if (!isAdmin()) return toast('服务设置要管理员口令');
     openSettings();
   },
   async 'save-settings'() {
@@ -4934,39 +5000,6 @@ const ACTIONS = {
     promptPin();
   },
 
-  /* 对话式 AI：底部悬浮窗 */
-  'chat-toggle'() {
-    if (S.chatOpen) closeChat();
-    else openChat();
-  },
-  'chat-collapse'() {
-    closeChat();
-  },
-  async 'chat-chip'(el) {
-    await sendChat(el.dataset.q);
-  },
-  'chat-clear'() {
-    S.chatTurns = [];
-    S.chatDot = false;
-    redrawChat();
-    toast('对话已清空');
-  },
-  'chat-run'(el) {
-    return runChatAction(Number(el.dataset.t), Number(el.dataset.a));
-  },
-  'chat-dismiss'(el) {
-    const t = S.chatTurns[Number(el.dataset.t)];
-    const a = t && t.actions && t.actions[Number(el.dataset.a)];
-    if (!a || a.state === 'busy') return;
-    a.state = 'skipped';
-    a.done = '没有执行';
-    redrawChat();
-  },
-  'chat-view'(el) {
-    const d = dishById(el.dataset.d);
-    if (!d) return toast('这道菜已经不在菜单里了');
-    openDish(d.id);
-  },
   /* 数据 */
 
   /**
@@ -5126,15 +5159,6 @@ document.addEventListener('input', (e) => {
     render();
   }
   if (e.target.id === 'fPresetSearch') renderPresetGrid();
-});
-
-/* 悬浮窗里的输入框回车就发（form 自带，不用再单独挂 keydown） */
-document.addEventListener('submit', (e) => {
-  const f = e.target.closest && e.target.closest('#chatForm');
-  if (!f) return;
-  e.preventDefault();
-  const inp = $('#chatInput');
-  if (inp && inp.value.trim()) sendChat(inp.value);
 });
 
 /* 改分类时，常见食材快选跟着换 */

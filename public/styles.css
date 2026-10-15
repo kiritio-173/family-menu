@@ -213,6 +213,14 @@ a { color: var(--primary-dark); }
   background: rgba(47, 39, 35, 0.62); color: #fff;
   font-size: 11px; backdrop-filter: blur(4px);
 }
+/* 只有本家看得见的菜：封面上挂一把锁，免得用户纳闷「这道菜别人家怎么翻不到」 */
+.card-own {
+  position: absolute; left: 8px; bottom: 8px;
+  width: 24px; height: 24px; border-radius: 50%;
+  background: rgba(47, 39, 35, 0.62); color: #fff;
+  display: grid; place-items: center; font-size: 12px;
+  backdrop-filter: blur(4px);
+}
 .card-body { padding: 10px 12px 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
 .card-title { font-size: 15px; font-weight: 650; line-height: 1.35; }
 .card-desc {
@@ -247,6 +255,7 @@ a { color: var(--primary-dark); }
   background: var(--bg-soft); color: var(--text-mid);
 }
 .tag.hot { background: var(--primary-soft); color: var(--primary-dark); }
+.tag.own { background: #fdf0e3; color: #a1620d; }
 
 /* ---------- 通用 ---------- */
 
@@ -633,139 +642,6 @@ a { color: var(--primary-dark); }
 .mseason-label .field-hint { display: block; font-weight: 400; margin-top: 2px; }
 .mseason-view { margin-bottom: 8px; }
 
-/* ---------- AI 对话 ---------- */
-/* ---------- AI 助手：底部悬浮窗 ----------
-   收起 = 一条 pill；展开 = 贴着底部的面板。
-   整块浮在底部导航之上，不占页面布局，所以任何页面都能直接戳。 */
-
-.chat-dock {
-  position: fixed;
-  left: 0; right: 0;
-  bottom: calc(var(--tab-h) + var(--safe-b) + 10px);
-  z-index: 45;                 /* 比底部导航(40)高，比弹层(.modal-root)低 */
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 0 16px;
-  pointer-events: none;        /* 容器本身不吃点击，否则整条横幅都挡住列表 */
-}
-.chat-dock > * { pointer-events: auto; }
-
-/* 收起状态：一条小 pill，贴左边，给右下角的「记一道菜」留位置 */
-.chat-pill {
-  display: inline-flex; align-items: center; gap: 7px;
-  max-width: 68vw;
-  height: 38px; padding: 0 15px;
-  border-radius: 999px;
-  background: var(--primary); color: #fff;
-  font-size: 13.5px; font-weight: 600;
-  box-shadow: 0 6px 20px rgba(224, 118, 58, 0.38);
-}
-.chat-pill:active { transform: scale(0.96); }
-.chat-pill-txt {
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.chat-pill-dot {
-  width: 7px; height: 7px; border-radius: 50%;
-  background: #fff; flex: none;
-  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.28);
-}
-
-/* 展开状态：贴底的对话面板 */
-.chat-panel {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  max-height: min(64vh, 520px);
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  box-shadow: 0 12px 40px rgba(70, 45, 25, 0.18);
-  overflow: hidden;
-  animation: chatUp 0.2s ease;
-}
-@keyframes chatUp { from { transform: translateY(14px); opacity: 0; } to { transform: none; opacity: 1; } }
-
-.chat-panel-head {
-  display: flex; align-items: center; gap: 8px;
-  padding: 9px 10px 9px 14px;
-  border-bottom: 1px solid var(--line);
-  background: var(--bg-soft);
-}
-.chat-panel-title { font-weight: 650; font-size: 14px; }
-.chat-panel-ctx {
-  flex: 1; min-width: 0;
-  font-size: 11.5px; color: var(--muted);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.chat-panel-head .icon-mini { flex: none; }
-
-.chat-turns {
-  flex: 1; min-height: 130px;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  display: flex; flex-direction: column; gap: 8px;
-  padding: 12px 14px;
-}
-.chat-msg {
-  max-width: 88%; padding: 9px 13px; border-radius: 14px;
-  font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
-}
-.chat-msg.user {
-  align-self: flex-end;
-  background: var(--primary); color: #fff;
-  border-bottom-right-radius: 4px;
-}
-.chat-msg.assistant {
-  align-self: flex-start;
-  background: var(--bg-soft);
-  border-bottom-left-radius: 4px;
-}
-.chat-msg.typing { color: var(--muted); }
-
-/* ---------- 操作卡：AI 说「我准备做什么」，用户点确认才落库 ---------- */
-.chat-acts { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
-.act-card {
-  align-self: flex-start;
-  width: min(100%, 92%);
-  padding: 11px 13px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: #fff;
-}
-.act-card[data-state='done'] { background: var(--bg-soft); }
-.act-card[data-state='error'] { border-color: var(--danger-soft); }
-.act-card-head { font-size: 11.5px; color: var(--muted); }
-.act-card-title { font-weight: 650; font-size: 14px; margin-top: 3px; }
-.act-card-lines {
-  margin-top: 7px;
-  font-size: 12.5px; line-height: 1.65; color: var(--muted);
-}
-.act-card-btns { display: flex; gap: 8px; margin-top: 10px; }
-.act-card-result { margin-top: 6px; font-size: 13px; }
-.act-card-result.ok { color: var(--green); }
-.act-card-result.bad { color: var(--danger); }
-
-.chat-chips {
-  display: flex; gap: 6px; padding: 0 14px 8px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.chat-chips::-webkit-scrollbar { display: none; }
-.chat-chips .chip { font-size: 12.5px; padding: 5px 11px; white-space: nowrap; flex: none; }
-
-.chat-input-row {
-  display: flex; align-items: center; gap: 8px;
-  padding: 10px 14px;
-  border-top: 1px solid var(--line);
-}
-.chat-input-row .input { flex: 1; min-width: 0; margin: 0; }
-.chat-input-row .btn { flex: none; }
-
-/* 面板展开时挡住底下的内容，给 .view 多留一点底部空间 */
-body.chat-open .view { padding-bottom: calc(var(--tab-h) + var(--safe-b) + 92px); }
-
 /* ---------- 厨房助手（旧结构，保留兜底） ---------- */
 .prep-list { list-style: none; margin: 0; padding: 0; }
 .prep-list li {
@@ -1012,7 +888,40 @@ body.chat-open .view { padding-bottom: calc(var(--tab-h) + var(--safe-b) + 92px)
   color: var(--primary-dark); font-size: 11px; font-weight: 600;
   vertical-align: 1px;
 }
+/* 「只有本家看得见」角标，用暖色跟「当前家庭」的绿色 pill-now 区分开 */
+.pill-own {
+  display: inline-block; margin-left: 6px; padding: 1px 7px;
+  border-radius: 999px; background: #fdf0e3;
+  color: #a1620d; font-size: 11px; font-weight: 600;
+  vertical-align: 1px; white-space: nowrap;
+}
+/* 没有管理员权限时，「谁看得见」不给你选，直接摆一个只读的结论在那儿 */
+.scope-fixed {
+  padding: 11px 13px; border-radius: var(--radius-sm);
+  background: #fdf0e3; color: #a1620d;
+  font-size: 14px; font-weight: 600;
+}
 .list-row.on { border-color: var(--primary); background: var(--primary-soft); }
+
+/* 没设管理口令时的提醒条：这是在告诉用户「菜单编辑现在不设防」 */
+.admin-warn {
+  border: 1px solid var(--danger-soft);
+  background: #fdf1f0;
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 18px;
+}
+.admin-warn-title { font-weight: 700; color: var(--danger); margin-bottom: 4px; }
+.admin-warn-text { font-size: 13px; line-height: 1.6; color: var(--text-mid); margin-bottom: 10px; }
+.admin-warn-text b { color: var(--danger); }
+
+/* 等管理员点头的加入申请 */
+.join-box {
+  border: 1px solid #d6e4f5; background: #f3f7fc;
+  border-radius: var(--radius); padding: 12px 14px; margin-bottom: 16px;
+}
+.join-title { font-weight: 650; font-size: 13.5px; color: #2c5a8f; margin-bottom: 6px; }
+.join-box .list-row { background: #fff; }
 
 .stat.warn .stat-num { color: #a8741c; }
 .stat.bad .stat-num { color: var(--danger); }

@@ -9,7 +9,9 @@ if errorlevel 1 goto nonode
 echo.
 echo   正在启动家庭菜单服务，请保持这个窗口不要关闭...
 echo.
-node server.js
+rem --max-old-space-size：给堆加个上限。小机器（2G 内存的 VPS、云主机）上
+rem 不加的话 V8 会以为自己有整个内存可用，涨上去就被系统 OOM Killer 杀了。
+node --max-old-space-size=384 server.js
 echo.
 echo   服务已停止。按任意键关闭窗口。
 pause >nul

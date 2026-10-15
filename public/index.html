@@ -60,30 +60,6 @@
     </button>
   </nav>
 
-  <!-- AI 助手：底部悬浮窗。收起时是一条 pill，点开是贴着底部的面板。
-       放底部而不是顶栏，是为了让单手拿手机时随时能戳到。 -->
-  <div class="chat-dock" id="chatDock" hidden>
-    <button class="chat-pill" data-act="chat-toggle" title="问问 AI">
-      <span class="chat-pill-ico">💬</span>
-      <span class="chat-pill-txt" id="chatPillTxt">问问 AI</span>
-      <span class="chat-pill-dot" id="chatDot" hidden></span>
-    </button>
-
-    <div class="chat-panel" id="chatPanel" hidden>
-      <div class="chat-panel-head">
-        <span class="chat-panel-title">💬 问问 AI</span>
-        <span class="chat-panel-ctx" id="chatCtx"></span>
-        <button class="icon-mini" data-act="chat-clear" title="清空对话" aria-label="清空对话">🗑</button>
-        <button class="icon-mini" data-act="chat-collapse" title="收起" aria-label="收起">▼</button>
-      </div>
-      <div class="chat-turns" id="chatTurns"></div>
-      <div class="chat-chips" id="chatChips"></div>
-      <form class="chat-input-row" id="chatForm" autocomplete="off">
-        <input class="input" id="chatInput" placeholder="问它，或者直接说「把红烧肉加到菜单」" autocomplete="off" />
-        <button class="btn sm" type="submit" id="chatSendBtn">发送</button>
-      </form>
-    </div>
-  </div>
 </div>
 
 <!-- 弹层 -->

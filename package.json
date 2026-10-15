@@ -1,11 +1,14 @@
 {
   "name": "family-menu",
-  "version": "1.6.0",
+  "version": "1.9.0",
   "description": "本地部署的家庭菜单与点餐服务",
   "private": true,
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node --max-old-space-size=384 server.js",
+    "start:plain": "node server.js",
+    "publish": "node publish-update.js",
+    "publish:check": "node publish-selftest.js"
   },
   "engines": {
     "node": ">=16"
