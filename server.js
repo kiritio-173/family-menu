@@ -41,10 +41,21 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.14.0';
+const APP_VERSION = '1.15.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.15.0',
+    date: '2026-10-16',
+    title: '全局账户姓名与菜单投影统一',
+    items: [
+      '同一账户在所有家庭、申请、点餐和菜品作者位置使用统一的账户姓名，修改后全局同步',
+      '家庭成员编辑和加入申请不再创建家庭专属姓名，申请人由当前账户自动识别',
+      '菜单页、管理页、随机来一道和菜品详情共用同一份当前家庭菜单数据投影',
+      '管理页菜品点击可直接打开与菜单页相同的详情，并在修改后立即同步',
+    ],
+  },
   {
     version: '1.14.0',
     date: '2026-10-16',
@@ -562,6 +573,63 @@ function accountHouseholds(userId) {
     const me = memberForUser(h.id, userId);
     return { ...publicHousehold(h), role: me && me.role || 'member', memberId: me && me.id || '' };
   });
+}
+
+/**
+ * 账户姓名是跨家庭的唯一来源。成员关系里的 name 只保留作旧数据兼容，
+ * 任何对外显示都优先解析 userId 对应账户的 displayName。
+ */
+function memberDisplayName(member) {
+  if (!member) return '';
+  const user = member.userId && userById(member.userId);
+  return safeText(user && user.displayName, 40).trim() || safeText(member.name, 40).trim();
+}
+
+function syncMemberDisplayName(userId, displayName) {
+  if (!userId || !displayName) return false;
+  let changed = false;
+  for (const house of state.households || []) {
+    for (const member of house.members || []) {
+      if (member && member.userId === userId && member.name !== displayName) {
+        member.name = displayName;
+        house.updatedAt = nowISO();
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+function dishAuthorUserId(dish) {
+  if (!dish) return '';
+  if (dish.authorUserId && userById(dish.authorUserId)) return dish.authorUserId;
+  if (!dish.authorId) return '';
+  for (const house of state.households || []) {
+    const member = (house.members || []).find((m) => m && m.id === dish.authorId);
+    if (member && member.userId) return member.userId;
+  }
+  return '';
+}
+
+function dishDisplayAuthor(dish) {
+  const userId = dishAuthorUserId(dish);
+  const user = userId && userById(userId);
+  return safeText(user && user.displayName, 40).trim() || safeText(dish && dish.authorName, 40).trim();
+}
+
+function publicDish(dish) {
+  if (!dish) return null;
+  return { ...dish, authorName: dishDisplayAuthor(dish) };
+}
+
+function publicJoinRequest(request) {
+  if (!request) return null;
+  const user = request.applicantUserId && userById(request.applicantUserId);
+  return {
+    ...request,
+    name: safeText(user && user.displayName, 40).trim() || request.name || request.applicantDisplayNameSnapshot || '',
+    ...(user ? { applicantLoginIdSnapshot: user.loginId, applicantDisplayNameSnapshot: user.displayName } : {}),
+  };
 }
 
 function accountSessionOf(req) {
@@ -1253,6 +1321,10 @@ function loadState() {
         m.userId = user.id;
         housesChanged = true;
       }
+      if (m.name !== user.displayName) {
+        m.name = user.displayName;
+        housesChanged = true;
+      }
     }
   }
   if (usersChanged) scheduleSave('users');
@@ -1925,6 +1997,7 @@ function normDish(input, prev, keepInputId) {
     // 那就让谁都能改：菜谱是家里的东西，为一条查不到出处的菜把主人锁在外面，
     // 代价（可能被人乱改）大于收益（防止改一条几乎不可能发生的事）。
     authorId: safeText(input.authorId ?? base.authorId, 40),
+    authorUserId: safeText(input.authorUserId ?? base.authorUserId, 80),
     authorName: safeText(input.authorName ?? base.authorName, 20),
     description: safeText(input.description, 300),
     images: safeList(input.images ?? base.images)
@@ -2284,11 +2357,11 @@ function whoami(req, householdId) {
   const account = accountSessionOf(req);
   if (account) {
     const m = currentMember(req, householdId || state.settings.currentHouseholdId);
-    if (m) return { kind: 'member', memberId: m.id, name: m.name, householdId: householdId || m.householdId || '' , userId: account.scope.userId };
+    if (m) return { kind: 'member', memberId: m.id, name: memberDisplayName(m), householdId: householdId || m.householdId || '' , userId: account.scope.userId };
     const first = membershipsOf(account.scope.userId)[0];
     const firstMember = first && memberForUser(first.id, account.scope.userId);
     return firstMember
-      ? { kind: 'member', memberId: firstMember.id, name: firstMember.name, householdId: first.id, userId: account.scope.userId }
+      ? { kind: 'member', memberId: firstMember.id, name: memberDisplayName(firstMember), householdId: first.id, userId: account.scope.userId }
       : { kind: 'account', memberId: '', name: userById(account.scope.userId)?.displayName || '', userId: account.scope.userId };
   }
   const d = deviceMember(req);
@@ -2296,7 +2369,7 @@ function whoami(req, householdId) {
   // 令牌可能已经被撤销（成员被删了、PIN 被重置）——认不得就当匿名
   for (const h of state.households) {
     const m = (h.members || []).find((x) => x.id === d.memberId);
-    if (m) return { kind: 'member', memberId: m.id, name: m.name, householdId: h.id };
+    if (m) return { kind: 'member', memberId: m.id, name: memberDisplayName(m), householdId: h.id, userId: m.userId || '' };
   }
   return { kind: 'anon', memberId: '', name: '' };
 }
@@ -2501,7 +2574,7 @@ function publicMember(m) {
   if (!m) return null;
   const { pin, password, ...rest } = m;
   const hasPassword = !!(typeof password === 'string' ? password : pin);
-  return { ...rest, hasPassword, hasPin: hasPassword };
+  return { ...rest, name: memberDisplayName(m), hasPassword, hasPin: hasPassword };
 }
 
 function publicMembers(house) {
@@ -2645,6 +2718,34 @@ async function handleAPI(req, res, url) {
       const account = accountSessionOf(req);
       if (!account) return sendError(res, 401, '账户登录已过期，请重新登录');
       const user = userById(account.scope.userId);
+      return sendJSON(res, 200, {
+        ok: true,
+        data: { accountToken: account.token, deviceId: account.scope.deviceId, user: publicUser(user), households: accountHouseholds(user.id) },
+      });
+    }
+
+    if (method === 'PUT' && route.length === 2 && route[1] === 'profile') {
+      const account = accountSessionOf(req);
+      if (!account) return sendError(res, 401, '账户登录已过期，请重新登录');
+      const body = await readBody(req);
+      const user = userById(account.scope.userId);
+      if (!user) return sendError(res, 401, '账户不存在，请重新登录');
+      const nextLoginId = body.loginId === undefined
+        ? user.loginId
+        : normalizeLoginId(body.loginId, '');
+      if (!nextLoginId) return sendError(res, 400, '登录 ID 不能为空');
+      const duplicate = userByLoginId(nextLoginId);
+      if (duplicate && duplicate.id !== user.id) return sendError(res, 409, '这个登录 ID 已经被使用，请换一个');
+      const nextDisplayName = body.displayName === undefined
+        ? user.displayName
+        : safeText(body.displayName, 40).trim();
+      if (!nextDisplayName) return sendError(res, 400, '账户姓名不能为空');
+      user.loginId = nextLoginId;
+      user.displayName = nextDisplayName;
+      if (body.emoji !== undefined) user.emoji = safeText(body.emoji, 4) || user.emoji || '🙋';
+      user.updatedAt = nowISO();
+      if (syncMemberDisplayName(user.id, user.displayName)) scheduleSave('households');
+      scheduleSave('users');
       return sendJSON(res, 200, {
         ok: true,
         data: { accountToken: account.token, deviceId: account.scope.deviceId, user: publicUser(user), households: accountHouseholds(user.id) },
@@ -3027,7 +3128,8 @@ async function handleAPI(req, res, url) {
     const visibleDishes = fullState
       ? state.dishes
       : state.dishes.filter((d) => !d.householdId || d.householdId === visibleHouseholdId);
-    const visibleDishIds = new Set(visibleDishes.map((d) => d.id));
+    const publicVisibleDishes = visibleDishes.map(publicDish);
+    const visibleDishIds = new Set(publicVisibleDishes.map((d) => d.id));
     const visibleCategories = fullState
       ? state.categories
       : state.categories.filter((c) => !c.householdId || c.householdId === visibleHouseholdId);
@@ -3054,7 +3156,7 @@ async function handleAPI(req, res, url) {
       ok: true,
       data: {
         categories: visibleCategories,
-        dishes: visibleDishes,
+        dishes: publicVisibleDishes,
         orders: fullState
           ? state.orders
           : state.orders.filter((o) => o.householdId === visibleHouseholdId),
@@ -3068,7 +3170,7 @@ async function handleAPI(req, res, url) {
           ? state.plans
           : state.plans.filter((p) => p.householdId === visibleHouseholdId),
         notes: { notes: visibleNotes, votes: visibleVotes },
-        access: { requests: visibleAccess },
+        access: { requests: visibleAccess.map(publicJoinRequest) },
         ...(accountInfo ? { account: accountInfo, superExpiresAt: (() => { const s = sessionOf(req); return s && s.scope && s.scope.kind === 'super' ? s.scope.fixedExp : 0; })() } : {}),
       },
     });
@@ -3108,13 +3210,15 @@ async function handleAPI(req, res, url) {
         : uidForRequest
         ? state.access.requests.filter((r) => r.applicantUserId === uidForRequest || (!r.applicantUserId && r.name === whoami(req).name))
         : state.access.requests.filter((r) => r.name === whoami(req).name);
-      return sendJSON(res, 200, { ok: true, data: requests });
+      return sendJSON(res, 200, { ok: true, data: requests.map(publicJoinRequest) });
     }
 
     if (method === 'POST' && !id) {
       const uidForRequest = accountUserId(req);
       const accountUser = uidForRequest && userById(uidForRequest);
-      const name = safeText(body.name, 20).trim() || (accountUser && accountUser.displayName) || '';
+      const name = accountUser
+        ? safeText(accountUser.displayName, 40).trim()
+        : safeText(body.name, 20).trim();
       const householdId = safeText(body.householdId, 40);
       if (!name) return sendError(res, 400, '写上你是谁，管理员才知道批给谁');
       const house = state.households.find((h) => h.id === householdId);
@@ -3129,16 +3233,25 @@ async function handleAPI(req, res, url) {
         dup.at = nowISO();
         dup.note = safeText(body.note, 100).trim();
         dup.requestedRole = requestedRole;
+        dup.name = name;
+        if (accountUser) {
+          dup.applicantLoginIdSnapshot = accountUser.loginId;
+          dup.applicantDisplayNameSnapshot = accountUser.displayName;
+        }
         delete dup.approvedRole;
         dup.status = 'pending';
         scheduleSave('access');
-        return sendJSON(res, 200, { ok: true, data: dup, updated: true });
+        return sendJSON(res, 200, { ok: true, data: publicJoinRequest(dup), updated: true });
       }
       const jrNew = {
         id: uid('j_'),
         name,
         householdId,
         ...(uidForRequest ? { applicantUserId: uidForRequest } : {}),
+        ...(accountUser ? {
+          applicantLoginIdSnapshot: accountUser.loginId,
+          applicantDisplayNameSnapshot: accountUser.displayName,
+        } : {}),
         note: safeText(body.note, 100).trim(),
         requestedRole,
         at: nowISO(),
@@ -3152,7 +3265,7 @@ async function handleAPI(req, res, url) {
         state.access.requests = state.access.requests.filter((r) => !drop.has(r.id));
       }
       scheduleSave('access');
-      return sendJSON(res, 200, { ok: true, data: jrNew });
+      return sendJSON(res, 200, { ok: true, data: publicJoinRequest(jrNew) });
     }
 
     if (method === 'PUT' && id) {
@@ -3189,7 +3302,7 @@ async function handleAPI(req, res, url) {
           house.members.push({
             id: uid('m_'),
             ...(jr.applicantUserId ? { userId: jr.applicantUserId } : {}),
-            name: jr.name,
+            name: applicant ? memberDisplayName({ userId: applicant.id, name: applicant.displayName }) : jr.name,
             loginId: uniqueLoginId(house.members, applicant ? applicant.loginId : jr.name, jr.name),
             emoji: MEMBER_EMOJI[house.members.length % MEMBER_EMOJI.length],
             // 最终角色由目标家庭管理员在批准时决定；申请人只能表达意愿。
@@ -3200,7 +3313,7 @@ async function handleAPI(req, res, url) {
         }
       }
       scheduleSave('access');
-      return sendJSON(res, 200, { ok: true, data: jr });
+      return sendJSON(res, 200, { ok: true, data: publicJoinRequest(jr) });
     }
 
     if (method === 'DELETE' && id) {
@@ -3252,12 +3365,13 @@ async function handleAPI(req, res, url) {
         copy.createdAt = nowISO();
         const who = whoami(req, hhId);
         copy.authorId = who.kind === 'member' ? who.memberId : '';
+        copy.authorUserId = who.userId || '';
         copy.authorName = who.kind === 'member' ? who.name : '';
         const bad = categoryProblem(copy);
         if (bad) return sendError(res, 400, bad);
         state.dishes.unshift(copy);
         scheduleSave('dishes');
-        return sendJSON(res, 200, { ok: true, data: copy });
+        return sendJSON(res, 200, { ok: true, data: publicDish(copy) });
       }
 
       if (method === 'POST' && !id) {
@@ -3271,12 +3385,13 @@ async function handleAPI(req, res, url) {
         if (!dish || !dish.name) return sendError(res, 400, '菜名不能为空');
         const who = whoami(req, hhId);
         dish.authorId = who.kind === 'member' ? who.memberId : '';
+        dish.authorUserId = who.userId || '';
         dish.authorName = who.kind === 'member' ? who.name : '';
         const bad = categoryProblem(dish);
         if (bad) return sendError(res, 400, bad);
         state.dishes.unshift(dish);
         scheduleSave('dishes');
-        return sendJSON(res, 200, { ok: true, data: dish });
+        return sendJSON(res, 200, { ok: true, data: publicDish(dish) });
       }
       if (method === 'PUT' && id) {
         const idx = state.dishes.findIndex((d) => d.id === id);
@@ -3290,12 +3405,13 @@ async function handleAPI(req, res, url) {
         }
         const dish = normDish({ ...(await readBody(req)), householdId: hhId }, state.dishes[idx]);
         dish.authorId = state.dishes[idx].authorId;
+        dish.authorUserId = state.dishes[idx].authorUserId || dishAuthorUserId(state.dishes[idx]);
         dish.authorName = state.dishes[idx].authorName;
         const bad = categoryProblem(dish);
         if (bad) return sendError(res, 400, bad);
         state.dishes[idx] = dish;
         scheduleSave('dishes');
-        return sendJSON(res, 200, { ok: true, data: dish });
+        return sendJSON(res, 200, { ok: true, data: publicDish(dish) });
       }
       if (method === 'DELETE') {
         // 一律用 Set：数组没有 .size，下面那句 !ids.size 会永远成立
@@ -3451,6 +3567,25 @@ async function handleAPI(req, res, url) {
         body.clearPin === true ||
         typeof body.status === 'string';
       if (touchesIdentity && !canDoSensitive(req, id)) return sendError(res, 403, SENSITIVE_HINT);
+      // 成员姓名属于全局账户资料。管理页沿用成员编辑表单时，把关联账户的
+      // displayName 一并更新，避免同一账号在不同家庭出现两套姓名。
+      let usersChangedByMemberEdit = false;
+      if (Array.isArray(body.members)) {
+        const previousMembers = state.households[idx].members || [];
+        for (const raw of body.members) {
+          if (!raw || typeof raw !== 'object') continue;
+          const previous = previousMembers.find((m) => m && ((raw.id && m.id === raw.id) || (raw.userId && m.userId === raw.userId)));
+          const userId = (raw.userId || (previous && previous.userId) || '');
+          const user = userId && userById(userId);
+          const nextName = safeText(raw.name, 40).trim();
+          if (user && nextName && user.displayName !== nextName) {
+            user.displayName = nextName;
+            user.updatedAt = nowISO();
+            syncMemberDisplayName(user.id, nextName);
+            usersChangedByMemberEdit = true;
+          }
+        }
+      }
       // 口令三态：不传 = 不动；传空串 = 取消；传非空 = 换。
       // 前端拿不到旧口令明文（响应里已抹掉），所以「取消」只能靠显式标记。
       if (body.clearPin === true) body.pin = '';
@@ -3482,6 +3617,7 @@ async function handleAPI(req, res, url) {
         }
       }
       state.households[idx] = next;
+      if (usersChangedByMemberEdit) scheduleSave('users');
       scheduleSave('households');
       return sendJSON(res, 200, { ok: true, data: publicHousehold(next) });
     }
@@ -3868,12 +4004,13 @@ async function handleAPI(req, res, url) {
       }
       const who = whoami(req, dish.householdId);
       dish.authorId = who.kind === 'member' ? who.memberId : dish.authorId;
+      dish.authorUserId = who.userId || dish.authorUserId || '';
       dish.authorName = who.kind === 'member' ? who.name : dish.authorName;
       const bad = categoryProblem(dish);
       if (bad) return sendError(res, 400, bad);
       state.dishes.unshift(dish);
       scheduleSave('dishes');
-      return sendJSON(res, 200, { ok: true, data: dish });
+      return sendJSON(res, 200, { ok: true, data: publicDish(dish) });
     }
     if (method === 'PUT' && id) {
       const idx = state.dishes.findIndex((d) => d.id === id);
@@ -3884,6 +4021,7 @@ async function handleAPI(req, res, url) {
       const dish = normDish(await readBody(req), state.dishes[idx]);
       // 作者不许改：这条要是你写的，以后就一直是你的
       dish.authorId = state.dishes[idx].authorId;
+      dish.authorUserId = state.dishes[idx].authorUserId || dishAuthorUserId(state.dishes[idx]);
       dish.authorName = state.dishes[idx].authorName;
       // 也不能把别人的私菜拽到共享区去 —— 那是管理员的动作
       if (!state.dishes[idx].householdId && dish.householdId && !canWriteShared(req)) {
@@ -3893,7 +4031,7 @@ async function handleAPI(req, res, url) {
       if (bad) return sendError(res, 400, bad);
       state.dishes[idx] = dish;
       scheduleSave('dishes');
-      return sendJSON(res, 200, { ok: true, data: dish });
+      return sendJSON(res, 200, { ok: true, data: publicDish(dish) });
     }
     if (method === 'POST' && route[2] === 'duplicate' && id) {
       const src = state.dishes.find((d) => d.id === id);
@@ -3905,10 +4043,11 @@ async function handleAPI(req, res, url) {
       copy.isFavorite = false;
       const who = whoami(req, copy.householdId);
       copy.authorId = who.kind === 'member' ? who.memberId : '';
+      copy.authorUserId = who.userId || '';
       copy.authorName = who.kind === 'member' ? who.name : '';
       state.dishes.unshift(copy);
       scheduleSave('dishes');
-      return sendJSON(res, 200, { ok: true, data: copy });
+      return sendJSON(res, 200, { ok: true, data: publicDish(copy) });
     }
     if (method === 'DELETE' && id) {
       const idx = state.dishes.findIndex((d) => d.id === id);

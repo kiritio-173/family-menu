@@ -2026,6 +2026,33 @@ async function main() {
   eq('家庭管理员批准账户申请', approved.status, 200);
   const bMe = await req('GET', '/api/account/me', undefined, undefined, undefined, undefined, undefined, accB.token);
   ok('批准后账户关系可见', (bMe.body.data.households || []).some((h) => h.id === created[0].id));
+
+  /* ---------- 全局账户姓名与菜单投影一致性 ---------- */
+  console.log('\n[27] 全局账户姓名与菜单数据一致性');
+  const globalNameAccount = await req('POST', '/api/account/register', {
+    loginId: '全局姓名用户', displayName: '原始姓名', password: '123456',
+  });
+  eq('带显示名注册账户成功', globalNameAccount.status, 200);
+  const globalToken = globalNameAccount.body?.data?.accountToken;
+  const familyOne = await req('POST', '/api/households', { name: '姓名家庭一' }, undefined, undefined, undefined, undefined, globalToken);
+  const familyTwo = await req('POST', '/api/households', { name: '姓名家庭二' }, undefined, undefined, undefined, undefined, globalToken);
+  eq('全局姓名账户创建第一家庭', familyOne.status, 200);
+  eq('全局姓名账户创建第二家庭', familyTwo.status, 200);
+  const profileChanged = await req('PUT', '/api/account/profile', { displayName: '统一新姓名' }, undefined, undefined, undefined, undefined, globalToken);
+  eq('账户改名接口成功', profileChanged.status, 200);
+  eq('账户响应返回新姓名', profileChanged.body?.data?.user?.displayName, '统一新姓名');
+  const oneState = await req('GET', `/api/state?householdId=${encodeURIComponent(familyOne.body.data.id)}`, undefined, undefined, undefined, undefined, undefined, globalToken);
+  const twoState = await req('GET', `/api/state?householdId=${encodeURIComponent(familyTwo.body.data.id)}`, undefined, undefined, undefined, undefined, undefined, undefined, globalToken);
+  const oneMe = oneState.body?.data?.households?.find((h) => h.id === familyOne.body.data.id)?.members?.[0];
+  const twoMe = twoState.body?.data?.households?.find((h) => h.id === familyTwo.body.data.id)?.members?.[0];
+  eq('第一家庭成员姓名跟随全局账户', oneMe?.name, '统一新姓名');
+  eq('第二家庭成员姓名跟随全局账户', twoMe?.name, '统一新姓名');
+  const canonicalDish = await req('POST', `/api/my-dishes?householdId=${encodeURIComponent(familyOne.body.data.id)}`, { name: '全局作者菜', category: '家常菜' }, undefined, undefined, undefined, undefined, globalToken);
+  eq('全局姓名账户新增私菜', canonicalDish.status, 200);
+  const dishAfterRename = (await req('GET', `/api/state?householdId=${encodeURIComponent(familyOne.body.data.id)}`, undefined, undefined, undefined, undefined, undefined, undefined, globalToken)).body.data.dishes.find((d) => d.name === '全局作者菜');
+  eq('菜单菜品作者姓名跟随全局账户', dishAfterRename?.authorName, '统一新姓名');
+  const forgedJoin = await req('POST', '/api/join-requests', { householdId: familyOne.body.data.id, name: '伪造姓名' }, undefined, undefined, undefined, undefined, accB.token);
+  eq('申请接口忽略客户端伪造姓名', forgedJoin.body?.data?.name, accB.user?.displayName || accB.user?.loginId);
   await stop(accountInst);
 
   /* ---------- 收尾 ---------- */

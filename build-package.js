@@ -345,6 +345,9 @@ function main() {
   rmrf(APP);
   rmrf(path.join(OUT, '家庭菜单-便携版.zip'));
   fs.mkdirSync(APP, { recursive: true });
+  // 便携版若仍被运行中的 node.exe 占用，整个目录可能无法删除；
+  // 备份目录不应在任何情况下继承到新包，单独清理避免把口令明文带出去。
+  rmrf(path.join(APP, 'backups'));
 
   log('[2/5] 复制程序文件');
   writeOver(path.join(ROOT, 'server.js'), path.join(APP, 'server.js'));

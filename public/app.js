@@ -203,7 +203,27 @@ function ownTag(o) {
 
 /** 当前家庭看得见的全部菜品（还没套分类 / 搜索筛选） */
 function scopeDishes() {
-  return (S.data.dishes || []).filter((d) => canSee(d.householdId));
+  return menuProjection();
+}
+
+/**
+ * 菜单页和管理页共用的唯一菜品投影。任何页面都先从这里取当前家庭可见
+ * 的菜品，再叠加自己的展示筛选，避免两页各自拼出不同的名称或归属。
+ */
+function menuProjection(options) {
+  const o = options || {};
+  let list = (S.data.dishes || []).filter((d) => canSee(d.householdId));
+  if (o.scope === 'shared') list = list.filter((d) => !d.householdId);
+  if (o.scope === 'own') list = list.filter((d) => !!d.householdId);
+  if (o.category && o.category !== '全部') list = list.filter((d) => d.category === o.category);
+  if (o.keyword) list = list.filter((d) => matchKeyword(d, o.keyword));
+  if (o.sort) {
+    list = [...list].sort((a, b) =>
+      String(a.category || '').localeCompare(String(b.category || ''), 'zh') ||
+      String(a.name || '').localeCompare(String(b.name || ''), 'zh')
+    );
+  }
+  return list;
 }
 
 /**
@@ -681,7 +701,8 @@ function forgetMeId() {
  */
 function meName() {
   const m = meMember();
-  S.meName = m ? m.name : GUEST;
+  const global = accountUser()?.displayName || accountUser()?.loginId || '';
+  S.meName = m ? global || m.name : GUEST;
   return S.meName;
 }
 
@@ -793,6 +814,8 @@ function clearPendingName() {
 
 /** 顶栏上显示的名字：认领了用真名，申请中用报的名字，都没有就说没登记 */
 function displayName() {
+  const global = accountUser()?.displayName || accountUser()?.loginId || '';
+  if (global && meMember()) return global;
   const m = meMember();
   if (m) return m.name;
   return pendingName() || GUEST;
@@ -1306,9 +1329,7 @@ function visibleOrders() {
 
 /** 管理页「菜品管理」那一列的排序，渲染和多选必须用同一份 */
 function manageDishRows() {
-  return [...scopeDishes()].sort((a, b) =>
-    String(a.category).localeCompare(String(b.category), 'zh')
-  );
+  return menuProjection({ sort: true });
 }
 
 /** 库存可选的分类：预设顺序在前，家里自建的在后 */
@@ -3213,11 +3234,11 @@ function viewManageMember() {
 
   const row = (x) => {
     const ok = canEdit(x);
-    return `<div class="list-row">
+    return `<div class="list-row" role="button" tabindex="0" data-act="open-dish" data-id="${esc(x.id)}" title="打开这道菜的详情">
       <span class="icon-mini act">${x.images && x.images[0] ? '🖼️' : dishEmoji(x.name)}</span>
       <span class="list-row-main">
         <span class="list-row-title">${esc(x.name)}${ownTag(x)}${
-          x.authorName ? `<span class="pill-now" title="作者">${esc(memberEmoji(x.authorName))} ${esc(x.authorName)}</span>` : ''
+          x.authorName ? `<span class="pill-now" title="作者">${esc(memberEmoji(x.authorName))} ${esc(dishAuthor(x))}</span>` : ''
         }</span>
         <span class="list-row-sub">${esc(x.category)} · ${(x.methods || []).length} 种做法 · ${(x.seasonings || []).length} 样调料</span>
       </span>
@@ -3389,11 +3410,11 @@ function viewManage() {
           </span>`
         );
       }
-      return `<div class="list-row">
+      return `<div class="list-row" role="button" tabindex="0" data-act="open-dish" data-id="${esc(x.id)}" title="打开这道菜的详情">
         <span class="icon-mini act">${x.images && x.images[0] ? '🖼️' : dishEmoji(x.name)}</span>
         <span class="list-row-main">
           <span class="list-row-title">${esc(x.name)}${ownTag(x)}</span>
-          <span class="list-row-sub">${esc(x.category)} · ${(x.methods || []).length} 种做法 · ${(x.seasonings || []).length} 样调料</span>
+          <span class="list-row-sub">${esc(x.category)} · ${(x.methods || []).length} 种做法 · ${(x.seasonings || []).length} 样调料${x.authorName ? ` · ${esc(dishAuthor(x))}` : ''}</span>
         </span>
         ${
           canEdit(x)
@@ -4527,7 +4548,8 @@ function accountSettingsHtml() {
     <div class="section-head"><h2 class="section-title">我的账号</h2><span class="pill-now">${esc(role)}</span></div>
     ${accountProfileSummary()}
     <p class="account-risk compact">${u.legacyDefaultPassword || u.usingDefaultPassword || u.passwordRisk ? '⚠️ 当前仍在使用初始密码 123456，建议修改。' : '账户密码只用于登录，不会显示给其他成员。'}</p>
-    <div class="row-2"><button class="btn ghost" data-act="account-password">修改密码</button><button class="btn ghost" data-act="account-logout">退出登录</button></div>
+    <div class="row-2"><button class="btn ghost" data-act="account-profile">编辑资料</button><button class="btn ghost" data-act="account-password">修改密码</button></div>
+    <button class="btn ghost block" data-act="account-logout">退出登录</button>
     <div class="section-head" style="margin-top:18px"><h2 class="section-title">超级管理员</h2></div>
     ${expiry ? `<div class="super-status">🛡️ 超级管理员已授权 · 还剩 ${esc(expiry)}</div>` : `<p class="section-sub">输入全局管理令牌后，当前账号可临时管理所有家庭和平台配置，有效 12 小时。</p>`}
     <button class="btn ${expiry ? 'soft' : ''} block" data-act="unlock">${expiry ? '重新输入全局管理令牌' : '输入全局管理令牌'}</button>
@@ -4915,9 +4937,9 @@ function openJoinSheet(houseId) {
   openSheet({
     title: `申请加入「${h.name}」`,
     body: `
-      <div class="field">
-        <label class="field-label">你是谁<span class="field-hint">这个家里的人一眼就能认出你</span></label>
-        <input class="input" id="joinName" maxlength="20" placeholder="例如：姑姑" value="${esc(meName())}" />
+      <div class="account-profile" style="margin-bottom:14px">
+        <span class="account-avatar">${esc(accountUser()?.emoji || '🙋')}</span>
+        <div><b>${esc(accountUser()?.displayName || accountUser()?.loginId || '当前账户')}</b><span class="account-id">申请身份由当前登录账户自动识别</span></div>
       </div>
       <div class="field">
         <label class="field-label">想说的话<span class="field-hint">选填</span></label>
@@ -4971,6 +4993,29 @@ const ACTIONS = {
   'account-logout'() {
     accountLogout();
   },
+  'account-profile'() {
+    const u = accountUser() || {};
+    openSheet({
+      title: '编辑账户资料',
+      body: `<div class="field"><label class="field-label">登录 ID</label><input class="input" id="accountProfileLoginId" maxlength="32" value="${esc(u.loginId || '')}" /></div><div class="field"><label class="field-label">账户姓名</label><input class="input" id="accountProfileDisplayName" maxlength="40" value="${esc(u.displayName || u.loginId || '')}" /></div><div class="field"><label class="field-label">头像</label><input class="input" id="accountProfileEmoji" maxlength="4" value="${esc(u.emoji || '🙋')}" /></div><p class="section-sub">账户姓名是全局统一资料，修改后会同步到你加入的所有家庭、申请记录和菜品作者显示。</p>`,
+      foot: `<button class="btn ghost" data-act="close-sheet">取消</button><button class="btn" data-act="save-account-profile">保存</button>`,
+    });
+    $('#accountProfileDisplayName')?.focus();
+  },
+  async 'save-account-profile'() {
+    const loginId = String($('#accountProfileLoginId')?.value || '').trim();
+    const displayName = String($('#accountProfileDisplayName')?.value || '').trim();
+    const emoji = String($('#accountProfileEmoji')?.value || '').trim();
+    if (!loginId || !displayName) return toast('登录 ID 和账户姓名不能为空');
+    try {
+      const r = await api('PUT', '/api/account/profile', { loginId, displayName, emoji });
+      S.account = { ...(S.account || {}), user: r.user || r.account?.user, households: r.households || S.account?.households };
+      closeSheet();
+      await loadState(true);
+      render();
+      toast('账户资料已更新');
+    } catch (e) { toast('保存失败：' + e.message); }
+  },
   async 'account-password'() {
     openSheet({
       title: '修改账户密码',
@@ -4992,24 +5037,21 @@ const ACTIONS = {
     } catch (e) { toast('修改失败：' + e.message); }
   },
   'open-join-family'() {
-    const name = accountUser()?.displayName || accountUser()?.loginId || '';
+    const user = accountUser() || {};
     openSheet({
       title: '申请加入家庭',
-      body: `<div class="field"><label class="field-label">家庭 ID 或名称</label><input class="input" id="joinFamilyTarget" placeholder="输入家庭名称或 ID" /></div><div class="field"><label class="field-label">在家庭中的称呼</label><input class="input" id="joinName" maxlength="20" value="${esc(name)}" placeholder="例如：姑姑" /></div><div class="field"><label class="field-label">留言（选填）</label><textarea class="textarea" id="joinNote" rows="3" maxlength="100" placeholder="告诉管理员你是谁"></textarea></div><div class="field"><label class="field-label">申请身份</label><select class="input" id="joinRole"><option value="member">普通成员</option><option value="owner">家庭管理员（由管理员最终决定）</option></select></div>`,
+      body: `<div class="field"><label class="field-label">家庭 ID 或名称</label><input class="input" id="joinFamilyTarget" placeholder="输入家庭名称或 ID" /></div><div class="account-profile"><span class="account-avatar">${esc(user.emoji || '🙋')}</span><div><b>${esc(user.displayName || user.loginId || '当前账户')}</b><span class="account-id">申请人由当前登录账户自动识别</span></div></div><div class="field"><label class="field-label">留言（选填）</label><textarea class="textarea" id="joinNote" rows="3" maxlength="100" placeholder="告诉管理员你是谁"></textarea></div><div class="field"><label class="field-label">申请身份</label><select class="input" id="joinRole"><option value="member">普通成员</option><option value="owner">家庭管理员（由管理员最终决定）</option></select></div>`,
       foot: `<button class="btn ghost" data-act="close-sheet">取消</button><button class="btn" data-act="send-join-family">提交申请</button>`,
     });
   },
   async 'send-join-family'() {
     const target = String($('#joinFamilyTarget')?.value || '').trim();
-    const name = String($('#joinName')?.value || '').trim();
     if (!target) return toast('请输入家庭名称或 ID');
-    if (!name) return toast('请填写你在家庭中的称呼');
     const h = households().find((x) => x.id === target || x.name === target);
     const householdId = h ? h.id : target;
     try {
       await api('POST', '/api/join-requests', {
         householdId,
-        name,
         note: String($('#joinNote')?.value || '').trim(),
         requestedRole: String($('#joinRole')?.value || 'member') === 'owner' ? 'owner' : 'member',
       });
@@ -5754,8 +5796,6 @@ const ACTIONS = {
   },
   /** 申请加入别人家 */
   async 'send-join'(el) {
-    const name = ($('#joinName') || {}).value?.trim();
-    if (!name) return toast('先写上你是谁');
     // 申请是发给**别家**的，所以切过去再记这个名字 —— 记在当前家名下是错的
     const target = el.dataset.id || S.householdId;
     if (target !== S.householdId) {
@@ -5764,14 +5804,13 @@ const ACTIONS = {
     }
     try {
       const r = await api('POST', '/api/join-requests', {
-        name,
         householdId: target,
         note: (($('#joinNote') || {}).value || '').trim(),
         requestedRole: (($('#joinRole') || {}).value || 'member') === 'owner' ? 'owner' : 'member',
       });
       // 还没批下来，所以还不是成员、没有成员 id 可认 —— 先记着名字，
       // 顶栏就能显示「姑姑（等批准）」而不是「还没登记」
-      rememberPendingName(name);
+      rememberPendingName(accountUser()?.displayName || accountUser()?.loginId || '');
       S.access = S.access || [];
       if (!S.access.some((x) => x.id === r.data.id)) S.access.unshift(r.data);
       closeSheet();
