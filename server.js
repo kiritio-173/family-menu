@@ -41,10 +41,20 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.16.0';
+const APP_VERSION = '1.17.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.17.0',
+    date: '2026-10-16',
+    title: '共享菜单收进家庭与菜品供应状态',
+    items: [
+      '已加入家庭的账户可以把共享菜复制为当前家庭私菜，原共享菜保持不变；未加入家庭时按钮和接口均不可用',
+      '菜单页与管理页显示统一的菜品供应状态，管理员可切换正常供应或暂停供应',
+      '暂停供应菜不能新建点餐，随机来一道默认排除，已有订单和计划继续保留',
+    ],
+  },
   {
     version: '1.16.0',
     date: '2026-10-16',
@@ -52,7 +62,7 @@ const RELEASES = [
     items: [
       '未设置全局管理口令时，账户可以直接进入开放超级管理员模式并初始化口令；设置后按账户绑定 12 小时授权',
       '家庭管理员只由成员关系中的 owner 决定，历史家庭口令不再授予权限，管理页移除家庭口令入口',
-      '共享菜单只能查看，普通成员不能直接收进家庭；未加入家庭时只读共享菜单，不能点菜或修改家庭数据',
+      '共享菜单对未加入家庭的账户保持只读；已加入家庭的账户可将共享菜收进当前家庭成为私菜',
       '普通成员管理工作区增加折叠结构，家庭设置和菜单数据按角色显示',
     ],
   },
@@ -1219,6 +1229,7 @@ function loadState() {
   state.dishes.forEach((d) => {
     if (d.householdId === undefined) d.householdId = null;
     else if (d.householdId) d.householdId = resolveHouseholdId(d.householdId);
+    if (!['active', 'paused'].includes(d.dishStatus)) d.dishStatus = 'active';
   });
   // 按 id 去重：重复 id 会让删除/更新只命中一条
   const seenD = new Set();
@@ -2010,6 +2021,12 @@ function normDish(input, prev, keepInputId) {
     authorId: safeText(input.authorId ?? base.authorId, 40),
     authorUserId: safeText(input.authorUserId ?? base.authorUserId, 80),
     authorName: safeText(input.authorName ?? base.authorName, 20),
+    // 菜品供应状态独立于点餐状态：暂停时仍可查看，但不能新建点餐。
+    dishStatus: ['active', 'paused'].includes(input.dishStatus)
+      ? input.dishStatus
+      : ['active', 'paused'].includes(base.dishStatus)
+      ? base.dishStatus
+      : 'active',
     description: safeText(input.description, 300),
     images: safeList(input.images ?? base.images)
       .map((s) => safeText(s, 300))
@@ -3381,7 +3398,22 @@ async function handleAPI(req, res, url) {
       if (method === 'POST' && route[2] === 'adopt' && id) {
         const src = state.dishes.find((d) => d.id === id);
         if (!src) return sendError(res, 404, '菜品不存在');
-        return sendError(res, 403, '共享菜单只能查看，不能直接收进家庭；请在本家私菜中手动新建');
+        if (src.householdId) return sendError(res, 403, '只能把共享菜单收进当前家庭');
+        // 只能收进当前账户已加入的家庭；超级管理员可在已选择的家庭中代办。
+        if (!isMyMember(req, hhId) && !isHouseAdmin(req, hhId)) {
+          return sendError(res, 403, '请先加入这个家庭，再把共享菜收进我家');
+        }
+        const copy = normDish({ ...src, id: '', householdId: hhId, dishStatus: 'active' });
+        if (!copy) return sendError(res, 400, '菜品无法复制');
+        const who = whoami(req, hhId);
+        copy.authorId = who.kind === 'member' ? who.memberId : '';
+        copy.authorUserId = who.userId || accountUserId(req) || '';
+        copy.authorName = who.name || (who.userId && userById(who.userId)?.displayName) || '';
+        const bad = categoryProblem(copy);
+        if (bad) return sendError(res, 400, bad);
+        state.dishes.unshift(copy);
+        scheduleSave('dishes');
+        return sendJSON(res, 200, { ok: true, data: publicDish(copy) });
       }
 
       if (method === 'POST' && !id) {
@@ -3994,6 +4026,22 @@ async function handleAPI(req, res, url) {
   // 普通成员只能改自己添加的那几条。
   if (route[0] === 'dishes') {
     const id = route[1];
+    if (method === 'PATCH' && route[2] === 'status' && id) {
+      const idx = state.dishes.findIndex((d) => d.id === id);
+      if (idx < 0) return sendError(res, 404, '菜品不存在');
+      const dish = state.dishes[idx];
+      // 共享菜由任一家庭管理员维护；私菜只能由所属家庭管理员维护。
+      if (dish.householdId ? !isHouseAdmin(req, dish.householdId) : !canWriteShared(req)) {
+        return sendError(res, 403, '只有管理员能修改菜品供应状态');
+      }
+      const body = await readBody(req);
+      const next = safeText(body && body.dishStatus, 20);
+      if (!['active', 'paused'].includes(next)) return sendError(res, 400, '菜品状态不对');
+      dish.dishStatus = next;
+      dish.updatedAt = nowISO();
+      scheduleSave('dishes');
+      return sendJSON(res, 200, { ok: true, data: publicDish(dish) });
+    }
     if (method === 'POST' && !id) {
       const body = await readBody(req);
       const dish = normDish(body);
@@ -4159,6 +4207,12 @@ async function handleAPI(req, res, url) {
     if (method === 'POST' && !id) {
       const order = normOrder(await readBody(req));
       if (!requireAccountHousehold(req, res, order.householdId)) return;
+      if (order.dishId) {
+        const dish = state.dishes.find((d) => d.id === order.dishId);
+        if (dish && dish.dishStatus === 'paused') {
+          return sendError(res, 409, '这道菜目前暂停供应，不能新建点餐');
+        }
+      }
       state.orders.unshift(order);
       scheduleSave('orders');
       return sendJSON(res, 200, { ok: true, data: order });

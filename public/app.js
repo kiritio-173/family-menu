@@ -385,7 +385,27 @@ function dishAuthor(d) {
 
 /** 不能改的共享菜上，改挂这个按钮 */
 function adoptBtn(d, cls) {
-  return '';
+  if (!d || d.householdId || !S.householdId) return '';
+  // 收进我家只能落到当前已加入的家庭；超级管理员在当前选定家庭中也可代办。
+  if (!isMemberOf(S.householdId) && !isHouseAdmin(S.householdId)) return '';
+  return `<button class="${cls || 'btn ghost'}" data-act="adopt-dish" data-id="${esc(d.id)}">👇 收进我家</button>`;
+}
+
+function canManageDishStatus(d) {
+  if (!d) return false;
+  return d.householdId ? isHouseAdmin(d.householdId) : canWriteShared();
+}
+
+function dishStatusTag(d) {
+  return d && d.dishStatus === 'paused'
+    ? '<span class="tag own" title="暂停供应，暂时不能新建点餐">⏸ 暂停供应</span>'
+    : '<span class="tag" title="正常供应">✓ 正常供应</span>';
+}
+
+function dishStatusAction(d) {
+  if (!canManageDishStatus(d)) return '';
+  const paused = d.dishStatus === 'paused';
+  return `<button class="ib ${paused ? 'on' : ''}" data-act="toggle-dish-status" data-id="${esc(d.id)}" title="${paused ? '恢复供应' : '暂停供应'}">${paused ? '▶ 恢复供应' : '⏸ 暂停供应'}</button>`;
 }
 
 /** 当前家庭看得见的分类，按 order 排 */
@@ -1478,6 +1498,7 @@ function randomCandidates(filters) {
     (o.status === 'pending' || o.status === 'cooking') && isSameDish(o, dish)
   );
   return scope.filter((d) => {
+    if (d.dishStatus === 'paused') return false;
     if (filters.category && filters.category !== '全部' && d.category !== filters.category) return false;
     const dishTags = (d.tags || []).map((x) => String(x).toLocaleLowerCase());
     if (tags.length && !tags.every((tag) => dishTags.some((x) => x.includes(tag)))) return false;
@@ -1617,6 +1638,7 @@ function dishCard(d, folded) {
   if (d.duration) meta.push(`<span class="tag">⏱ ${d.duration}′</span>`);
   if (d.servings) meta.push(`<span class="tag">👥 ${esc(d.servings)}</span>`);
   if ((d.tags || []).length) meta.push(`<span class="tag hot">${esc(d.tags[0])}</span>`);
+  meta.push(dishStatusTag(d));
 
   // 同名折叠的提示。共享那版优先露出来，但得让人知道自家那份没丢 ——
   // 默默藏起来会让人以为自己的菜被谁删了。
@@ -1644,6 +1666,7 @@ function dishCard(d, folded) {
         👩‍🍳 ${iCook ? '我来做' : cookBy ? cookBy + ' 来做' : '我来做'}</button>
       <button class="ib ${dn ? 'has' : ''}" data-act="open-dish-notes" data-id="${esc(d.id)}"
         aria-label="${dn ? dn + ' 条留言' : '留个言'}">💬${dn ? ' ' + dn : ''}</button>
+      ${dishStatusAction(d)}
     </div>`;
 
   return `<article class="card" role="button" tabindex="0" aria-label="查看 ${esc(d.name)} 做法"
@@ -1926,6 +1949,7 @@ function openDish(id) {
 
   const meta = [];
   if (d.category) meta.push(`<span class="tag">${esc(d.category)}</span>`);
+  meta.push(dishStatusTag(d));
   if (isPrivate(d)) meta.push('<span class="tag own">🔒 只有本家看得见</span>');
   if (d.servings) meta.push(`<span class="tag">👥 ${esc(d.servings)}</span>`);
   if (d.duration) meta.push(`<span class="tag">⏱ ${esc(d.duration)} 分钟</span>`);
@@ -2010,7 +2034,12 @@ function openDish(id) {
       <button class="btn soft" data-act="toggle-plan-dish" data-id="${esc(d.id)}" data-week="${esc(planWeek())}">
         ${inPlan ? '✓ 已在计划里' : '＋ 加入计划'}
       </button>
-      <button class="btn" data-act="order-dish" data-id="${esc(d.id)}">今天想吃这个</button>`,
+      ${dishStatusAction(d)}
+      ${
+        d.dishStatus === 'paused'
+          ? '<button class="btn" disabled title="暂停供应，暂时不能新建点餐">⏸ 暂停供应</button>'
+          : `<button class="btn" data-act="order-dish" data-id="${esc(d.id)}">今天想吃这个</button>`
+      }`,
   });
 }
 
@@ -3233,8 +3262,9 @@ function viewManageMember() {
         <span class="list-row-title">${esc(x.name)}${ownTag(x)}${
           x.authorName ? `<span class="pill-now" title="作者">${esc(memberEmoji(x.authorName))} ${esc(dishAuthor(x))}</span>` : ''
         }</span>
-        <span class="list-row-sub">${esc(x.category)} · ${(x.methods || []).length} 种做法 · ${(x.seasonings || []).length} 样调料</span>
+        <span class="list-row-sub">${esc(x.category)} · ${(x.methods || []).length} 种做法 · ${(x.seasonings || []).length} 样调料 · ${dishStatusTag(x)}</span>
       </span>
+      ${dishStatusAction(x)}
       ${
         ok
           ? `<button class="icon-mini" data-act="edit-dish" data-id="${esc(x.id)}" title="编辑">✏️</button>
@@ -3391,7 +3421,7 @@ function viewManage() {
           `<span class="icon-mini act">${x.images && x.images[0] ? '🖼️' : dishEmoji(x.name)}</span>
           <span class="list-row-main">
             <span class="list-row-title">${esc(x.name)}${ownTag(x)}</span>
-            <span class="list-row-sub">${esc(x.category)} · ${(x.methods || []).length} 种做法 · ${(x.seasonings || []).length} 样调料</span>
+          <span class="list-row-sub">${esc(x.category)} · ${(x.methods || []).length} 种做法 · ${(x.seasonings || []).length} 样调料 · ${dishStatusTag(x)}</span>
           </span>`
         );
       }
@@ -3399,8 +3429,9 @@ function viewManage() {
         <span class="icon-mini act">${x.images && x.images[0] ? '🖼️' : dishEmoji(x.name)}</span>
         <span class="list-row-main">
           <span class="list-row-title">${esc(x.name)}${ownTag(x)}</span>
-          <span class="list-row-sub">${esc(x.category)} · ${(x.methods || []).length} 种做法 · ${(x.seasonings || []).length} 样调料${x.authorName ? ` · ${esc(dishAuthor(x))}` : ''}</span>
+        <span class="list-row-sub">${esc(x.category)} · ${(x.methods || []).length} 种做法 · ${(x.seasonings || []).length} 样调料 · ${dishStatusTag(x)}${x.authorName ? ` · ${esc(dishAuthor(x))}` : ''}</span>
         </span>
+        ${dishStatusAction(x)}
         ${
           canEdit(x)
             ? `<button class="icon-mini" data-act="edit-dish" data-id="${esc(x.id)}" title="编辑">✏️</button>
@@ -5328,6 +5359,20 @@ const ACTIONS = {
       toast('收不进来：' + err.message);
     }
   },
+  async 'toggle-dish-status'(el) {
+    const d = dishById(el.dataset.id);
+    if (!d) return;
+    if (!canManageDishStatus(d)) return toast('只有管理员能修改菜品供应状态');
+    const next = d.dishStatus === 'paused' ? 'active' : 'paused';
+    try {
+      await api('PATCH', '/api/dishes/' + encodeURIComponent(d.id) + '/status', { dishStatus: next });
+      await loadState(true);
+      render();
+      toast(next === 'paused' ? '已暂停供应' : '已恢复供应');
+    } catch (err) {
+      toast('状态更新失败：' + err.message);
+    }
+  },
   async 'del-dish'(el) {
     const d = dishById(el.dataset.id);
     if (!d) return;
@@ -5417,7 +5462,9 @@ const ACTIONS = {
 
   /* 点餐 */
   'order-dish'(el) {
-    openOrderForm(dishById(el.dataset.id));
+    const d = dishById(el.dataset.id);
+    if (d && d.dishStatus === 'paused') return toast('这道菜目前暂停供应，不能新建点餐');
+    openOrderForm(d);
   },
   'new-order'() {
     openOrderForm(null);

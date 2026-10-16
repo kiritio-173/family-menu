@@ -1536,9 +1536,25 @@ async function main() {
   eq('B 家私菜没被改',
     (await get('/api/state', tokX)).body.data.dishes.find((d) => d.id === bDishX.id).name, 'B 家私菜');
 
-  // 共享菜只能查看，不能直接收进家庭
+  // 已加入家庭的成员可以把共享菜复制为本家私菜，原菜保持不变
   const adopted = await post('/api/my-dishes/' + ppDish.id + '/adopt?householdId=' + hhA, {}, undefined, devA);
-  eq('共享菜单禁止直接收进家庭', adopted.status, 403);
+  eq('共享菜单可以收进我家', adopted.status, 200);
+  eq('收进我家后生成当前家庭私菜', adopted.body.data.householdId, hhA);
+  eq('收进我家后的菜默认正常供应', adopted.body.data.dishStatus, 'active');
+  eq('收进我家不修改原共享菜', (await get('/api/state', tokX)).body.data.dishes.find((d) => d.id === ppDish.id).householdId, null);
+  eq('未加入家庭不能收进我家',
+    (await post('/api/my-dishes/' + ppDish.id + '/adopt?householdId=' + hhB, {}, undefined, devA)).status, 403);
+
+  // 菜品供应状态独立于点餐状态：管理员能切换，普通成员只能查看。
+  const paused = await req('PATCH', '/api/dishes/' + ppDish.id + '/status', { dishStatus: 'paused' }, tokX);
+  eq('管理员可以暂停共享菜供应', paused.status, 200);
+  eq('暂停状态正确返回', paused.body.data.dishStatus, 'paused');
+  eq('无管理员凭证不能修改菜品供应状态',
+    (await req('PATCH', '/api/dishes/' + ppDish.id + '/status', { dishStatus: 'active' })).status, 401);
+  eq('暂停供应菜不能新建点餐',
+    (await post('/api/orders', { householdId: hhA, dishId: ppDish.id, dishName: ppDish.name })).status, 409);
+  eq('管理员可以恢复供应',
+    (await req('PATCH', '/api/dishes/' + ppDish.id + '/status', { dishStatus: 'active' }, tokX)).body.data.dishStatus, 'active');
 
   // 管理员：什么都能动
   eq('解锁后能加公共菜',
