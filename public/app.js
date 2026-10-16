@@ -321,17 +321,12 @@ function isSuper() {
   return hasAccount() ? !!S.authed : !S.data.settings.hasPin || S.authed;
 }
 
-/**
- * 家庭管理员。
- * 超管 > 本家口令会话 > （本家没设口令时）本家 owner。
- * 一旦这个家设了口令，光「在 owner 名单上」就不再够了。
- */
+/** 家庭管理员只由当前账户在家庭成员关系中的 owner 角色决定。 */
 function isHouseAdmin(householdId, member) {
   if (isSuper()) return true;
   if (!householdId) return false;
-  if (houseToken(householdId)) return true;
   const h = households().find((x) => x.id === householdId);
-  if (!h || h.hasPin) return false;
+  if (!h) return false;
   const me = member || memberOf(householdId);
   return !!me && me.role === 'owner';
 }
@@ -339,10 +334,10 @@ function isHouseAdmin(householdId, member) {
 /** 至少管着一家 —— 决定能不能碰共享菜单、能不能改点餐状态、能不能建/删家庭 */
 function anyHouseAdmin() {
   if (isSuper()) return true;
-  if (households().some((h) => houseToken(h.id))) return true;
-  const m = meMember();
-  if (!m || m.role !== 'owner') return false;
-  return households().some((h) => !h.hasPin);
+  return households().some((h) => {
+    const me = memberOf(h.id);
+    return !!me && me.role === 'owner';
+  });
 }
 
 /** 我是不是这家的成员（不管是不是管理员） */
@@ -390,8 +385,7 @@ function dishAuthor(d) {
 
 /** 不能改的共享菜上，改挂这个按钮 */
 function adoptBtn(d, cls) {
-  return `<button class="${cls || 'btn soft sm'}" data-act="adopt-dish" data-id="${esc(d.id)}"
-    title="抄一份到你家，改成自己的做法，公共菜谱原样不动">👇 收进我家</button>`;
+  return '';
 }
 
 /** 当前家庭看得见的分类，按 order 排 */
@@ -1087,8 +1081,8 @@ async function loadState(silent) {
     }
     S.shoppingChecked = new Set(data.settings.shoppingChecked || []);
     S.access = data.access && Array.isArray(data.access.requests) ? data.access.requests : [];
-    // 没设口令 → 管理区本来就开着；设了 → 看本机有没有有效会话
-    if (!data.settings.hasPin) S.authed = !hasAccount();
+    // 没设全局口令 → 开放超级管理员模式；设了 → 看本机有没有有效会话
+    if (!data.settings.hasPin) S.authed = true;
     else if (!authToken()) S.authed = false;
     // 当前家庭记在这台设备上：A 家选 301、B 家选 502，互不影响
     const list = households();
@@ -3227,7 +3221,6 @@ function joinRequestRows(requests) {
 function viewManageMember() {
   const admin = anyHouseAdmin();
   const house = currentHousehold();
-  const locked = house && house.hasPin && !houseToken(house.id);
   const ownWaiting = admin
     ? (S.access || []).filter((r) => r.status === 'pending' && r.householdId === S.householdId)
     : [];
@@ -3258,10 +3251,8 @@ function viewManageMember() {
   const publicCats = sortedCategories().filter((c) => !canEdit(c));
 
   const roleLine = admin
-    ? locked
-      ? `这个家的口令还没在这台设备上解锁 —— 现在你是普通成员视角。输一次口令才能管共享菜单和全家的私菜。`
-      : `你是「${house ? house.name : ''}」的管理员：共享菜单、这家所有私菜、成员和家庭口令都能改。`
-    : `这里是 <b>你自己写的</b>那几道菜。别人的和公共菜谱改不动 —— 想改成自己的做法，按「👇 收进我家」抄一份。`;
+    ? `你是「${house ? house.name : ''}」的家庭管理员：共享菜单、这家所有私菜、成员和家庭设置都能改。`
+    : `这里是 <b>你自己写的</b>那几道菜。共享菜单和别人的私菜只能查看；需要自己的版本请在本家私菜中手动新建。`;
 
   return `
     <div class="admin-warn" style="background:#f1f6f2;border-color:#cfe3d4">
@@ -3270,11 +3261,6 @@ function viewManageMember() {
         <span class="pill-now" style="margin-left:8px">${esc(ROLE_LABEL[myRole()])}</span>
       </div>
       <p class="admin-warn-text" style="color:var(--text-mid)">${esc(roleLine)}</p>
-      ${
-        locked
-          ? '<button class="btn soft sm" style="margin-top:10px" data-act="unlock-house">🔑 输家庭口令解锁</button>'
-          : ''
-      }
     </div>
 
     ${
@@ -3288,6 +3274,8 @@ function viewManageMember() {
         : ''
     }
 
+    <details class="manage-group" open>
+      <summary class="manage-group-title"><span>菜单与日常数据</span><span class="manage-chevron">⌄</span></summary>
     ${
       admin
         ? `<div class="section-head">
@@ -3373,17 +3361,14 @@ function viewManageMember() {
              <span class="list-row-title">家庭成员</span>
              <span class="list-row-sub">${memberList().length} 位 · 每人一个密码，改成员要先确认身份</span>
            </span><button class="btn ghost sm" data-act="open-members">管理</button></div>
-           ${joinRequestRows(ownWaiting)}
-           <div class="list-row"><span class="icon-mini">🔑</span><span class="list-row-main">
-             <span class="list-row-title">家庭口令</span>
-             <span class="list-row-sub">${house && house.hasPin ? '已设置' : '没设 —— 这个家的 owner 天然是管理员'}</span>
-           </span><button class="btn ghost sm" data-act="edit-household" data-id="${esc(S.householdId)}">${house && house.hasPin ? '修改' : '设置'}</button></div>`
+           ${joinRequestRows(ownWaiting)}`
         : `<div class="section-head"><h2 class="section-title">管理员入口</h2></div>
            <div class="list-row"><span class="icon-mini">🔐</span><span class="list-row-main">
-             <span class="list-row-title">共享菜单与家庭设置</span>
-             <span class="list-row-sub">共享菜谱、成员、做饭状态和系统设置由管理员维护</span>
+             <span class="list-row-title">超级管理员设置</span>
+             <span class="list-row-sub">全局口令、共享菜单、做饭状态和系统设置由管理员维护</span>
            </span><button class="btn ghost sm" data-act="unlock">输入管理口令</button></div>`
-    }`;
+    }
+    </details>`;
 }
 
 function viewManage() {
@@ -3610,7 +3595,6 @@ function openHouseholdEditor(house) {
     note: '',
   };
   const editing = !!house;
-  const canPin = editing && isHouseAdmin(h.id);
   openSheet({
     title: editing ? `编辑「${house.name}」` : '添加家庭',
     body: `
@@ -3660,28 +3644,7 @@ function openHouseholdEditor(house) {
                   : ''
               }
             </div>
-            <div class="field">
-              <label class="field-label">家庭口令<span class="field-hint">${
-                h.hasPin ? '已设置。管这个家的人用它解锁管理员权限。' : '没设。这个家的 owner 天然就是管理员。'
-              }</span></label>
-              ${
-                canPin
-                  ? `<input class="input" id="hPin" type="password" placeholder="${
-                      h.hasPin ? '已设置，留空表示不修改' : '例如 8899'
-                    }" />
-                     ${
-                       h.hasPin
-                         ? '<label class="field-label" style="display:flex;align-items:center;gap:8px;margin-top:10px"><input type="checkbox" id="hPinClear" style="width:18px;height:18px" />取消口令保护（勾上后保存即刻生效）</label>'
-                         : ''
-                     }`
-                  : '<p class="field-hint">只有这个家的管理员能改。</p>'
-              }
-            </div>
-            <p class="section-sub">${
-              canPin
-                ? '改了家庭口令，这个家所有设备上的管理员解锁都会失效，需要重新输。'
-                : '家庭口令是「这个家」的管理凭证，不是成员的个人密码。'
-            }</p>`
+            <p class="section-sub">家庭权限由成员角色控制：owner 是家庭管理员，member 只能使用家庭功能。</p>`
           : `<p class="section-sub">
               新建的家庭从零开始：没有点餐记录、库存是空的。菜谱是所有家庭共享的，不用重复录。
             </p>
@@ -4181,8 +4144,8 @@ function openSettings() {
         <input class="input" id="setWelcome" value="${esc(s.welcome || '')}" /></div>
       <div class="field"><label class="field-label">管理口令<span class="field-hint">${
         s.hasPin
-          ? '已开启。知道口令的那几位家人就是管理员，能增删改菜谱和分类；其他人照样能浏览、点餐、留言、管库存。换口令填新的就行；不知道旧口令了就去 data/settings.json 里把 adminPin 删掉'
-          : '没设 = 局域网里任何人都能改菜谱。建议设一个，让菜单的编辑只落在几个管理员手上'
+          ? '已开启。输入后当前账户获得 12 小时超级管理员权限；家庭管理员仍由成员关系中的 owner 决定。换口令填新的即可。'
+          : '尚未设置。当前为开放超级管理员模式，可以先保存一个全局管理口令；设置后需要重新输入才能获得超级管理员权限。'
       }</span></label>
         <input class="input" id="setPin" type="password" placeholder="${
           s.hasPin ? '已设置口令，留空表示不修改' : '例如：家庭厨房口令'
@@ -4310,13 +4273,8 @@ function askMemberPassword(house, member, what) {
 async function askSensitiveAuth(house, what, member) {
   if (!house) return false;
   if (isSuper()) return true;
-  if (houseToken(house.id)) return true; // 这个家刚解过锁，12 小时内都算数
-  if (house.hasPin) return askHousePin(house, what);
-  if (member && member.hasPassword && member.id) return askMemberPassword(house, member, what);
-  if (member && member.role === 'owner' && !member.hasPassword) return true; // 这一家一个密码都没有
-  // 走到这儿说明这个人手上没有任何能验的东西。问家庭口令；没口令的话
-  // 服务端会自己给一张会话，等于把决定权交回服务端 —— 比前端猜要准。
-  return askHousePin(house, what);
+  // 家庭权限只看 owner 关系；历史家庭口令不再参与授权。
+  return !!member && member.role === 'owner';
 }
 
 function clearPinCheck() {
@@ -5857,39 +5815,10 @@ const ACTIONS = {
     const body = { name, emoji, note: $('#hNote').value.trim() };
     const id = el.dataset.id;
     const target = id ? households().find((x) => x.id === id) : null;
-    const pinBox = $('#hPin');
-    const pin = pinBox ? pinBox.value.trim() : '';
-    const clearPin = ($('#hPinClear') || {}).checked === true;
-    const sensitive = id && (pin || clearPin);
 
-    // 改这个家之前先确认身份：不管改的是名字还是口令，
-    // 服务端都要求「你是这一家的管理员」，所以这一步是两种改法共用的。
+    // 改家庭资料只需要当前家庭管理员或超级管理员；不再存在家庭口令分支。
     if (target && !isHouseAdmin(id, memberOf(id))) {
-      const ok = await askSensitiveAuth(target, '修改家庭设置', memberOf(id));
-      if (!ok) return;
-    }
-
-    // 家庭口令是危险动作，单独一次提交 —— 名字和图标改坏了不该连累口令一起没改成
-    if (sensitive) {
-    if (pin && !/^\S{4,12}$/.test(pin)) return toast('家庭口令要 4 到 12 个字符');
-      // 先把无害的字段存掉，再改口令 —— 反过来的话，用户输错口令会把名字也一起丢掉
-      try {
-        await api('PUT', `/api/households/${id}`, body);
-      } catch (err) {
-        return toast('保存失败：' + err.message);
-      }
-      try {
-        await api('PUT', `/api/households/${id}`, clearPin ? { clearPin: true } : { pin });
-        setHouseToken(id, ''); // 旧会话作废了，本机那把也清掉
-      } catch (err) {
-        await loadState(true);
-        render();
-        return toast(`${err.message}（名字已经改好了）`, 5000);
-      }
-      closeSheet();
-      await loadState(true);
-      render();
-      return toast(clearPin ? '已取消家庭口令' : '已更新家庭口令', 3600);
+      return toast('只有这个家庭的管理员可以修改家庭资料');
     }
     const saved = await (id
       ? api('PUT', `/api/households/${id}`, body)

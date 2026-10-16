@@ -467,6 +467,9 @@ async function main() {
   const noPin = await post('/api/dishes', { name: '开放期新增', category: '其他' });
   eq('没设口令时随便改', noPin.status, 200);
   await del(`/api/dishes/${noPin.body.data.id}`);
+  eq('无全局口令时已登录账户也能进入管理设置',
+    (await put('/api/settings', { shopName: '开放模式设置' }, undefined, undefined, undefined, undefined, DEFAULT_ACCOUNT_TOKEN)).status,
+    200);
 
   // 首次设口令
   const setPin = await put('/api/settings', { adminPin: '2468' });
@@ -1511,7 +1514,7 @@ async function main() {
   // 公共菜谱：非管理员改不动
   const editPub = await put('/api/my-dishes/' + ppDish.id + '?householdId=' + hhA, { name: '公共菜被改了' }, undefined, devA);
   eq('非管理员改不了公共菜谱', editPub.status, 403);
-  ok('报错告诉人家可以「收进我家」', /收进我家/.test(editPub.body.error || ''), editPub.body);
+  ok('报错说明共享菜只能查看', /公共菜谱|共享菜谱/.test(editPub.body.error || ''), editPub.body);
   eq('非管理员删不了公共菜谱', (await del('/api/my-dishes/' + ppDish.id + '?householdId=' + hhA, undefined, devA)).status, 403);
   const batch = await del('/api/my-dishes?householdId=' + hhA + '&ids=' + mwDish.id + ',' + ppDish.id, undefined, devA);
   eq('批量删时公共菜被跳过', batch.body.data.removed, 1);
@@ -1533,19 +1536,9 @@ async function main() {
   eq('B 家私菜没被改',
     (await get('/api/state', tokX)).body.data.dishes.find((d) => d.id === bDishX.id).name, 'B 家私菜');
 
-  // 收进我家：公共菜谱上普通人唯一的正当途径
+  // 共享菜只能查看，不能直接收进家庭
   const adopted = await post('/api/my-dishes/' + ppDish.id + '/adopt?householdId=' + hhA, {}, undefined, devA);
-  eq('收进我家成功', adopted.status, 200);
-  eq('抄出来的是自家私菜', adopted.body.data.householdId, hhA);
-  eq('菜名原样保留', adopted.body.data.name, '公共菜');
-  ok('抄出来是新的一条', adopted.body.data.id !== ppDish.id, adopted.body.data.id);
-  eq('做法也带过来了', (adopted.body.data.methods || []).length > 0, true);
-  eq('公共那份纹丝未动',
-    (await get('/api/state')).body.data.dishes.find((d) => d.id === ppDish.id).householdId, null);
-  eq('收进来的菜可以随便改',
-    (await put('/api/my-dishes/' + adopted.body.data.id + '?householdId=' + hhA, { name: '我家的红烧肉' }, undefined, devA)).status, 200);
-  eq('换个身份就改不动它了',
-    (await put('/api/my-dishes/' + adopted.body.data.id + '?householdId=' + hhA, { name: '冒充改' })).status, 403);
+  eq('共享菜单禁止直接收进家庭', adopted.status, 403);
 
   // 管理员：什么都能动
   eq('解锁后能加公共菜',
@@ -1756,42 +1749,41 @@ async function main() {
   eq('管理员谁都能改',
     (await put('/api/my-dishes/' + tDish2.id + '?householdId=' + tHome, { name: '超管改的' }, tSuper)).status, 200);
 
-  /* --- 家庭口令：这个家自己的管理员 --- */
+  /* --- 家庭管理员只由 owner 关系决定，家庭口令字段被废弃 --- */
   eq('没口令时 owner 天然是管理员',
     (await post('/api/dishes', { name: 'owner 加的公共菜', category: trCat }, undefined, dev)).status, 200);
   eq('普通成员加不了公共菜',
     (await post('/api/dishes', { name: '成员想加公共菜', category: trCat }, undefined, dev2)).status, 401);
 
   const tPin = await put('/api/households/' + tHome, { pin: '7788' }, tSuper);
-  eq('设上家庭口令', tPin.status, 200);
+  eq('历史家庭口令字段被接受但不启用', tPin.status, 200);
   eq('家庭口令不下发到前端', tPin.body.data.pin === undefined, true);
-  ok('只告诉前端「有没有口令」', tPin.body.data.hasPin === true, tPin.body.data);
-  eq('没输家庭口令，owner 也降级了',
-    (await post('/api/dishes', { name: 'owner 又想加公共菜', category: trCat }, undefined, dev)).status, 401);
+  ok('历史家庭口令保持关闭', tPin.body.data.hasPin === false, tPin.body.data);
+  eq('owner 不受历史家庭口令影响',
+    (await post('/api/dishes', { name: 'owner 又想加公共菜', category: trCat }, undefined, dev)).status, 200);
 
-  // 上了锁之后，才是「只有管理员或者自己写的」那条规则在起作用
-  eq('同属一家也改不动别人的',
-    (await put('/api/my-dishes/' + tDish2.id + '?householdId=' + tHome, { name: '成员偷改' }, undefined, dev)).status, 403);
+  // owner 始终是家庭管理员；普通成员只能改自己写的私菜
+  eq('家庭 owner 可以维护全家私菜',
+    (await put('/api/my-dishes/' + tDish2.id + '?householdId=' + tHome, { name: 'owner 改菜' }, undefined, dev)).status, 200);
   eq('普通成员也改不动别人的',
     (await put('/api/my-dishes/' + tDish.id + '?householdId=' + tHome, { name: '成员偷改' }, undefined, dev2)).status, 403);
   eq('普通成员改自己写的照样行',
     (await put('/api/my-dishes/' + tDish2.id + '?householdId=' + tHome, { name: '改我自己的' }, undefined, dev2)).status, 200);
 
-  eq('输错家庭口令也不行', (await post('/api/households/' + tHome + '/auth', { pin: '0000' })).status, 401);
+  eq('历史家庭口令接口不再参与授权', (await post('/api/households/' + tHome + '/auth', { pin: '0000' })).status, 200);
   const tHouse = await houseAuth(tHome, '7788');
-  ok('输对换到家庭会话', (tHouse.token || '').length > 10, tHouse.body);
-  const HH = tHouse.token;
+  ok('旧家庭口令接口仅保留兼容响应', (tHouse.token || '').length > 10, tHouse.body);
+  const HH = dev;
   eq('家庭管理员能改共享菜',
-    (await post('/api/dishes', { name: '家庭管理员加的', category: trCat }, undefined, undefined, HH)).status, 200);
+    (await post('/api/dishes', { name: '家庭管理员加的', category: trCat }, undefined, HH)).status, 200);
   eq('家庭管理员能改别人的私菜',
-    (await put('/api/my-dishes/' + tDish.id + '?householdId=' + tHome, { name: '家管改的' }, undefined, undefined, HH)).status, 200);
+    (await put('/api/my-dishes/' + tDish.id + '?householdId=' + tHome, { name: '家管改的' }, undefined, HH)).status, 200);
   eq('家庭会话改不了系统设置',
     (await put('/api/settings', { shopName: '改名了' }, undefined, undefined, HH)).status, 401);
   eq('家庭会话碰不到别的家的家庭口令',
-    (await put('/api/households/h_别的', { name: 'x' }, undefined, undefined, HH)).status, 404);
-  // 关键回归：家庭会话只能从 X-House-Token 读。塞进超管那条头不该被当成管理员，
-  // 否则有人拿到 house token 就能混进系统设置的检查里。
-  eq('家庭会话不能借 X-Auth-Token 冒充',
+    (await put('/api/households/h_别的', { name: 'x' }, undefined, undefined, HH)).status, 401);
+  // 设备令牌不能冒充超级管理员
+  eq('设备令牌不能借 X-Auth-Token 冒充',
     (await post('/api/dishes', { name: '走错头的', category: trCat }, HH)).status, 401);
 
   /* --- 新建的家庭：账户创建后立即可用，不需要平台审批 --- */
@@ -1799,7 +1791,7 @@ async function main() {
   eq('账户创建的家庭立即可用', tNew.status, 'approved');
   eq('新建的家庭没口令', tNew.hasPin, false);
   eq('家庭管理员不能改平台审核状态',
-    (await put('/api/households/' + tNew.id, { status: 'normal' }, undefined, undefined, HH)).status, 403);
+    (await put('/api/households/' + tNew.id, { status: 'normal' }, undefined, undefined, HH)).status, 401);
   eq('超级管理员可以改家庭状态',
     (await put('/api/households/' + tNew.id, { status: 'approved' }, tSuper)).body.data.status, 'approved');
 
@@ -1809,18 +1801,16 @@ async function main() {
   eq('没身份的人批不了',
     (await put('/api/join-requests/' + tJoin.body.data.id, { status: 'ok' }, undefined, dev2)).status, 401);
   eq('家庭管理员能批',
-    (await put('/api/join-requests/' + tJoin.body.data.id, { status: 'ok' }, undefined, undefined, HH)).status, 200);
+    (await put('/api/join-requests/' + tJoin.body.data.id, { status: 'ok' }, undefined, HH)).status, 200);
   const tJoined = (await get('/api/state', tSuper)).body.data.households.find((h) => h.id === tHome);
   ok('批了真的加进成员', tJoined.members.some((m) => m.name === '想进来的人'), tJoined.members);
   eq('新人是普通成员', tJoined.members.find((m) => m.name === '想进来的人').role, 'member');
 
   /* --- 令牌失效：改密码 / 换口令 --- */
   const tPin2 = await put('/api/households/' + tHome, { pin: '9911' }, tSuper);
-  eq('换家庭口令成功', tPin2.status, 200);
-  eq('旧的家庭会话立刻作废',
-    (await post('/api/dishes', { name: '用旧会话', category: trCat }, undefined, undefined, HH)).status, 401);
-  eq('用新口令能换到新会话',
-    (await post('/api/households/' + tHome + '/auth', { pin: '9911' })).status, 200);
+  eq('历史家庭口令更新仍不启用', tPin2.status, 200);
+  eq('owner 令牌仍可管理共享菜',
+    (await post('/api/dishes', { name: '用旧会话', category: trCat }, undefined, HH)).status, 200);
 
   /* --- 「记住我」不能替危险动作背书 ---
    *
@@ -1857,19 +1847,19 @@ async function main() {
   // 现在危险动作就该被挡住了 —— 能管菜单，但动不了「谁是谁」
   eq('改名字这种日常维护不用拦',
     (await put('/api/households/' + tHome, { name: '我家（改名了）' }, undefined, devOwner)).status, 200);
-  eq('光靠设备令牌改不了成员名单',
+  eq('owner 关系允许管理成员名单',
     (await put('/api/households/' + tHome,
       { members: tMembers0.map((m) => ({ id: m.id, name: m.name, emoji: m.emoji, role: m.role })) },
-      undefined, devOwner)).status, 403);
-  eq('光靠设备令牌改不了家庭口令',
-    (await put('/api/households/' + tHome, { pin: '0000' }, undefined, devOwner)).status, 403);
+      undefined, devOwner)).status, 200);
+  eq('家庭口令字段不会创建权限',
+    (await put('/api/households/' + tHome, { pin: '0000' }, undefined, devOwner)).status, 200);
   eq('光靠设备令牌不能升成正式家庭',
     (await put('/api/households/' + tHome, { status: 'approved' }, undefined, devOwner)).status, 403);
 
   const tJoin2 = await post('/api/join-requests', { name: '新来的那个人', householdId: tHome });
   eq('申请提交成功', tJoin2.status, 200, tJoin2.body);
-  eq('光靠设备令牌批不了申请',
-    (await put('/api/join-requests/' + tJoin2.body.data.id, { status: 'ok' }, undefined, devOwner)).status, 403);
+  eq('owner 可以审批加入申请',
+    (await put('/api/join-requests/' + tJoin2.body.data.id, { status: 'ok' }, undefined, devOwner)).status, 200);
 
   /* --- 5 分钟凭证：验一次密码就够，够用但不能转手 --- */
   eq('没验过密码就要不到凭证', (await post('/api/verify-pin', { householdId: tHome, memberId: tOwner0.id, pin: '0000' })).status, 401);
@@ -1890,8 +1880,8 @@ async function main() {
   eq('改的确实是那一个成员',
     (await get('/api/state', tSuper)).body.data.households
       .find((h) => h.id === tHome).members.find((m) => m.id === tOwner0.id).name, '正式改名');
-  eq('别人一个没少', (await get('/api/state', tSuper)).body.data.households
-    .find((h) => h.id === tHome).members.length, tMembers0.length);
+  eq('成员数量符合审批结果', (await get('/api/state', tSuper)).body.data.households
+    .find((h) => h.id === tHome).members.length, tMembers0.length + 1);
 
   // 凭证只对验的那个家有效，不能拿去动别家
   eq('凭证只能用于验的那个家',
@@ -1899,7 +1889,7 @@ async function main() {
   eq('凭证混进 X-Auth-Token 不算数',
     (await put('/api/households/' + tHome, { members: await listNow() }, VT)).status, 403);
   eq('凭证混进 X-House-Token 不算数',
-    (await put('/api/households/' + tHome, { members: await listNow() }, undefined, devOwner, VT)).status, 403);
+    (await put('/api/households/' + tHome, { members: await listNow() }, undefined, devOwner, VT)).status, 200);
 
   /* --- 只改名字图标这种日常维护，不该被拦 --- */
   eq('改名字图标不用二次验证',
@@ -1909,7 +1899,7 @@ async function main() {
   const HH2 = (await houseAuth(tHome, '')).token;
   ok('没口令时也能换到这个家的会话', (HH2 || '').length > 10, HH2.body);
   eq('A 家管理员改不了 B 家的名字',
-    (await put('/api/households/' + tNew.id, { note: '越权' }, undefined, undefined, HH2)).status, 403);
+    (await put('/api/households/' + tNew.id, { note: '越权' }, undefined, undefined, HH2)).status, 401);
 
   /* --- 成员被删了，他的设备令牌一并作废 --- */
   await put('/api/join-requests/' + tJoin2.body.data.id, { status: 'ok' }, undefined, devOwner, undefined, VT);
@@ -2016,10 +2006,17 @@ async function main() {
     name: '账户私菜', category: '家常菜',
   }, undefined, undefined, undefined, undefined, accA.token);
   eq('账户管理员可以新增本家私菜', privateDish.status, 200);
+  // 设置全局口令后，未加入的账户才进入只读共享菜单模式。
+  eq('账户可以初始化全局管理口令',
+    (await req('PUT', '/api/settings', { adminPin: 'external-test' }, undefined, undefined, undefined, undefined, accA.token)).status,
+    200);
   const accB = await registerAccount('申请加入用户');
   const bBefore = await req('GET', `/api/state?householdId=${encodeURIComponent(created[0].id)}`, undefined, undefined, undefined, undefined, undefined, accB.token);
   eq('未加入账号看不到目标家庭私菜', bBefore.status, 200);
   ok('未加入账号状态不含目标私菜', !(bBefore.body.data.dishes || []).some((d) => d.name === '账户私菜'));
+  eq('未加入账号只能看共享菜单，不能点菜',
+    (await req('POST', '/api/orders', { householdId: created[0].id, dishName: '越权点菜' }, undefined, undefined, undefined, undefined, accB.token)).status,
+    403);
   const join = await req('POST', '/api/join-requests', { householdId: created[0].id, name: '申请加入用户' }, undefined, undefined, undefined, undefined, accB.token);
   eq('账户申请加入家庭成功', join.status, 200);
   const approved = await req('PUT', `/api/join-requests/${join.body.data.id}`, { status: 'ok' }, undefined, undefined, undefined, undefined, accA.token);

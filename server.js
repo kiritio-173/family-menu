@@ -41,10 +41,21 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.15.0';
+const APP_VERSION = '1.16.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.16.0',
+    date: '2026-10-16',
+    title: '权限模型收敛与开放初始化修复',
+    items: [
+      '未设置全局管理口令时，账户可以直接进入开放超级管理员模式并初始化口令；设置后按账户绑定 12 小时授权',
+      '家庭管理员只由成员关系中的 owner 决定，历史家庭口令不再授予权限，管理页移除家庭口令入口',
+      '共享菜单只能查看，普通成员不能直接收进家庭；未加入家庭时只读共享菜单，不能点菜或修改家庭数据',
+      '普通成员管理工作区增加折叠结构，家庭设置和菜单数据按角色显示',
+    ],
+  },
   {
     version: '1.15.0',
     date: '2026-10-16',
@@ -2379,9 +2390,9 @@ function whoami(req, householdId) {
  * 设了口令才启用分工。
  */
 function isSuperAdmin(req) {
-  // 旧版未设置全局口令时保持开放兼容；新账户仍按自己的家庭关系判权，
-  // 不能因为「没设口令」就在所有家庭间自动变成超级管理员。
-  if (!state.settings.adminPin) return !accountSessionOf(req);
+  // 未设置全局口令时保持开放初始化模式：账户和旧设备都可以进入管理区，
+  // 直到有人设置全局口令。设置后才需要当前账户持有 12 小时超级授权。
+  if (!state.settings.adminPin) return true;
   const s = sessionOf(req);
   return !!s && s.scope.kind === 'super';
 }
@@ -2455,21 +2466,24 @@ const SENSITIVE_HINT =
  */
 function canDoSensitive(req, householdId) {
   if (isSuperAdmin(req)) return true;
-  const hs = houseSessionOf(req);
-  if (hs && hs.scope.id === householdId) return true;
-  const vs = verifiedSessionOf(req);
-  if (vs && vs.scope.id === householdId) return true;
   const house = state.households.find((h) => h.id === householdId);
   if (!house) return false;
-  if (house.pin) return false; // 这个家有口令，没输过就不算数
   const uidForRequest = accountUserId(req);
   const me = deviceMember(req);
   if (!me && !uidForRequest) return false;
   const member = uidForRequest
     ? (house.members || []).find((x) => x.userId === uidForRequest)
     : (house.members || []).find((x) => x.id === me.memberId);
-  // 还没设密码的 owner：这一家既然一个密码都没有，就没有冒充可谈
-  return !!(member && member.role === 'owner' && !memberPassword(member));
+  // 家庭口令和普通成员密码都不能提升家庭权限；只有 owner 关系可以执行
+  // 成员、申请、家庭删除等敏感操作。旧 verified token 只作为兼容凭证，
+  // 也必须绑定到 owner，不能让普通成员靠自己的密码越权。
+  if (member && member.role === 'owner') return true;
+  const vs = verifiedSessionOf(req);
+  if (vs && vs.scope.id === householdId) {
+    const verifiedMember = (house.members || []).find((m) => m.id === vs.scope.memberId);
+    return !!(verifiedMember && verifiedMember.role === 'owner');
+  }
+  return false;
 }
 
 /**
@@ -2482,9 +2496,6 @@ function isHouseAdmin(req, householdId) {
   if (isSuperAdmin(req)) return true;
   const house = state.households.find((h) => h.id === householdId);
   if (!house) return false;
-  const s = houseSessionOf(req);
-  if (s && s.scope.id === householdId) return true;
-  if (house.pin) return false; // 这个家设了口令，没输过就不算管理员
   const uidForRequest = accountUserId(req);
   if (uidForRequest) {
     const relation = memberForUser(householdId, uidForRequest);
@@ -2539,14 +2550,10 @@ function writeDenied(obj) {
 /** 共享菜谁都能管：任何一家的管理员，或者超级管理员 */
 function canWriteShared(req) {
   if (isSuperAdmin(req)) return true;
-  // 家庭会话走的是 X-House-Token，这里必须用 houseSessionOf，否则读到的是超管那条头
-  if (houseSessionOf(req)) return true;
-  // 本家没设口令的 owner 也算，免得「没设口令反而什么都干不了」
   const uidForRequest = accountUserId(req);
   const me = deviceMember(req);
   if (!me && !uidForRequest) return false;
   for (const h of state.households) {
-    if (h.pin) continue;
     if ((h.members || []).some((m) => (uidForRequest ? m.userId === uidForRequest : m.id === me.memberId) && m.role === 'owner')) return true;
   }
   return false;
@@ -2560,12 +2567,13 @@ function canWriteShared(req) {
  */
 function isAnyHouseAdmin(req) {
   if (isSuperAdmin(req)) return true;
-  if (houseSessionOf(req)) return true;
   const uidForRequest = accountUserId(req);
   const me = deviceMember(req);
   if (!me && !uidForRequest) return false;
+  // 设备令牌与账户令牌都以成员关系为准；旧数据可能没有 userId，
+  // 因此设备路径必须按 memberId 比对。
   return state.households.some(
-    (h) => !h.pin && (h.members || []).some((m) => (uidForRequest ? m.userId === uidForRequest : m.id === me.memberId) && m.role === 'owner')
+    (h) => (h.members || []).some((m) => (uidForRequest ? m.userId === uidForRequest : m.id === me.memberId) && m.role === 'owner')
   );
 }
 
@@ -3113,28 +3121,36 @@ async function handleAPI(req, res, url) {
       return sendError(res, 401, '超级管理员授权已失效，请重新输入全局管理口令');
     }
     const accountHouses = account ? membershipsOf(account.scope.userId) : [];
-    const superAccess = account ? !!sessionOf(req) : isAuthed(req);
+    const superAccess = account ? (!adminPin || !!sessionOf(req)) : isAuthed(req);
     const requestedHouseholdId = safeText(url.searchParams.get('householdId'), 40);
     const requestedHousehold = state.households.find((h) => h.id === requestedHouseholdId);
-    const allowedRequested = !account || superAccess || accountHouses.some((h) => h.id === (requestedHousehold && requestedHousehold.id));
+    const isMemberOfRequested = !!(account && requestedHousehold && accountHouses.some((h) => h.id === requestedHousehold.id));
+    const readOnlyExternal = !!(account && requestedHousehold && !isMemberOfRequested && !superAccess);
+    const allowedRequested = !account || superAccess || isMemberOfRequested || readOnlyExternal;
     const fallbackHouse = account && !superAccess ? accountHouses[0] : state.households[0];
     const visibleHouseholdId = allowedRequested && requestedHousehold
       ? requestedHousehold.id
       : fallbackHouse
       ? fallbackHouse.id
       : '';
-    // 没设口令时仍是兼容旧版本的开放模式；设了口令后，只有有效会话能看全量状态。
-    const fullState = (!account && !adminPin) || superAccess;
+    // 没设口令时是开放超级管理员模式；设了口令后，只有有效授权能看全量状态。
+    const fullState = superAccess;
     const visibleDishes = fullState
       ? state.dishes
+      : readOnlyExternal
+      ? state.dishes.filter((d) => !d.householdId)
       : state.dishes.filter((d) => !d.householdId || d.householdId === visibleHouseholdId);
     const publicVisibleDishes = visibleDishes.map(publicDish);
     const visibleDishIds = new Set(publicVisibleDishes.map((d) => d.id));
     const visibleCategories = fullState
       ? state.categories
+      : readOnlyExternal
+      ? state.categories.filter((c) => !c.householdId)
       : state.categories.filter((c) => !c.householdId || c.householdId === visibleHouseholdId);
     const visibleNotes = fullState
       ? state.notes.notes
+      : readOnlyExternal
+      ? []
       : state.notes.notes.filter((n) => n.householdId === visibleHouseholdId);
     const visibleVotes = fullState
       ? state.notes.votes
@@ -3147,7 +3163,7 @@ async function handleAPI(req, res, url) {
       ? state.access.requests.filter((r) => r.applicantUserId === account.scope.userId || r.name === safeText(url.searchParams.get('memberName'), 20).trim())
       : state.access.requests.filter((r) => r.name === safeText(url.searchParams.get('memberName'), 20).trim());
     const visibleHouseholds = account && !fullState
-      ? accountHouses.map(publicHousehold)
+      ? (readOnlyExternal ? [publicHousehold(requestedHousehold)] : accountHouses.map(publicHousehold))
       : publicHouseholds();
     const accountInfo = account
       ? { user: publicUser(userById(account.scope.userId)), households: accountHouseholds(account.scope.userId), deviceId: account.scope.deviceId }
@@ -3159,17 +3175,23 @@ async function handleAPI(req, res, url) {
         dishes: publicVisibleDishes,
         orders: fullState
           ? state.orders
+          : readOnlyExternal
+          ? []
           : state.orders.filter((o) => o.householdId === visibleHouseholdId),
         settings: { ...pubSettings, hasPin: !!adminPin },
         // 家庭和成员的口令**永远不进这个响应** —— 这个接口局域网里谁都能调
         households: visibleHouseholds,
         pantry: fullState
           ? state.pantry
+          : readOnlyExternal
+          ? []
           : state.pantry.filter((p) => p.householdId === visibleHouseholdId),
         plans: fullState
           ? state.plans
+          : readOnlyExternal
+          ? []
           : state.plans.filter((p) => p.householdId === visibleHouseholdId),
-        notes: { notes: visibleNotes, votes: visibleVotes },
+        notes: { notes: visibleNotes, votes: readOnlyExternal ? {} : visibleVotes },
         access: { requests: visibleAccess.map(publicJoinRequest) },
         ...(accountInfo ? { account: accountInfo, superExpiresAt: (() => { const s = sessionOf(req); return s && s.scope && s.scope.kind === 'super' ? s.scope.fixedExp : 0; })() } : {}),
       },
@@ -3359,19 +3381,7 @@ async function handleAPI(req, res, url) {
       if (method === 'POST' && route[2] === 'adopt' && id) {
         const src = state.dishes.find((d) => d.id === id);
         if (!src) return sendError(res, 404, '菜品不存在');
-        const copy = normDish({ ...src, id: '', householdId: hhId });
-        copy.name = src.name;
-        copy.isFavorite = false;
-        copy.createdAt = nowISO();
-        const who = whoami(req, hhId);
-        copy.authorId = who.kind === 'member' ? who.memberId : '';
-        copy.authorUserId = who.userId || '';
-        copy.authorName = who.kind === 'member' ? who.name : '';
-        const bad = categoryProblem(copy);
-        if (bad) return sendError(res, 400, bad);
-        state.dishes.unshift(copy);
-        scheduleSave('dishes');
-        return sendJSON(res, 200, { ok: true, data: publicDish(copy) });
+        return sendError(res, 403, '共享菜单只能查看，不能直接收进家庭；请在本家私菜中手动新建');
       }
 
       if (method === 'POST' && !id) {
@@ -3386,7 +3396,7 @@ async function handleAPI(req, res, url) {
         const who = whoami(req, hhId);
         dish.authorId = who.kind === 'member' ? who.memberId : '';
         dish.authorUserId = who.userId || '';
-        dish.authorName = who.kind === 'member' ? who.name : '';
+        dish.authorName = who.name || '';
         const bad = categoryProblem(dish);
         if (bad) return sendError(res, 400, bad);
         state.dishes.unshift(dish);
@@ -3552,7 +3562,7 @@ async function handleAPI(req, res, url) {
       // 改名字、改图标、改备注也要对准「是这个家的管理员」：
       // 统一守卫只问「有没有资格碰管理区」，答不出「能不能改这一家」。
       // 不在这里补这道，A 家的管理员就能把 B 家的名字改成自己的。
-      // 没设口令的家，owner 靠「记住我」的令牌就能改自己家 —— 装了就能用的老规矩。
+      // 家庭权限只看成员关系中的 owner；历史家庭口令不再参与判权。
       if (!isSuperAdmin(req)) {
         const hs = houseSessionOf(req);
         const vs = verifiedSessionOf(req);
@@ -3586,11 +3596,9 @@ async function handleAPI(req, res, url) {
           }
         }
       }
-      // 口令三态：不传 = 不动；传空串 = 取消；传非空 = 换。
-      // 前端拿不到旧口令明文（响应里已抹掉），所以「取消」只能靠显式标记。
-      if (body.clearPin === true) body.pin = '';
-      else if (typeof body.pin === 'string' && body.pin.trim()) body.pin = body.pin.trim();
-      else delete body.pin;
+      // 家庭口令已经废弃。旧客户端传来的 pin/clearPin 只会把历史字段清空，
+      // 不会创建新的家庭权限来源。
+      body.pin = '';
       // status 只有超级管理员能改
       if (typeof body.status === 'string') {
         if (!isSuperAdmin(req)) return sendError(res, 403, '只有超级管理员能把这个家庭升级为正式');
@@ -3610,12 +3618,7 @@ async function handleAPI(req, res, url) {
       for (const m of state.households[idx].members || []) {
         if (m && m.id && !keptIds.has(m.id)) revokeDeviceTokens(m.id);
       }
-      // 口令换了 → 这个家的管理员会话全部作废
-      if (next.pin !== state.households[idx].pin) {
-        for (const [t, s] of sessions) {
-          if (typeof s === 'object' && s.scope && s.scope.kind === 'house' && s.scope.id === id) sessions.delete(t);
-        }
-      }
+      // 旧家庭会话不再授予权限，历史 token 无需继续维护。
       state.households[idx] = next;
       if (usersChangedByMemberEdit) scheduleSave('users');
       scheduleSave('households');
@@ -4005,7 +4008,7 @@ async function handleAPI(req, res, url) {
       const who = whoami(req, dish.householdId);
       dish.authorId = who.kind === 'member' ? who.memberId : dish.authorId;
       dish.authorUserId = who.userId || dish.authorUserId || '';
-      dish.authorName = who.kind === 'member' ? who.name : dish.authorName;
+      dish.authorName = who.name || dish.authorName;
       const bad = categoryProblem(dish);
       if (bad) return sendError(res, 400, bad);
       state.dishes.unshift(dish);
@@ -4044,7 +4047,7 @@ async function handleAPI(req, res, url) {
       const who = whoami(req, copy.householdId);
       copy.authorId = who.kind === 'member' ? who.memberId : '';
       copy.authorUserId = who.userId || '';
-      copy.authorName = who.kind === 'member' ? who.name : '';
+      copy.authorName = who.name || '';
       state.dishes.unshift(copy);
       scheduleSave('dishes');
       return sendJSON(res, 200, { ok: true, data: publicDish(copy) });
