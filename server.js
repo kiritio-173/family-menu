@@ -41,10 +41,21 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.17.0';
+const APP_VERSION = '1.18.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.18.0',
+    date: '2026-10-17',
+    title: '全局账户与家庭流程统一',
+    items: [
+      '登录 ID 和账户密码是唯一身份凭证，设备只保存登录会话，不再要求重复认领成员或设置家庭密码',
+      '登录后默认停在账户首页，不自动选择第一户；无家庭时可浏览公开目录、共享菜单、申请加入或创建家庭',
+      '家庭成员角色只作为家庭权限标签，管理员通过成员关系和申请审批产生；账户可随时退出家庭且不影响其他家庭',
+      '同一账户姓名跨家庭统一显示，管理页不再提供成员登录密码和家庭口令设置',
+    ],
+  },
   {
     version: '1.17.0',
     date: '2026-10-16',
@@ -884,7 +895,8 @@ function defaultState() {
     settings: {
       shopName: '家庭菜单',
       adminPin: '',
-      currentHouseholdId: 'h_home',
+      // 当前家庭是用户会话上下文，不是全局默认值；新账户登录后必须主动选择。
+      currentHouseholdId: '',
       shoppingChecked: [],
       welcome: '把常做的菜录进来，家人随时扫码点餐。',
     },
@@ -1401,9 +1413,7 @@ function loadState() {
     if (!dishIds.has(id)) delete state.notes.votes[id];
   });
 
-  if (!hhIds.has(state.settings.currentHouseholdId)) {
-    state.settings.currentHouseholdId = fallbackH;
-  }
+  if (!hhIds.has(state.settings.currentHouseholdId)) state.settings.currentHouseholdId = fallbackH;
 }
 
 function persist(key) {
@@ -1819,9 +1829,7 @@ function applyBackup(src) {
   }
   // 兜底：任何指向已删除家庭的记录拉回第一个家庭
   const hhIds = new Set(state.households.map((h) => h.id));
-  if (!hhIds.has(state.settings.currentHouseholdId)) {
-    state.settings.currentHouseholdId = state.households[0].id;
-  }
+  if (!hhIds.has(state.settings.currentHouseholdId)) state.settings.currentHouseholdId = '';
   state.orders.forEach((o) => {
     if (!hhIds.has(o.householdId)) o.householdId = state.households[0].id;
   });
@@ -2970,6 +2978,30 @@ async function handleAPI(req, res, url) {
     return sendJSON(res, 200, { ok: true, data: { token: issueSession({ kind: 'house', id: house.id }), hasPin: true } });
   }
 
+  // 账户退出家庭：只删除当前账户在该家庭的成员关系，不删除全局账户或家庭数据。
+  // 家庭最后一名 owner 不能直接退出，必须先由管理员把另一名成员提升为 owner。
+  if (method === 'DELETE' && route.length === 4 && route[0] === 'households' && route[2] === 'members' && route[3] === 'me') {
+    const account = accountSessionOf(req);
+    if (!account) return sendError(res, 401, '退出家庭需要先登录账户');
+    const householdId = route[1];
+    const house = state.households.find((h) => h.id === householdId);
+    if (!house) return sendError(res, 404, '这个家庭不存在');
+    const idx = (house.members || []).findIndex((m) => m && m.userId === account.scope.userId);
+    if (idx < 0) return sendError(res, 404, '你还不是这个家庭的成员');
+    const member = house.members[idx];
+    if (member.role === 'owner' && house.members.filter((m) => m && m.role === 'owner').length <= 1) {
+      return sendError(res, 409, '你是最后一名家庭管理员，请先指定另一名管理员再退出');
+    }
+    house.members.splice(idx, 1);
+    house.updatedAt = nowISO();
+    state.access.requests = state.access.requests.filter(
+      (r) => !(r.householdId === householdId && r.applicantUserId === account.scope.userId && r.status === 'pending')
+    );
+    scheduleSave('households');
+    scheduleSave('access');
+    return sendJSON(res, 200, { ok: true, data: { householdId, userId: account.scope.userId } });
+  }
+
   // ---- 统一守卫 ----
   // 两级：全局功能（设置/备份/AI/导入导出）只认超级管理员；
   // 菜单和家庭相关的写操作，管理员级即可 —— 到底能不能碰这一条，
@@ -2985,7 +3017,7 @@ async function handleAPI(req, res, url) {
     return sendError(res, 401, '需要管理口令，请先在「管理」页解锁');
   }
   const needsAdmin =
-    (route[0] === 'households' && !(method === 'POST' && !route[1] && accountUserId(req))) ||
+    (route[0] === 'households' && !(method === 'POST' && !route[1] && accountUserId(req)) && !(method === 'DELETE' && route[2] === 'members' && route[3] === 'me')) ||
     route[0] === 'dishes' ||
     route[0] === 'categories' ||
     // 点餐提交谁都能做（人总得能点菜），但改状态、删除是管理员的活
@@ -3144,29 +3176,26 @@ async function handleAPI(req, res, url) {
     const isMemberOfRequested = !!(account && requestedHousehold && accountHouses.some((h) => h.id === requestedHousehold.id));
     const readOnlyExternal = !!(account && requestedHousehold && !isMemberOfRequested && !superAccess);
     const allowedRequested = !account || superAccess || isMemberOfRequested || readOnlyExternal;
-    const fallbackHouse = account && !superAccess ? accountHouses[0] : state.households[0];
-    const visibleHouseholdId = allowedRequested && requestedHousehold
-      ? requestedHousehold.id
-      : fallbackHouse
-      ? fallbackHouse.id
-      : '';
+    // 账户登录后默认没有当前家庭；只有显式传入已加入家庭（或公开家庭）才进入家庭上下文。
+    // 超级管理员也可以保持无家庭上下文，此时只看全局共享菜单和平台数据。
+    const visibleHouseholdId = allowedRequested && requestedHousehold ? requestedHousehold.id : '';
     // 没设口令时是开放超级管理员模式；设了口令后，只有有效授权能看全量状态。
     const fullState = superAccess;
     const visibleDishes = fullState
       ? state.dishes
-      : readOnlyExternal
+      : readOnlyExternal || !visibleHouseholdId
       ? state.dishes.filter((d) => !d.householdId)
       : state.dishes.filter((d) => !d.householdId || d.householdId === visibleHouseholdId);
     const publicVisibleDishes = visibleDishes.map(publicDish);
     const visibleDishIds = new Set(publicVisibleDishes.map((d) => d.id));
     const visibleCategories = fullState
       ? state.categories
-      : readOnlyExternal
+      : readOnlyExternal || !visibleHouseholdId
       ? state.categories.filter((c) => !c.householdId)
       : state.categories.filter((c) => !c.householdId || c.householdId === visibleHouseholdId);
     const visibleNotes = fullState
       ? state.notes.notes
-      : readOnlyExternal
+      : readOnlyExternal || !visibleHouseholdId
       ? []
       : state.notes.notes.filter((n) => n.householdId === visibleHouseholdId);
     const visibleVotes = fullState
@@ -3179,9 +3208,8 @@ async function handleAPI(req, res, url) {
       : account
       ? state.access.requests.filter((r) => r.applicantUserId === account.scope.userId || r.name === safeText(url.searchParams.get('memberName'), 20).trim())
       : state.access.requests.filter((r) => r.name === safeText(url.searchParams.get('memberName'), 20).trim());
-    const visibleHouseholds = account && !fullState
-      ? (readOnlyExternal ? [publicHousehold(requestedHousehold)] : accountHouses.map(publicHousehold))
-      : publicHouseholds();
+    // 账户首页需要公开家庭目录；成员关系单独放在 account.households，不能把公开目录误当成“我的家庭”。
+    const visibleHouseholds = publicHouseholds();
     const accountInfo = account
       ? { user: publicUser(userById(account.scope.userId)), households: accountHouseholds(account.scope.userId), deviceId: account.scope.deviceId }
       : null;
@@ -3192,20 +3220,21 @@ async function handleAPI(req, res, url) {
         dishes: publicVisibleDishes,
         orders: fullState
           ? state.orders
-          : readOnlyExternal
+          : readOnlyExternal || !visibleHouseholdId
           ? []
           : state.orders.filter((o) => o.householdId === visibleHouseholdId),
-        settings: { ...pubSettings, hasPin: !!adminPin },
+        // 当前家庭只属于客户端会话；服务端状态不再提供全局默认家庭。
+        settings: { ...pubSettings, currentHouseholdId: '', hasPin: !!adminPin },
         // 家庭和成员的口令**永远不进这个响应** —— 这个接口局域网里谁都能调
         households: visibleHouseholds,
         pantry: fullState
           ? state.pantry
-          : readOnlyExternal
+          : readOnlyExternal || !visibleHouseholdId
           ? []
           : state.pantry.filter((p) => p.householdId === visibleHouseholdId),
         plans: fullState
           ? state.plans
-          : readOnlyExternal
+          : readOnlyExternal || !visibleHouseholdId
           ? []
           : state.plans.filter((p) => p.householdId === visibleHouseholdId),
         notes: { notes: visibleNotes, votes: readOnlyExternal ? {} : visibleVotes },
@@ -3695,7 +3724,7 @@ async function handleAPI(req, res, url) {
         if (!state.dishes.some((d) => d.id === dishId)) delete state.notes.votes[dishId];
       });
       if (state.settings.currentHouseholdId === id) {
-        state.settings.currentHouseholdId = state.households[0].id;
+        state.settings.currentHouseholdId = '';
       }
       scheduleSave('households');
       scheduleSave('orders');
@@ -4205,7 +4234,16 @@ async function handleAPI(req, res, url) {
   if (route[0] === 'orders') {
     const id = route[1];
     if (method === 'POST' && !id) {
-      const order = normOrder(await readBody(req));
+      const body = await readBody(req);
+      const account = accountSessionOf(req);
+      const requestedHouseholdId = safeText(body.householdId, 40);
+      if (account && !requestedHouseholdId) {
+        return sendError(res, 403, '请先选择一个已加入的家庭，再提交点餐');
+      }
+      if (account && !state.households.some((h) => h.id === requestedHouseholdId)) {
+        return sendError(res, 404, '这个家庭不存在');
+      }
+      const order = normOrder({ ...body, householdId: requestedHouseholdId || body.householdId });
       if (!requireAccountHousehold(req, res, order.householdId)) return;
       if (order.dishId) {
         const dish = state.dishes.find((d) => d.id === order.dishId);
@@ -4505,7 +4543,11 @@ async function handleAPI(req, res, url) {
     const today = todayStr();
     const soon = daysFromNow(3);
     const pending = state.orders.filter((o) => o.status === 'pending' || o.status === 'cooking');
-    const mine = state.pantry.filter((p) => p.householdId === state.settings.currentHouseholdId);
+    const current = state.settings.currentHouseholdId;
+    // 没有全局默认家庭时，汇总接口返回全部库存的总览，避免把第一户冒充当前家庭。
+    const mine = current
+      ? state.pantry.filter((p) => p.householdId === current)
+      : state.pantry;
     return sendJSON(res, 200, {
       ok: true,
       data: {

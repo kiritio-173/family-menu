@@ -7,7 +7,7 @@
 /* ---------------- 状态 ---------------- */
 
 const S = {
-  view: 'menu',
+  view: 'home',
   category: '全部',
   dishScope: 'all', // 菜单归属筛选：all / shared / own
   keyword: '',
@@ -76,6 +76,23 @@ function accountToken() {
   return S.accountToken || localStorage.getItem(LS_ACCOUNT) || '';
 }
 
+// 家庭选择只是当前账户的界面上下文，按账户隔离保存；它不能成为设备身份。
+function householdStorageKey() {
+  const u = accountUser();
+  const uid = u && (u.id || u.userId);
+  return uid ? `${LS_HOUSE}.${uid}` : LS_HOUSE;
+}
+
+function selectedHouseholdId() {
+  return localStorage.getItem(householdStorageKey()) || '';
+}
+
+function saveSelectedHousehold(id) {
+  const key = householdStorageKey();
+  if (id) localStorage.setItem(key, id);
+  else localStorage.removeItem(key);
+}
+
 function clientDeviceId() {
   let id = localStorage.getItem(LS_CLIENT_DEVICE) || '';
   if (!id) {
@@ -100,7 +117,8 @@ function accountUser() {
 function accountFamilies() {
   const a = S.account || {};
   const list = a.households || a.families || a.memberships || a.data?.households;
-  return Array.isArray(list) ? list : households();
+  // 账户登录后，家庭关系由服务端单独返回；公开目录不能冒充“我的家庭”。
+  return Array.isArray(list) ? list : [];
 }
 
 function accountHouseholdCount() {
@@ -489,7 +507,7 @@ function households() {
 
 function currentHousehold() {
   const list = households();
-  return list.find((h) => h.id === S.householdId) || list[0] || null;
+  return S.householdId ? list.find((h) => h.id === S.householdId) || null : null;
 }
 
 function householdName(id) {
@@ -563,8 +581,6 @@ function memberList() {
             loginId: m,
             emoji: ['🙋', '👩', '👨', '👧', '👦'][i % 5],
             role: 'member',
-            hasPassword: false,
-            hasPin: false,
           }
         : {
             id: m.id || 'm_' + i,
@@ -573,8 +589,6 @@ function memberList() {
             loginId: m.loginId || m.name,
             emoji: m.emoji || '🙋',
             role: m.role || 'member',
-            hasPassword: m.hasPassword !== undefined ? !!m.hasPassword : !!m.hasPin,
-            hasPin: m.hasPassword !== undefined ? !!m.hasPassword : !!m.hasPin,
           }
     )
     .filter((m) => m.name);
@@ -765,7 +779,7 @@ function needWhoami() {
   const list = households();
   if (!list.length) return false; // 一个家庭都没有，问了也白问
   if (!onboarded()) return true;
-  const savedHouse = localStorage.getItem(LS_HOUSE) || '';
+  const savedHouse = selectedHouseholdId();
   if (savedHouse && !list.some((h) => h.id === savedHouse)) {
     // 记着的家没了。别自作主张顶到 list[0] —— 那是另一个人的家，
     // 让人家以为自己进了别人家，看到不属于自己的点餐单。
@@ -1088,8 +1102,10 @@ async function loadState(silent) {
   }
   try {
     // 普通用户只请求当前家庭的数据；管理员会话由服务端自动返回全量状态。
-    const savedHouse = localStorage.getItem(LS_HOUSE) || '';
-    const savedMember = savedHouse ? memberSelections()[savedHouse] || '' : '';
+    // 登录/刷新默认不选择家庭；只有本次会话里用户主动点击家庭后才带 householdId 请求。
+    const savedHouse = S.householdId || '';
+    // 账户令牌已经识别用户，不再读取设备级成员选择或成员密码。
+    const savedMember = '';
     const query = new URLSearchParams();
     if (savedHouse) query.set('householdId', savedHouse);
     if (savedMember) query.set('memberName', savedMember);
@@ -1106,17 +1122,15 @@ async function loadState(silent) {
     else if (!authToken()) S.authed = false;
     // 当前家庭记在这台设备上：A 家选 301、B 家选 502，互不影响
     const list = households();
-    if (savedHouse && list.some((h) => h.id === savedHouse)) S.householdId = savedHouse;
-    else S.householdId = (list[0] && list[0].id) || '';
+    if (!savedHouse || !list.some((h) => h.id === savedHouse)) S.householdId = '';
     if (S.householdId !== savedHouse) {
-      if (S.householdId) localStorage.setItem(LS_HOUSE, S.householdId);
-      else localStorage.removeItem(LS_HOUSE);
+      saveSelectedHousehold(S.householdId);
     }
+    if (!S.householdId && S.view === 'menu') S.view = 'home';
     meName();
     S.loading = false;
-    // 第一次来这台设备，先问清楚「你是哪家的、你是谁」。
-    // 只问这一次，问完写进 localStorage，以后直接进。
-    if (!S.whoamiStep && needWhoami()) S.whoamiStep = 'house';
+    // 全局账户已经完成身份识别，不再启动旧的「你是哪家的 / 你是谁」向导。
+    S.whoamiStep = '';
     if (!silent) render();
   } catch (err) {
     S.loading = false;
@@ -1668,6 +1682,9 @@ function dishCard(d, folded) {
         aria-label="${dn ? dn + ' 条留言' : '留个言'}">💬${dn ? ' ' + dn : ''}</button>
       ${dishStatusAction(d)}
     </div>`;
+  const renderedInteract = S.householdId
+    ? interact
+    : '<div class="card-interact"><span class="section-sub">公开共享菜单 · 只读</span></div>';
 
   return `<article class="card" role="button" tabindex="0" aria-label="查看 ${esc(d.name)} 做法"
     data-act="open-dish" data-id="${esc(d.id)}">
@@ -1683,7 +1700,7 @@ function dishCard(d, folded) {
       <div class="card-meta">${meta.join('')}</div>
     </div>
     ${dupes}
-    ${interact}
+    ${renderedInteract}
   </article>`;
 }
 
@@ -2031,15 +2048,7 @@ function openDish(id) {
           ? `<button class="btn ghost" data-act="edit-dish" data-id="${esc(d.id)}">编辑</button>`
           : adoptBtn(d, 'btn ghost')
       }
-      <button class="btn soft" data-act="toggle-plan-dish" data-id="${esc(d.id)}" data-week="${esc(planWeek())}">
-        ${inPlan ? '✓ 已在计划里' : '＋ 加入计划'}
-      </button>
-      ${dishStatusAction(d)}
-      ${
-        d.dishStatus === 'paused'
-          ? '<button class="btn" disabled title="暂停供应，暂时不能新建点餐">⏸ 暂停供应</button>'
-          : `<button class="btn" data-act="order-dish" data-id="${esc(d.id)}">今天想吃这个</button>`
-      }`,
+      ${S.householdId ? `<button class="btn soft" data-act="toggle-plan-dish" data-id="${esc(d.id)}" data-week="${esc(planWeek())}">${inPlan ? '✓ 已在计划里' : '＋ 加入计划'}</button>${dishStatusAction(d)}${d.dishStatus === 'paused' ? '<button class="btn" disabled title="暂停供应，暂时不能新建点餐">⏸ 暂停供应</button>' : `<button class="btn" data-act="order-dish" data-id="${esc(d.id)}">今天想吃这个</button>`}` : '<button class="btn ghost" data-act="open-account-home">返回账户首页</button>'}`,
   });
 }
 
@@ -2813,21 +2822,12 @@ const pantryNames = (ids) => {
 
 /** 写留言的那一栏：选「我是谁」+ 挑贴纸 + 输入 */
 function noteComposer() {
-  const me = meMemberId();
-  const list = memberList();
   const picked = S.noteSticker || '';
-  const unlocked = !!deviceToken(S.householdId); // 这台设备认过人，随便切
+  const user = accountUser() || {};
+  const identity = user.displayName || user.loginId || '当前账户';
   return `<div class="composer">
       <div class="composer-who">
-        ${list
-          .map(
-            (m) =>
-              `<button class="who ${m.id === me ? 'on' : ''}" data-act="note-me" data-id="${esc(m.id)}"
-                aria-pressed="${m.id === me}">${m.emoji} ${esc(m.name)}${
-                  unlocked || !m.hasPin ? '' : ' <span class="who-lock">🔑</span>'
-                }</button>`
-          )
-          .join('')}
+        <span class="who on" aria-label="当前登录账户">${esc(user.emoji || '🙋')} ${esc(identity)}</span>
       </div>
       <div class="composer-stickers">
         ${STICKER_EMOJI.map(
@@ -3560,7 +3560,6 @@ function viewManage() {
 
     <div class="section-head">
       <h2 class="section-title">家庭成员<span class="section-sub" style="margin-left:8px">${esc(currentHousehold() ? currentHousehold().name : '')}</span></h2>
-      <button class="btn soft sm" style="margin-left:auto" data-act="new-member">＋ 添加</button>
     </div>
     ${membersHtml()}
 
@@ -4213,14 +4212,14 @@ function membersHtml() {
       const st = memberStats(m.name);
       const bits = [st.count ? `点过 ${st.count} 次` : '还没点过'];
       if (m.role === 'owner') bits.push('管理员');
-      bits.push(m.hasPassword ? '已设密码' : '还没设密码');
+      bits.push(m.userId ? '已绑定全局账户' : '待账户申请绑定');
       return `<div class="list-row">
         <span class="member-avatar">${esc(m.emoji)}</span>
         <span class="list-row-main">
           <span class="list-row-title">${esc(m.name)}${
             m.id === meMemberId() ? ' <span class="pill-now">这台设备</span>' : ''
           }</span>
-        <span class="list-row-sub">登录 ID：${esc(m.loginId || m.name)} · ${esc(bits.join(' · '))}</span>
+        <span class="list-row-sub">${esc(m.loginId || '未绑定账户')} · ${esc(bits.join(' · '))}</span>
         </span>
         <button class="icon-mini" data-act="edit-member" data-id="${esc(m.id)}" title="编辑">✏️</button>
         <button class="icon-mini" data-act="del-member" data-id="${esc(m.id)}" title="删除">🗑️</button>
@@ -4370,26 +4369,10 @@ function openMemberEditor(member) {
               </div>
               <p class="field-hint" style="margin-top:6px">${
                 m.role === 'owner'
-                  ? '能改共享菜谱、改这家所有私菜、管成员。'
-                  : '只能改自己写的那几道菜。'
-              }${m.role === 'owner' && !currentHousehold().hasPin ? '' : ''}</p>
+                  ? '能改共享菜谱、改这家所有私菜、管理成员和申请。'
+                  : '只能改自己写的私菜；共享菜单和做饭状态只读。'
+              }</p>
             </div>
-            <div class="field">
-              <label class="field-label">登录 ID<span class="field-hint">同一个家庭内不能重名，支持汉字和字母。</span></label>
-              <input class="input" id="mLoginId" value="${esc(m.loginId || m.name)}" maxlength="32" placeholder="例如：厨房大管家" />
-            </div>
-            <div class="field">
-              <label class="field-label">成员密码<span class="field-hint">${
-                m.hasPassword ? '已设置。改密码会让 TA 所有设备重新登录。' : '还没设。TA 第一次打开时自己设。'
-              }</span></label>
-              <input class="input" id="mPassword" type="password" maxlength="64" placeholder="${
-                m.hasPassword ? '已设置，留空表示不修改' : '留空表示不设置'
-              }" />
-              ${
-                m.hasPassword
-                  ? `<button class="btn ghost sm" style="margin-top:8px" data-act="m-password-clear">清掉密码（TA 下次打开要重设）</button>`
-                  : ''
-              }
             </div>`}
       ${
         member && memberStats(m.name).count
@@ -4455,7 +4438,9 @@ function renderAccountGate() {
 }
 
 function viewHouseholdHome() {
-  const list = households();
+  const list = accountFamilies();
+  const joined = new Set(list.map((h) => h.id));
+  const directory = households().filter((h) => !joined.has(h.id));
   const user = accountUser() || {};
   const label = user.displayName || user.loginId || '我的账号';
   const rows = list.length
@@ -4466,12 +4451,17 @@ function viewHouseholdHome() {
           <span class="house-pick-emoji">${esc(h.emoji || '🏠')}</span><span class="house-pick-main">
           <span class="house-pick-name">${esc(h.name)}</span><span class="house-pick-sub">${esc(role || '已加入')} · ${(h.members || []).length} 位成员</span></span><span class="house-pick-tag">›</span></button>`;
       }).join('')
-    : '<div class="account-empty"><span>🏠</span><b>还没有加入家庭</b><p>你可以创建一个家庭，或申请加入其他家庭。</p></div>';
+    : '<div class="account-empty"><span>🏠</span><b>还没有加入家庭</b><p>你可以创建一个家庭，或从公开家庭目录申请加入。</p></div>';
+  const publicRows = directory.length
+    ? directory.map((h) => `<div class="account-public-house"><span class="house-pick-emoji">${esc(h.emoji || '🏠')}</span><span class="house-pick-main"><b>${esc(h.name)}</b><span class="house-pick-sub">${esc(h.note || '公开家庭')} · ${(h.members || []).length} 位成员</span></span><button class="btn ghost sm" data-act="browse-public-house" data-id="${esc(h.id)}">查看共享菜单</button><button class="btn soft sm" data-act="open-join-family" data-id="${esc(h.id)}">申请加入</button></div>`).join('')
+    : '<p class="section-sub">暂时没有其他公开家庭。</p>';
   return `<div class="account-workspace"><div class="account-profile-head"><div><span class="section-sub">当前账号</span><h2>${esc(label)}</h2></div><button class="btn ghost sm" data-act="account-logout">退出登录</button></div>
     <div class="section-head"><h2 class="section-title">我的家庭</h2><span class="section-sub">${accountHouseholdCount()}/5 个</span></div>
     <div class="account-house-list">${rows}</div>
-    <div class="account-home-actions"><button class="btn" data-act="new-household">＋ 创建家庭</button><button class="btn soft" data-act="open-join-family">申请加入家庭</button></div>
-    <p class="account-hint">创建家庭后你会自动成为家庭管理员，不需要等待平台批准。</p></div>`;
+    <div class="account-home-actions"><button class="btn" data-act="new-household">＋ 创建家庭</button><button class="btn soft" data-act="open-shared-menu">查看共享菜单</button><button class="btn ghost" data-act="open-account-settings">账户设置</button></div>
+    <p class="account-hint">创建家庭后你会自动成为家庭管理员，不需要等待平台批准。</p>
+    <div class="section-head" style="margin-top:18px"><h2 class="section-title">公开家庭目录</h2><span class="section-sub">可浏览共享菜单并申请加入</span></div>
+    <div class="account-public-list">${publicRows}</div></div>`;
 }
 
 function memberForHouse(h) {
@@ -4501,7 +4491,11 @@ async function accountSubmit(form) {
     S.account = r.account || r.user ? { ...(r.account || {}), user: r.user || r.account?.user, households: r.households || r.families || r.account?.households } : null;
     if (S.account && (register && !password || password === '123456')) S.account.usingDefaultPassword = true;
     if (!accountToken()) throw new Error('服务器没有返回账户令牌');
+    // 每次登录都是新的账户会话，不能沿用上一账户或上次页面的家庭上下文。
+    S.householdId = '';
+    saveSelectedHousehold('');
     S.accountView = 'login';
+    S.view = 'home';
     S.loading = true;
     await loadState(true);
     await Promise.allSettled([loadAIStatus(), loadVersion(), loadBackups()]);
@@ -4519,7 +4513,7 @@ function accountLogout() {
   const t = accountToken();
   // 退出接口失败也要清理本地身份，避免用户卡在旧会话。
   api('POST', '/api/account/logout').catch(() => {}).finally(() => {
-    setAccountToken(''); setAuthToken(''); S.account = null; S.data = { categories: [], dishes: [], orders: [], settings: {}, households: [], pantry: [], plans: [], notes: { notes: [], votes: {} } }; S.householdId = ''; localStorage.removeItem(LS_HOUSE); S.authed = false; S.view = 'menu'; render(); toast('已退出登录');
+    setAccountToken(''); setAuthToken(''); S.account = null; S.data = { categories: [], dishes: [], orders: [], settings: {}, households: [], pantry: [], plans: [], notes: { notes: [], votes: {} } }; S.householdId = ''; saveSelectedHousehold(''); localStorage.removeItem(LS_HOUSE); S.authed = false; S.view = 'home'; render(); toast('已退出登录');
   });
 }
 
@@ -4527,15 +4521,13 @@ function accountSettingsHtml() {
   const u = accountUser() || {};
   const expiry = superRemainingText();
   const current = currentHousehold();
-  const relation = memberForHouse(current);
-  const role = current ? (relation && relation.role === 'owner' ? '家庭管理员' : '普通成员') : '未加入家庭';
-  const familyRows = households().map((h) => {
+  const familyRows = accountFamilies().map((h) => {
     const rel = memberForHouse(h);
     const r = rel && rel.role === 'owner' ? '管理员' : '成员';
     return `<button class="account-house-row compact" data-act="pick-house" data-id="${esc(h.id)}"><span class="house-pick-emoji">${esc(h.emoji || '🏠')}</span><span class="house-pick-main"><span class="house-pick-name">${esc(h.name)}${h.id === S.householdId ? ' <span class="pill-now">当前</span>' : ''}</span><span class="house-pick-sub">${r}</span></span><span class="house-pick-tag">›</span></button>`;
   }).join('');
   return `<div class="account-settings-card">
-    <div class="section-head"><h2 class="section-title">我的账号</h2><span class="pill-now">${esc(role)}</span></div>
+    <div class="section-head"><h2 class="section-title">我的账号</h2><span class="pill-now">全局账户</span></div>
     ${accountProfileSummary()}
     <p class="account-risk compact">${u.legacyDefaultPassword || u.usingDefaultPassword || u.passwordRisk ? '⚠️ 当前仍在使用初始密码 123456，建议修改。' : '账户密码只用于登录，不会显示给其他成员。'}</p>
     <div class="row-2"><button class="btn ghost" data-act="account-profile">编辑资料</button><button class="btn ghost" data-act="account-password">修改密码</button></div>
@@ -4545,6 +4537,7 @@ function accountSettingsHtml() {
     <button class="btn ${expiry ? 'soft' : ''} block" data-act="unlock">${expiry ? '重新输入全局管理令牌' : '输入全局管理令牌'}</button>
     <div class="section-head" style="margin-top:18px"><h2 class="section-title">我的家庭</h2><span class="section-sub">${accountHouseholdCount()}/5</span></div>
     <div class="account-settings-families">${familyRows || '<p class="section-sub">还没有加入家庭。</p>'}</div>
+    ${current ? `<button class="btn ghost block" style="margin-top:10px" data-act="leave-household">退出「${esc(current.name)}」</button>` : ''}
     <div class="row-2" style="margin-top:10px"><button class="btn soft" data-act="new-household">＋ 创建家庭</button><button class="btn ghost" data-act="open-join-family">申请加入</button></div>
   </div>`;
 }
@@ -4567,11 +4560,15 @@ function render() {
   renderHouseBtn();
   renderMeBtn();
 
-  // 账号登录后若尚未加入任何家庭，先显示家庭工作区，避免把空的菜单工作区当成可用状态。
-  if (!households().length) {
+  // 登录后默认停在账户首页；只有用户主动选择家庭才进入家庭工作区。
+  if (!S.householdId) {
     document.querySelectorAll('.topbar, .tabbar, #searchbar').forEach((el) => { el.hidden = true; });
     const home = $('#view');
-    if (home) home.innerHTML = viewHouseholdHome();
+    if (home) {
+      if (S.view === 'settings' || S.view === 'manage') home.innerHTML = viewManage();
+      else if (S.view === 'menu') home.innerHTML = viewMenu();
+      else home.innerHTML = viewHouseholdHome();
+    }
     renderWhoami();
     return;
   }
@@ -4688,29 +4685,19 @@ function renderHouseBtn() {
 function renderMeBtn() {
   const btn = $('#meBtn');
   if (!btn) return;
-  const m = meMember();
   const u = accountUser();
   const accountLabel = u && (u.displayName || u.loginId);
-  const pend = !m && pendingName();
-  const guest = !m && !pend && !accountLabel;
   const avatar = $('#meEmoji');
   const label = $('#meName');
   const role = $('#meRole');
-  if (avatar) avatar.textContent = m ? m.emoji : pend ? '⏳' : u?.emoji || '👤';
-  if (label) label.textContent = m ? m.name : pend ? `${pend}（等批准）` : accountLabel || displayName();
+  if (avatar) avatar.textContent = u?.emoji || '👤';
+  if (label) label.textContent = accountLabel || '当前账户';
   if (role) {
-    role.hidden = guest;
-    role.textContent = m ? ROLE_LABEL[myRole()] : accountLabel ? '已登录' : '等管理员批准';
+    role.hidden = !accountLabel;
+    role.textContent = isSuper() ? '超级管理员' : '全局账户';
   }
-  btn.classList.toggle('pending', guest);
-  btn.classList.toggle('waiting', !!pend);
-  btn.title = guest
-    ? '这台设备还没认领身份 —— 点一下说说你是谁'
-    : m
-    ? `${m.name}（${ROLE_LABEL[myRole()]}）· 点一下可以换身份或换家庭`
-    : pend
-    ? `${pend} · 申请已提交，等${householdName(S.householdId)}管理员批准`
-    : `${accountLabel}（账户）· 点一下查看家庭和账户设置`;
+  btn.classList.remove('pending', 'waiting');
+  btn.title = `${accountLabel || '当前账户'} · 点一下查看账户资料和家庭`;
 }
 
 /* ---------------- 「你是谁」向导 ---------------- */
@@ -4983,6 +4970,29 @@ const ACTIONS = {
   'account-logout'() {
     accountLogout();
   },
+  'open-account-settings'() {
+    S.view = 'settings';
+    render();
+  },
+  'open-account-home'() {
+    S.view = 'home';
+    closeSheet();
+    render();
+  },
+  'open-shared-menu'() {
+    S.view = 'menu';
+    render();
+  },
+  'browse-public-house'(el) {
+    const h = households().find((x) => x.id === el.dataset.id);
+    if (!h) return toast('公开家庭不存在');
+    const dishes = (S.data.dishes || []).filter((d) => !d.householdId).slice(0, 12);
+    openSheet({
+      title: `${h.emoji || '🏠'} ${h.name} · 共享菜单`,
+      body: `<p class="section-sub">${esc(h.note || '这是公开家庭，可先查看共享菜单。')}</p><div class="dup-list">${dishes.length ? dishes.map((d) => `<button class="dup-row" data-act="open-dish" data-id="${esc(d.id)}"><span class="dup-row-main"><span class="dup-row-name">${esc(d.name)}</span><span class="dup-row-sub">${esc(d.category || '家常菜')}</span></span><span class="dup-row-go">›</span></button>`).join('') : '<p class="section-sub">暂时没有共享菜。</p>'}</div>`,
+      foot: `<button class="btn ghost" data-act="close-sheet">关闭</button><button class="btn" data-act="open-join-family" data-id="${esc(h.id)}">申请加入这个家庭</button>`,
+    });
+  },
   'account-profile'() {
     const u = accountUser() || {};
     openSheet({
@@ -5026,11 +5036,26 @@ const ACTIONS = {
       toast('密码已更新');
     } catch (e) { toast('修改失败：' + e.message); }
   },
-  'open-join-family'() {
+  async 'leave-household'() {
+    const h = currentHousehold();
+    if (!h) return;
+    if (!confirm(`退出「${h.name}」？你的账户和其他家庭不会受影响。`)) return;
+    try {
+      await api('DELETE', `/api/households/${encodeURIComponent(h.id)}/members/me`);
+      S.householdId = '';
+      saveSelectedHousehold('');
+      S.view = 'menu';
+      await loadState(true);
+      render();
+      toast(`已退出「${h.name}」`);
+    } catch (e) { toast('退出失败：' + e.message); }
+  },
+  'open-join-family'(el) {
     const user = accountUser() || {};
+    const preset = el && el.dataset ? el.dataset.id || '' : '';
     openSheet({
       title: '申请加入家庭',
-      body: `<div class="field"><label class="field-label">家庭 ID 或名称</label><input class="input" id="joinFamilyTarget" placeholder="输入家庭名称或 ID" /></div><div class="account-profile"><span class="account-avatar">${esc(user.emoji || '🙋')}</span><div><b>${esc(user.displayName || user.loginId || '当前账户')}</b><span class="account-id">申请人由当前登录账户自动识别</span></div></div><div class="field"><label class="field-label">留言（选填）</label><textarea class="textarea" id="joinNote" rows="3" maxlength="100" placeholder="告诉管理员你是谁"></textarea></div><div class="field"><label class="field-label">申请身份</label><select class="input" id="joinRole"><option value="member">普通成员</option><option value="owner">家庭管理员（由管理员最终决定）</option></select></div>`,
+      body: `<div class="field"><label class="field-label">家庭 ID 或名称</label><input class="input" id="joinFamilyTarget" value="${esc(preset)}" placeholder="输入家庭名称或 ID" /></div><div class="account-profile"><span class="account-avatar">${esc(user.emoji || '🙋')}</span><div><b>${esc(user.displayName || user.loginId || '当前账户')}</b><span class="account-id">申请人由当前登录账户自动识别</span></div></div><div class="field"><label class="field-label">留言（选填）</label><textarea class="textarea" id="joinNote" rows="3" maxlength="100" placeholder="告诉管理员你是谁"></textarea></div><div class="field"><label class="field-label">申请身份</label><select class="input" id="joinRole"><option value="member">普通成员</option><option value="owner">家庭管理员（由管理员最终决定）</option></select></div>`,
       foot: `<button class="btn ghost" data-act="close-sheet">取消</button><button class="btn" data-act="send-join-family">提交申请</button>`,
     });
   },
@@ -5052,6 +5077,11 @@ const ACTIONS = {
 
   /* 「你是谁」 */
   'open-me'() {
+    // 新账户只有一个全局身份，账户入口不再打开成员认领或家庭密码向导。
+    if (accountUser()) {
+      S.view = 'settings';
+      return render();
+    }
     if (accountUser() && !meMember()) {
       S.view = 'settings';
       return render();
@@ -5066,7 +5096,7 @@ const ACTIONS = {
   },
   'who-house'(el) {
     S.householdId = el.dataset.id;
-    localStorage.setItem(LS_HOUSE, S.householdId);
+    saveSelectedHousehold(S.householdId);
     S.memberFilter = '';
     S.pantryCat = '全部';
     S.pantryFilter = 'all';
@@ -5463,6 +5493,7 @@ const ACTIONS = {
 
   /* 点餐 */
   'order-dish'(el) {
+    if (!S.householdId) return toast('请先选择一个已加入的家庭');
     const d = dishById(el.dataset.id);
     if (d && d.dishStatus === 'paused') return toast('这道菜目前暂停供应，不能新建点餐');
     openOrderForm(d);
@@ -5559,7 +5590,7 @@ const ACTIONS = {
 
   /* 家庭成员 */
   'new-member'() {
-    openMemberEditor(null);
+    toast('请让对方先登录全局账户，再从公开家庭目录申请加入');
   },
   /** 家庭管理员从自己的那页进来管成员 */
   'open-members'() {
@@ -5568,12 +5599,11 @@ const ACTIONS = {
     openSheet({
       title: `${h ? h.name : ''}的成员`,
       body: `<p class="section-sub" style="margin:0 0 12px">
-          每个成员自己设密码，别人拿到也冒充不了。改成员、重置密码要先确认身份。</p>
+          成员由全局账户登录后申请加入，管理员在这里审批关系和设置家庭权限；账户密码不在家庭内设置。</p>
         ${membersHtml()}
         <p class="section-sub" style="margin-top:14px">
-          家里人可以发「🙋 申请加入家庭」，批了就会自动出现在这份名单里。</p>`,
-      foot: `<button class="btn ghost" data-act="close-sheet">关闭</button>
-             <button class="btn" data-act="new-member">＋ 添加成员</button>`,
+          家里人登录自己的账户后，可以从公开家庭目录申请加入；批了就会自动出现在这份名单里。</p>`,
+      foot: `<button class="btn ghost" data-act="close-sheet">关闭</button>`,
     });
   },
   'edit-member'(el) {
@@ -5596,12 +5626,9 @@ const ACTIONS = {
         b.setAttribute('aria-pressed', String(on));
       });
   },
-  /** 清掉成员密码：只是个标记，真正生效在 save-member */
+  /** 兼容旧页面的成员密码入口已停用；账户密码只能在账户设置中修改。 */
   'm-password-clear'() {
-    const box = $('#mPassword');
-    if (!box) return;
-    box.dataset.clear = '1';
-    box.placeholder = '保存后会清掉这个密码';
+    toast('账户密码请在账户设置中修改');
   },
   'm-pin-clear'() {
     return ACTIONS['m-password-clear']();
@@ -5610,10 +5637,9 @@ const ACTIONS = {
     const name = $('#mName').value.trim();
     if (!name) return toast('给家人起个称呼');
     const emoji = $('#mEmoji').value.trim() || '🙋';
-    const loginId = ($('#mLoginId') ? $('#mLoginId').value : name).trim() || name;
-    if (loginId.length > 32) return toast('登录 ID 最多 32 个字符');
     const id = el.dataset.id;
     const existing = id ? memberList().find((m) => m.id === id) : null;
+    const loginId = existing ? (existing.loginId || '') : '';
     // 成员 id 是唯一键，名字只是显示 —— 爸爸和儿子都叫「小明」是允许的
     const list = memberList().map((m) => ({
       id: m.id,
@@ -5628,7 +5654,7 @@ const ACTIONS = {
     if (existing) {
       hit = list.find((m) => m.id === id);
       hit.name = name;
-      hit.loginId = loginId;
+      if (loginId) hit.loginId = loginId;
       hit.emoji = emoji;
       hit.role = role;
     } else {
@@ -5641,10 +5667,6 @@ const ACTIONS = {
     if (existing && existing.role === 'owner' && role !== 'owner' && owners.length === 0) {
       return toast('这个家还没别的管理员。取消 TA 的话，剩下的成员里得有人接手。');
     }
-    const passwordBox = $('#mPassword');
-    const password = (passwordBox ? passwordBox.value : '').trim();
-    const clearing = passwordBox && passwordBox.dataset.clear === '1';
-
     closeSheet();
     // 改成员名单是危险动作 → 先过一次身份验证
     await withDangerPin(existing || { ...hit, hasPin: false }, '修改成员', async () => {
@@ -5654,27 +5676,7 @@ const ACTIONS = {
         return toast('保存失败：' + err.message);
       }
       await loadState(true);
-      if (clearing || password) {
-        try {
-          await api('PUT', `/api/households/${currentHousehold().id}/member-password`, {
-            memberId: hit.id,
-            loginId,
-            ...(clearing ? { clearPassword: true } : { password }),
-          });
-          await loadState(true);
-          toast(
-            clearing
-              ? `「${name}」的密码清掉了，TA 下次打开要自己重设`
-              : `「${name}」的密码设好了，TA 的所有设备要重新登录`,
-            4200
-          );
-        } catch (err) {
-          // 名字已经存下来了，只是密码没改成 —— 说清楚是哪一半成功了
-          toast(`${err.message}（名字已经改好了）`, 5000);
-        }
-      } else {
-        toast(existing ? '已保存' : `已添加 ${name}`);
-      }
+      toast(existing ? '已保存家庭权限' : `已添加 ${name}`);
       render();
     });
   },
@@ -5778,11 +5780,12 @@ const ACTIONS = {
     const myId = meMemberId();
     const uid = accountUser()?.id || accountUser()?.userId;
     const isMemberThere = (x) => !!((uid && (x.members || []).some((m) => typeof m !== 'string' && (m.userId === uid || m.id === uid))) || (myId && (x.members || []).some((m) => m.id === myId)));
-    if (h && !anyHouseAdmin() && !isMemberThere(h)) {
+    if (h && !isSuper() && !isMemberThere(h)) {
       return openJoinSheet(id);
     }
     S.householdId = id;
-    localStorage.setItem(LS_HOUSE, id);
+    saveSelectedHousehold(id);
+    S.view = 'menu';
     // 换家庭后原来的筛选多半没意义了，清掉免得看着空。
     // 分类筛选也得清：当前选中的分类可能正是「只有刚离开那家看得见」的私有分类
     S.memberFilter = '';
@@ -5802,24 +5805,21 @@ const ACTIONS = {
   },
   /** 申请加入别人家 */
   async 'send-join'(el) {
-    // 申请是发给**别家**的，所以切过去再记这个名字 —— 记在当前家名下是错的
+    // 申请是发给别家，不能把尚未加入的目标家庭写成当前家庭。
     const target = el.dataset.id || S.householdId;
-    if (target !== S.householdId) {
-      S.householdId = target;
-      localStorage.setItem(LS_HOUSE, target);
-    }
+    if (!target) return toast('请选择要申请的家庭');
     try {
       const r = await api('POST', '/api/join-requests', {
         householdId: target,
         note: (($('#joinNote') || {}).value || '').trim(),
         requestedRole: (($('#joinRole') || {}).value || 'member') === 'owner' ? 'owner' : 'member',
       });
-      // 还没批下来，所以还不是成员、没有成员 id 可认 —— 先记着名字，
-      // 顶栏就能显示「姑姑（等批准）」而不是「还没登记」
-      rememberPendingName(accountUser()?.displayName || accountUser()?.loginId || '');
       S.access = S.access || [];
       if (!S.access.some((x) => x.id === r.data.id)) S.access.unshift(r.data);
       closeSheet();
+      S.householdId = '';
+      saveSelectedHousehold('');
+      S.view = 'home';
       await loadState(true);
       render();
       toast('申请已送到管理员那里，等他点头', 3200);
@@ -5875,7 +5875,7 @@ const ACTIONS = {
     await loadState(true);
     if (!id) {
       S.householdId = saved.id;
-      localStorage.setItem(LS_HOUSE, saved.id);
+      saveSelectedHousehold(saved.id);
       S.memberFilter = '';
       render();
       toast(`已添加 ${saved.name}，你现在是家庭管理员`, 3600);
@@ -5947,7 +5947,7 @@ const ACTIONS = {
       setHouseToken(h.id, '');
       if (S.householdId === h.id) {
         S.householdId = '';
-        localStorage.removeItem(LS_HOUSE);
+        saveSelectedHousehold('');
         S.memberFilter = '';
       }
       await loadState(true);
@@ -5999,6 +5999,7 @@ const ACTIONS = {
     toast(n ? `已加入 ${n} 道` : '这几道都已经在计划里了');
   },
   async 'toggle-plan-dish'(el) {
+    if (!S.householdId) return toast('请先选择一个已加入的家庭');
     const dish = dishById(el.dataset.id);
     if (!dish) return;
     const week = el.dataset.week || planWeek();
@@ -7096,6 +7097,9 @@ window.addEventListener(
 /* 启动 */
 async function bootstrapAccount() {
   S.accountToken = localStorage.getItem(LS_ACCOUNT) || '';
+  // 刷新页面只恢复账户登录，不恢复上次家庭选择；用户必须主动选择家庭。
+  S.householdId = '';
+  S.view = 'home';
   if (!S.accountToken) {
     S.loading = false;
     render();
@@ -7110,6 +7114,8 @@ async function bootstrapAccount() {
   } catch (_) {
     setAccountToken('');
     S.account = null;
+    S.householdId = '';
+    saveSelectedHousehold('');
     S.loading = false;
     render();
   }

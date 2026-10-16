@@ -545,7 +545,7 @@ async function main() {
   eq('没 token 导入 401', (await post('/api/import', { dishes: [] })).status, 401);
   const afterFail = (await get('/api/state')).body.data;
   eq('被拒的操作没真的生效', afterFail.settings.shopName, stLocked.settings.shopName);
-  eq('被拒的加菜没进菜单', afterFail.dishes.length, stLocked.dishes.length + 1);
+  eq('被拒的加菜没进菜单', afterFail.dishes.length, stLocked.dishes.length);
   eq('被拒的删家庭没生效', afterFail.households.length, stLocked.households.length);
 
   // 口令不对
@@ -640,7 +640,7 @@ async function main() {
   eq('settings.members 被清理', 'members' in st.settings, false);
   eq('老点餐归到默认家庭', [...new Set(st.orders.map((o) => o.householdId))], [st.households[0].id]);
   eq('老点餐数量不变', st.orders.length, 2);
-  eq('currentHouseholdId 已补上', st.settings.currentHouseholdId, st.households[0].id);
+  eq('账户状态不自动选择家庭', st.settings.currentHouseholdId, '');
   ok('菜单没丢', st.dishes.length === 2, st.dishes.length);
 
   // 迁移结果要真的落盘
@@ -1569,7 +1569,7 @@ async function main() {
   eq('非管理员的菜也进不了别人家私有分类',
     (await post('/api/my-dishes?householdId=' + hhA, { name: 'X', category: bCatX.name }, undefined, devA)).status, 400);
   await del('/api/my-categories/' + pvCat.id + '?householdId=' + hhA, undefined, devA);
-  const after = (await get('/api/state')).body.data;
+  const after = (await get('/api/state', tokX)).body.data;
   eq('删自家私有分类，本家的私菜挪到「其他」',
     after.dishes.find((d) => d.id === mwDish2B.id).category, '其他');
   eq('公共菜一点没动', after.dishes.find((d) => d.id === ppDish.id).category, ppCat);
@@ -2067,6 +2067,36 @@ async function main() {
   const forgedJoin = await req('POST', '/api/join-requests', { householdId: familyOne.body.data.id, name: '伪造姓名' }, undefined, undefined, undefined, undefined, accB.token);
   eq('申请接口忽略客户端伪造姓名', forgedJoin.body?.data?.name, accB.user?.displayName || accB.user?.loginId);
   await stop(accountInst);
+
+  /* ---------- 全局账户家庭上下文与退出 ---------- */
+  console.log('\n[28] 全局账户默认无家庭与退出家庭');
+  const contextInst = await boot('account-context');
+  const ctxA = await registerAccount('上下文管理员');
+  const ctxB = await registerAccount('上下文成员');
+  const ctxHouseA = await req('POST', '/api/households', { name: '上下文家庭 A' }, undefined, undefined, undefined, undefined, ctxA.token);
+  const ctxHouseB = await req('POST', '/api/households', { name: '上下文家庭 B' }, undefined, undefined, undefined, undefined, ctxA.token);
+  const ctxAId = ctxHouseA.body.data.id;
+  const ctxBId = ctxHouseB.body.data.id;
+  const ctxInitial = await req('GET', '/api/state', undefined, undefined, undefined, undefined, undefined, ctxA.token);
+  eq('登录后服务端状态不选择家庭', ctxInitial.body.data.settings.currentHouseholdId, '');
+  eq('无当前家庭时订单为空', ctxInitial.body.data.orders, []);
+  eq('无当前家庭时库存为空', ctxInitial.body.data.pantry, []);
+  eq('账户关系单独返回已加入家庭', (ctxInitial.body.data.account.households || []).length, 2);
+  ok('公开目录包含可申请家庭', (ctxInitial.body.data.households || []).some((h) => h.id === ctxBId));
+  const ctxBInitial = await req('GET', '/api/state', undefined, undefined, undefined, undefined, undefined, ctxB.token);
+  eq('新账户默认没有家庭关系', (ctxBInitial.body.data.account.households || []).length, 0);
+  ok('未加入账户可以浏览公开家庭目录', (ctxBInitial.body.data.households || []).some((h) => h.id === ctxAId));
+  eq('无当前家庭点餐被拒', (await req('POST', '/api/orders', { dishName: '不应写入' }, undefined, undefined, undefined, undefined, ctxB.token)).status, 403);
+  const ctxJoin = await req('POST', '/api/join-requests', { householdId: ctxAId, name: '客户端伪造名' }, undefined, undefined, undefined, undefined, ctxB.token);
+  eq('账户申请不需要成员密码', ctxJoin.status, 200);
+  eq('家庭管理员审批账户关系', (await req('PUT', `/api/join-requests/${ctxJoin.body.data.id}`, { status: 'ok' }, undefined, undefined, undefined, undefined, ctxA.token)).status, 200);
+  eq('加入后可以按家庭点餐', (await req('POST', '/api/orders', { householdId: ctxAId, dishName: '加入后点菜' }, undefined, undefined, undefined, undefined, ctxB.token)).status, 200);
+  eq('退出家庭只删除成员关系', (await req('DELETE', `/api/households/${ctxAId}/members/me`, undefined, undefined, undefined, undefined, undefined, ctxB.token)).status, 200);
+  const ctxBAfterLeave = await req('GET', '/api/account/me', undefined, undefined, undefined, undefined, undefined, ctxB.token);
+  eq('退出后账户仍可登录', ctxBAfterLeave.status, 200);
+  eq('退出后关系被删除', (ctxBAfterLeave.body.data.households || []).some((h) => h.id === ctxAId), false);
+  eq('最后一名管理员不能退出', (await req('DELETE', `/api/households/${ctxAId}/members/me`, undefined, undefined, undefined, undefined, undefined, ctxA.token)).status, 409);
+  await stop(contextInst);
 
   /* ---------- 收尾 ---------- */
   fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5 });
