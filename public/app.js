@@ -2566,7 +2566,7 @@ function viewManageMember() {
         ok
           ? `<button class="icon-mini" data-act="edit-dish" data-id="${esc(x.id)}" title="编辑">✏️</button>
              <button class="icon-mini" data-act="del-dish" data-id="${esc(x.id)}" title="删除">🗑️</button>`
-          : adoptBtn(x, 'icon-mini')
+          : adoptBtn(x, 'btn soft sm')
       }
     </div>`;
   };
@@ -2677,7 +2677,7 @@ function viewManage() {
             ? `<button class="icon-mini" data-act="edit-dish" data-id="${esc(x.id)}" title="编辑">✏️</button>
                <button class="icon-mini" data-act="dup-dish" data-id="${esc(x.id)}" title="复制">⧉</button>
                <button class="icon-mini" data-act="del-dish" data-id="${esc(x.id)}" title="删除">🗑️</button>`
-            : adoptBtn(x, 'icon-mini')
+            : adoptBtn(x, 'btn soft sm')
         }
       </div>`;
     })

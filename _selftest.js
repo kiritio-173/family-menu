@@ -1483,6 +1483,92 @@ async function main() {
 
   await stop(permInst);
 
+  /* ---------- 申请加入家庭 ---------- */
+  console.log('\n[23] 申请加入家庭');
+  const joinInst = await boot('joinInst');
+  const j0 = (await get('/api/state')).body.data;
+  const jHome = j0.households[0].id;
+  const jCat = j0.categories[0].name;
+  eq('没申请这回事之前是空的', (j0.access && j0.access.requests) || [], []);
+
+  const jTok0 = (await post('/api/auth', { pin: '' })).body.data;
+  eq('没口令时人人都是管理员', jTok0.hasPin, false);
+  const jB = (await post('/api/households', { name: '奶奶家' })).body.data;
+
+  // 提交申请：谁都能做（人总得有个申请入口）
+  const req1 = await post('/api/join-requests', { name: '姑姑', householdId: jB.id, note: '我来做饭' });
+  eq('申请提交成功', req1.status, 200);
+  eq('申请记下申请人了', req1.body.data.name, '姑姑');
+  eq('申请记下目标家庭', req1.body.data.householdId, jB.id);
+  eq('新申请是待处理', req1.body.data.status, 'pending');
+  eq('不写名字会被拒', (await post('/api/join-requests', { householdId: jB.id })).status, 400);
+  eq('申请不存在的家庭会被拒',
+    (await post('/api/join-requests', { name: 'x', householdId: 'h_没有' })).status, 404);
+  eq('已经是成员的不用再申请',
+    (await post('/api/join-requests', { name: (j0.households[0].members[0] || {}).name || '我', householdId: jHome })).status, 409);
+
+  // 重复申请只留一条，不刷屏
+  await post('/api/join-requests', { name: '姑姑', householdId: jB.id, note: '再问一次' });
+  eq('同一个人同一家只留一条申请',
+    (await get('/api/state')).body.data.access.requests.filter((r) => r.name === '姑姑').length, 1);
+
+  // 设上口令：批准/拒绝就必须是管理员的活了
+  await put('/api/settings', { adminPin: '4321' });
+  const jTok = (await post('/api/auth', { pin: '4321' })).body.data.token;
+  eq('没 token 批不了', (await put('/api/join-requests/' + req1.body.data.id, { status: 'ok' })).status, 401);
+  eq('没 token 删不了', (await del('/api/join-requests/' + req1.body.data.id)).status, 401);
+
+  const jBefore = (await get('/api/state')).body.data.households.find((h) => h.id === jB.id);
+  eq('批之前还不是成员', jBefore.members.some((m) => m.name === '姑姑'), false);
+
+  const jOkRes = await put('/api/join-requests/' + req1.body.data.id, { status: 'ok' }, jTok);
+  eq('批准成功', jOkRes.status, 200);
+  eq('状态变成已批准', jOkRes.body.data.status, 'ok');
+  const jAfterx = (await get('/api/state')).body.data.households.find((h) => h.id === jB.id);
+  eq('批准 = 真的把人加进这个家', jAfterx.members.some((m) => m.name === '姑姑'), true);
+  ok('成员有名字也有头像', !!jAfterx.members.find((m) => m.name === '姑姑').emoji, jAfterx.members);
+
+  // 拒绝
+  const req2r = await post('/api/join-requests', { name: '不熟的人', householdId: jB.id });
+  eq('设了口令后普通人照样能申请', req2r.status, 200);
+  const req2 = req2r;
+  await put('/api/join-requests/' + req2.body.data.id, { status: 'no' }, jTok);
+  eq('拒绝了也不会加进去',
+    (await get('/api/state')).body.data.households.find((h) => h.id === jB.id).members.some((m) => m.name === '不熟的人'),
+    false);
+  // 设了口令后，非管理员只看得到自己那条 —— 前端靠 memberName 认人
+  const ownReqs = (await get('/api/state?memberName=' + encodeURIComponent('不熟的人')))
+    .body.data.access.requests;
+  const rejReq = ownReqs.find((r) => r.id === req2.body.data.id);
+  ok('申请人看得到自己被拒的结果', !!rejReq, { sent: req2.body, own: ownReqs });
+  eq('拒绝的申请还留着（看得到结果）', rejReq && rejReq.status, 'no');
+  eq('别人的申请看不见', ownReqs.some((r) => r.name === '姑姑'), false);
+  const allReqs = (await get('/api/state', jTok)).body.data.access.requests;
+  ok('管理员看得到全部申请', !!allReqs.find((r) => r.id === req2.body.data.id), allReqs);
+
+  // 改家庭会加进去，别把人加错地方
+  const req3 = await post('/api/join-requests', { name: '姑父', householdId: jHome });
+  await put('/api/join-requests/' + req3.body.data.id, { status: 'ok' }, jTok);
+  eq('批进了对的那个家',
+    (await get('/api/state')).body.data.households.find((h) => h.id === jHome).members.some((m) => m.name === '姑父'),
+    true);
+
+  // 备份带上申请
+  await post('/api/join-requests', { name: '要进备份的', householdId: jB.id });
+  const jSnap = (await post('/api/backups', {}, jTok)).body.data.name;
+  await post('/api/join-requests', { name: '备份之后才来的', householdId: jB.id });
+  // 备份里存着明文口令，所以备份这套端点一律要认证（不是只有下载）
+  eq('没 token 不能存备份', (await post('/api/backups', {})).status, 401);
+  const jRestore = await reqRaw('POST', '/api/backups/' + encodeURIComponent(jSnap) + '/restore', undefined, jTok);
+  eq('恢复成功', jRestore.status, 200);
+  const jAfter = (await get('/api/state', jTok)).body.data;
+  eq('备份之后的申请被回退了', jAfter.access.requests.some((r) => r.name === '备份之后才来的'), false);
+  eq('备份里的申请还在', jAfter.access.requests.some((r) => r.name === '要进备份的'), true);
+  eq('已批准的申请恢复后仍是已批准',
+    jAfter.access.requests.find((r) => r.name === '姑姑').status, 'ok');
+
+  await stop(joinInst);
+
   /* ---------- 收尾 ---------- */
   fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5 });
 

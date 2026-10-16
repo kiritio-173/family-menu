@@ -25,6 +25,8 @@ const PUBLISH_FILES = [
   'start.bat',
   '_packtest.js',
   '_selftest.js',
+  '_memtest.js',
+  '_memrun.js',
   'docs/superpowers/plans/2026-10-16-role-workspaces.md',
   'docs/superpowers/plans/2026-10-16-permissions-publish-plan.md',
   'docs/superpowers/specs/2026-10-16-permissions-publish-design.md',
