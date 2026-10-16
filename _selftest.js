@@ -1612,6 +1612,12 @@ async function main() {
   eq('申请记下申请人了', req1.body.data.name, '姑姑');
   eq('申请记下目标家庭', req1.body.data.householdId, jB.id);
   eq('新申请是待处理', req1.body.data.status, 'pending');
+  eq('普通申请默认请求成员', req1.body.data.requestedRole, 'member');
+  const reqAdmin = await post('/api/join-requests', {
+    name: '叔叔', householdId: jB.id, requestedRole: 'owner', note: '希望一起管理这个家',
+  });
+  eq('申请管理员权限成功', reqAdmin.status, 200);
+  eq('申请记录保存管理员意愿', reqAdmin.body.data.requestedRole, 'owner');
   eq('不写名字会被拒', (await post('/api/join-requests', { householdId: jB.id })).status, 400);
   eq('申请不存在的家庭会被拒',
     (await post('/api/join-requests', { name: 'x', householdId: 'h_没有' })).status, 404);
@@ -1638,6 +1644,16 @@ async function main() {
   const jAfterx = (await get('/api/state')).body.data.households.find((h) => h.id === jB.id);
   eq('批准 = 真的把人加进这个家', jAfterx.members.some((m) => m.name === '姑姑'), true);
   ok('成员有名字也有头像', !!jAfterx.members.find((m) => m.name === '姑姑').emoji, jAfterx.members);
+
+  const adminApproval = await put(
+    '/api/join-requests/' + reqAdmin.body.data.id,
+    { status: 'ok', role: 'owner' },
+    jTok
+  );
+  eq('批准管理员申请成功', adminApproval.status, 200);
+  eq('批准后的申请记录保留管理员身份', adminApproval.body.data.approvedRole, 'owner');
+  const jAfterAdmin = (await get('/api/state')).body.data.households.find((h) => h.id === jB.id);
+  eq('批准后成员成为管理员', jAfterAdmin.members.find((m) => m.name === '叔叔').role, 'owner');
 
   // 拒绝
   const req2r = await post('/api/join-requests', { name: '不熟的人', householdId: jB.id });

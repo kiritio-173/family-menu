@@ -41,10 +41,20 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.13.0';
+const APP_VERSION = '1.14.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.14.0',
+    date: '2026-10-16',
+    title: '管理页折叠搜索与随机筛选',
+    items: [
+      '管理页按家庭与成员、菜单与日常数据、系统与备份三组折叠，支持管理项模糊搜索',
+      '家庭管理员可以编辑家庭名称、图标和备注，加入申请可以申请管理员身份并由管理员决定',
+      '随机来一道支持可见范围、分类、标签、今天没做过和排除已点餐条件',
+    ],
+  },
   {
     version: '1.13.0',
     date: '2026-10-16',
@@ -1138,9 +1148,15 @@ function loadState() {
   state.orders = state.orders.filter((o) => (seenO.has(o.id) ? false : (seenO.add(o.id), true)));
   // 加入申请的归属兜底：指向已经不存在的家庭的申请直接清掉，免得管理员看到一堆点不亮的待办
   const hhNow = new Set(state.households.map((h) => h.id));
-  state.access.requests = (state.access.requests || []).filter(
-    (r) => r && r.name && hhNow.has(r.householdId)
-  );
+  state.access.requests = (state.access.requests || [])
+    .filter((r) => r && r.name && hhNow.has(r.householdId))
+    .map((r) => ({
+      ...r,
+      requestedRole: r.requestedRole === 'owner' ? 'owner' : 'member',
+      ...(r.approvedRole === 'owner' || r.approvedRole === 'member'
+        ? { approvedRole: r.approvedRole }
+        : {}),
+    }));
 
   /* ---- 家庭 / 库存：从旧版本平滑升级 ---- */
 
@@ -3106,11 +3122,16 @@ async function handleAPI(req, res, url) {
       if (house.members.some((m) => (uidForRequest && m.userId === uidForRequest) || (!uidForRequest && m.name === name))) {
         return sendError(res, 409, `「${name}」已经是${house.name}的成员了`);
       }
+      const requestedRole = body.requestedRole === 'owner' ? 'owner' : 'member';
       // 同一家的同名申请只留最新的一条，免得刷出一长串等价的待办
       const dup = state.access.requests.find((r) => r.householdId === householdId && (uidForRequest ? r.applicantUserId === uidForRequest : r.name === name));
       if (dup) {
         dup.at = nowISO();
         dup.note = safeText(body.note, 100).trim();
+        dup.requestedRole = requestedRole;
+        delete dup.approvedRole;
+        dup.status = 'pending';
+        scheduleSave('access');
         return sendJSON(res, 200, { ok: true, data: dup, updated: true });
       }
       const jrNew = {
@@ -3119,6 +3140,7 @@ async function handleAPI(req, res, url) {
         householdId,
         ...(uidForRequest ? { applicantUserId: uidForRequest } : {}),
         note: safeText(body.note, 100).trim(),
+        requestedRole,
         at: nowISO(),
         status: 'pending',
       };
@@ -3147,8 +3169,13 @@ async function handleAPI(req, res, url) {
       // 得是刚刚用密码换来的授权，光靠「记住我」的令牌不行。
       if (!canDoSensitive(req, jr.householdId)) return sendError(res, 403, SENSITIVE_HINT);
       const status = body.status === 'ok' ? 'ok' : 'no';
+      const approvedRole = body.role === 'owner' || body.role === 'member'
+        ? body.role
+        : jr.requestedRole === 'owner' ? 'owner' : 'member';
       jr.status = status;
       jr.at = nowISO();
+      if (status === 'ok') jr.approvedRole = approvedRole;
+      else delete jr.approvedRole;
       // 批准 = 真的把人加进这个家庭。光改状态不生效的话，
       // 被批准的人在成员列表里还是找不到自己，等于没批
       if (status === 'ok') {
@@ -3165,8 +3192,8 @@ async function handleAPI(req, res, url) {
             name: jr.name,
             loginId: uniqueLoginId(house.members, applicant ? applicant.loginId : jr.name, jr.name),
             emoji: MEMBER_EMOJI[house.members.length % MEMBER_EMOJI.length],
-            // 新人一律是普通成员。把他设成管理员等于把家门钥匙寄过去。
-            role: 'member',
+            // 最终角色由目标家庭管理员在批准时决定；申请人只能表达意愿。
+            role: approvedRole,
             password: '',
           });
           scheduleSave('households');

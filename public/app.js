@@ -52,6 +52,9 @@ const S = {
   account: null,
   accountView: 'login', // login | register
   accountBusy: false,
+  manageKeyword: '',
+  manageGroups: { family: true, menu: true, system: true },
+  randomFilters: null,
 };
 
 /** 老的 households.json 还没建时，历史数据都落在 h_home 上 */
@@ -1436,6 +1439,53 @@ function visibleDishes() {
   return scopeDishes().filter((d) => {
     const inCat = S.category === '全部' || d.category === S.category;
     return inCat && matchKeyword(d, S.keyword);
+  });
+}
+
+function randomTagList(value) {
+  return String(value || '')
+    .split(/[\s,，、]+/)
+    .map((x) => x.trim().toLocaleLowerCase())
+    .filter(Boolean);
+}
+
+function randomCandidates(filters) {
+  const scope = byScope(scopeDishes(), filters.scope || 'all');
+  const tags = randomTagList(filters.tags);
+  const orders = householdOrders();
+  const isSameDish = (order, dish) => order.dishId
+    ? order.dishId === dish.id
+    : sameKey(order.dishName) === sameKey(dish.name);
+  const cookedToday = (dish) => orders.some((o) =>
+    o.status === 'done' && String(o.date || o.createdAt || '').slice(0, 10) === todayStr() && isSameDish(o, dish)
+  );
+  const orderedNow = (dish) => orders.some((o) =>
+    (o.status === 'pending' || o.status === 'cooking') && isSameDish(o, dish)
+  );
+  return scope.filter((d) => {
+    if (filters.category && filters.category !== '全部' && d.category !== filters.category) return false;
+    const dishTags = (d.tags || []).map((x) => String(x).toLocaleLowerCase());
+    if (tags.length && !tags.every((tag) => dishTags.some((x) => x.includes(tag)))) return false;
+    if (filters.notCooked && cookedToday(d)) return false;
+    if (filters.excludeOrdered && orderedNow(d)) return false;
+    return true;
+  });
+}
+
+function openRandomSheet() {
+  const cats = sortedCategories();
+  S.randomFilters = { scope: 'all', category: '全部', tags: '', notCooked: false, excludeOrdered: false };
+  openSheet({
+    title: '随机来一道',
+    body: `<div class="random-filter-grid">
+      <div class="field"><label class="field-label">可见范围</label><select class="input" id="randomScope"><option value="all">全部可见</option><option value="shared">共享菜单</option><option value="own">我家私菜</option></select></div>
+      <div class="field"><label class="field-label">分类</label><select class="input" id="randomCategory"><option value="全部">全部分类</option>${cats.map((c) => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('')}</select></div>
+      <div class="field"><label class="field-label">标签</label><input class="input" id="randomTags" placeholder="快手、清淡、下饭…" /></div>
+      <label class="check-row"><input type="checkbox" id="randomNotCooked" /> <span>今天没做过</span></label>
+      <label class="check-row"><input type="checkbox" id="randomExcludeOrdered" /> <span>排除已点餐（待做/制作中）</span></label>
+    </div>
+    <p class="section-sub">条件会同时生效；没有符合条件的菜时不会放宽范围。</p>`,
+    foot: `<button class="btn ghost" data-act="close-sheet">取消</button><button class="btn" data-act="random-run">🎲 随机抽一道</button>`,
   });
 }
 
@@ -3102,10 +3152,64 @@ function backupsHtml() {
  *   普通成员   —— 只能动自己写的那几道；别人的和共享的都是只读，
  *                 想改成自己的做法就按「👇 收进我家」抄一份
  */
+function manageSearchText(value) {
+  return String(value || '').trim().toLocaleLowerCase();
+}
+
+function manageSearchHtml() {
+  return `<div class="manage-search">
+    <span class="manage-search-icon">⌕</span>
+    <input class="input" id="manageKeyword" type="search" value="${esc(S.manageKeyword)}" placeholder="模糊搜索管理项：成员、备份、AI…" autocomplete="off" />
+    <button class="icon-mini" data-act="clear-manage-search" title="清除搜索" ${S.manageKeyword ? '' : 'hidden'}>✕</button>
+  </div>`;
+}
+
+function manageGroupHidden(terms) {
+  const keyword = manageSearchText(S.manageKeyword);
+  return keyword && !manageSearchText(terms).includes(keyword) ? ' hidden' : '';
+}
+
+function manageGroup(key, title, subtitle, body, terms = '') {
+  const keyword = manageSearchText(S.manageKeyword);
+  const hay = manageSearchText([title, subtitle, terms].join(' '));
+  if (keyword && !hay.includes(keyword)) return '';
+  const open = S.manageGroups[key] !== false;
+  return `<details class="manage-group" data-manage-group="${esc(key)}" ${open ? 'open' : ''}>
+    <summary><span><b>${esc(title)}</b><small>${esc(subtitle)}</small></span><span class="manage-group-caret">⌄</span></summary>
+    <div class="manage-group-body">${body}</div>
+  </details>`;
+}
+
+function joinRequestRows(requests) {
+  if (!requests.length) return '';
+  return `<div class="join-box">
+    <div class="join-title">📨 ${requests.length} 个加入申请</div>
+    ${requests.map((r) => {
+      const h = households().find((x) => x.id === r.householdId);
+      const requestedRole = r.requestedRole === 'owner' ? '申请成为管理员' : '申请成为成员';
+      return `<div class="list-row join-request-row">
+        <span class="member-avatar">🙋</span>
+        <span class="list-row-main">
+          <span class="list-row-title">${esc(r.name)} 想加入 ${esc(h ? h.name : '（已删除）')}</span>
+          <span class="list-row-sub">${esc(requestedRole)} · ${esc(relTime(r.at))}${r.note ? ' · ' + esc(r.note) : ''}</span>
+        </span>
+        <span class="join-request-actions">
+          <button class="btn sm" data-act="join-decide" data-id="${esc(r.id)}" data-role="member" data-ok="1">批准为成员</button>
+          <button class="btn soft sm" data-act="join-decide" data-id="${esc(r.id)}" data-role="owner" data-ok="1">批准为管理员</button>
+          <button class="icon-mini" data-act="join-decide" data-id="${esc(r.id)}" data-role="member" data-ok="0" title="拒绝">✕</button>
+        </span>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
 function viewManageMember() {
   const admin = anyHouseAdmin();
   const house = currentHousehold();
   const locked = house && house.hasPin && !houseToken(house.id);
+  const ownWaiting = admin
+    ? (S.access || []).filter((r) => r.status === 'pending' && r.householdId === S.householdId)
+    : [];
 
   const row = (x) => {
     const ok = canEdit(x);
@@ -3240,10 +3344,15 @@ function viewManageMember() {
     ${
       admin
         ? `<div class="section-head"><h2 class="section-title">这个家的设置</h2></div>
+           <div class="list-row"><span class="icon-mini">🏠</span><span class="list-row-main">
+             <span class="list-row-title">家庭名称与图标</span>
+             <span class="list-row-sub">${esc(house ? house.name : '')}${house && house.note ? ' · ' + esc(house.note) : ''}</span>
+           </span><button class="btn ghost sm" data-act="edit-household" data-id="${esc(S.householdId)}">编辑</button></div>
            <div class="list-row"><span class="icon-mini">👨‍👩‍👧</span><span class="list-row-main">
              <span class="list-row-title">家庭成员</span>
              <span class="list-row-sub">${memberList().length} 位 · 每人一个密码，改成员要先确认身份</span>
            </span><button class="btn ghost sm" data-act="open-members">管理</button></div>
+           ${joinRequestRows(ownWaiting)}
            <div class="list-row"><span class="icon-mini">🔑</span><span class="list-row-main">
              <span class="list-row-title">家庭口令</span>
              <span class="list-row-sub">${house && house.hasPin ? '已设置' : '没设 —— 这个家的 owner 天然是管理员'}</span>
@@ -3316,25 +3425,7 @@ function viewManage() {
 
   // 等管理员点头的加入申请
   const waiting = (S.access || []).filter((r) => r.status === 'pending');
-  const joinRows = waiting.length
-    ? `<div class="join-box">
-         <div class="join-title">📨 ${waiting.length} 个加入申请</div>
-         ${waiting
-           .map((r) => {
-             const h = households().find((x) => x.id === r.householdId);
-             return `<div class="list-row">
-               <span class="member-avatar">🙋</span>
-               <span class="list-row-main">
-                 <span class="list-row-title">${esc(r.name)} 想加入 ${esc(h ? h.name : '（已删除）')}</span>
-                 <span class="list-row-sub">${esc(relTime(r.at))}${r.note ? ' · ' + esc(r.note) : ''}</span>
-               </span>
-               <button class="btn sm" data-act="join-decide" data-id="${esc(r.id)}" data-ok="1">批准</button>
-               <button class="icon-mini" data-act="join-decide" data-id="${esc(r.id)}" data-ok="0" title="拒绝">✕</button>
-             </div>`;
-           })
-           .join('')}
-       </div>`
-    : '';
+  const joinRows = joinRequestRows(waiting);
 
   const houseRows = households()
     .map(
@@ -3359,7 +3450,10 @@ function viewManage() {
     )
     .join('');
 
-  return accountSettingsHtml() + `
+  return accountSettingsHtml() + manageSearchHtml() + `
+    <details class="manage-group${manageGroupHidden('家庭 家庭名称 图标 成员 管理员 权限 申请 加入 口令') }" data-manage-group="family" data-manage-search="家庭 家庭名称 图标 成员 管理员 权限 申请 加入 口令" ${S.manageGroups.family === false ? '' : 'open'}>
+      <summary><span><b>家庭与成员</b><small>家庭列表、改名、成员权限、加入申请</small></span><span class="manage-group-caret">⌄</span></summary>
+      <div class="manage-group-body">
     ${
       s.hasPin
         ? ''
@@ -3379,7 +3473,12 @@ function viewManage() {
     <p class="section-sub" style="margin:-6px 0 12px">菜单分共享菜和本家私菜：共享的全体家庭都看得见，私的只有本家看得见；点餐和库存一直各记各的。</p>
     ${joinRows}
     ${houseRows}
+      </div>
+    </details>
 
+    <details class="manage-group${manageGroupHidden('菜单 菜品 分类 做饭 批量 数据') }" data-manage-group="menu" data-manage-search="菜单 菜品 分类 做饭 批量 数据" ${S.manageGroups.menu === false ? '' : 'open'}>
+      <summary><span><b>菜单与日常数据</b><small>菜品、分类、做饭和批量管理</small></span><span class="manage-group-caret">⌄</span></summary>
+      <div class="manage-group-body">
     <div class="stat-row">
       <div class="stat"><div class="stat-num">${d.length}</div><div class="stat-label">道菜</div></div>
       <div class="stat"><div class="stat-num">${sortedCategories().length}</div><div class="stat-label">个分类</div></div>
@@ -3432,7 +3531,12 @@ function viewManage() {
       <button class="btn soft sm" style="margin-left:auto" data-act="new-cat">＋ ${admin ? '新增' : '新增私有分类'}</button>
     </div>
     ${catRows || '<div class="empty" style="padding:24px"><p class="empty-text">还没有分类</p></div>'}
+      </div>
+    </details>
 
+    <details class="manage-group${manageGroupHidden('系统 口令 AI 版本 关于 数据 导出 恢复 备份') }" data-manage-group="system" data-manage-search="系统 口令 AI 版本 关于 数据 导出 恢复 备份" ${S.manageGroups.system === false ? '' : 'open'}>
+      <summary><span><b>系统与备份</b><small>全局口令、AI、版本、导出和恢复</small></span><span class="manage-group-caret">⌄</span></summary>
+      <div class="manage-group-body">
     <div class="section-head"><h2 class="section-title">家庭设置</h2></div>
     <div class="list-row"><span class="icon-mini">🍽️</span><span class="list-row-main">
       <span class="list-row-title">店名与欢迎语</span>
@@ -3466,7 +3570,9 @@ function viewManage() {
       数据保存在本机 <code>data/</code> 目录，图片在 <code>uploads/</code>，自动备份在 <code>backups/</code>。
       导出的备份是一个 zip，菜谱和照片都在里面。
     </p>
-    <input type="file" id="importFile" accept="application/zip,application/json,.zip,.json" hidden />`;
+    <input type="file" id="importFile" accept="application/zip,application/json,.zip,.json" hidden />
+      </div>
+    </details>`;
 }
 
 /* =========================================================
@@ -3559,7 +3665,7 @@ function openHouseholdEditor(house) {
               新建的家庭从零开始：没有点餐记录、库存是空的。菜谱是所有家庭共享的，不用重复录。
             </p>
             <p class="section-sub" style="margin-top:8px">
-              新建的一律是「普通家庭」—— 自己用没问题，但要进共享菜单、拉人进家，得超级管理员点一下同意。
+              新建家庭立即可用，创建者自动成为管理员；之后可以在成员设置里增加其他管理员。
             </p>`
       }`,
     foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
@@ -4817,6 +4923,13 @@ function openJoinSheet(houseId) {
         <label class="field-label">想说的话<span class="field-hint">选填</span></label>
         <textarea class="textarea" id="joinNote" rows="3" maxlength="100" placeholder="例如：我来做饭的时候想看看你家的菜谱"></textarea>
       </div>
+      <div class="field">
+        <label class="field-label">申请身份</label>
+        <select class="input" id="joinRole">
+          <option value="member">普通成员</option>
+          <option value="owner">家庭管理员（由管理员最终决定）</option>
+        </select>
+      </div>
       <p class="section-sub">
         申请会送到管理员那里，批准之后你就是这个家的成员了。在那之前，
         你只能浏览共享菜谱 —— 别人家的私菜本来就看不见。
@@ -4882,7 +4995,7 @@ const ACTIONS = {
     const name = accountUser()?.displayName || accountUser()?.loginId || '';
     openSheet({
       title: '申请加入家庭',
-      body: `<div class="field"><label class="field-label">家庭 ID 或名称</label><input class="input" id="joinFamilyTarget" placeholder="输入家庭名称或 ID" /></div><div class="field"><label class="field-label">在家庭中的称呼</label><input class="input" id="joinName" maxlength="20" value="${esc(name)}" placeholder="例如：姑姑" /></div><div class="field"><label class="field-label">留言（选填）</label><textarea class="textarea" id="joinNote" rows="3" maxlength="100" placeholder="告诉管理员你是谁"></textarea></div>`,
+      body: `<div class="field"><label class="field-label">家庭 ID 或名称</label><input class="input" id="joinFamilyTarget" placeholder="输入家庭名称或 ID" /></div><div class="field"><label class="field-label">在家庭中的称呼</label><input class="input" id="joinName" maxlength="20" value="${esc(name)}" placeholder="例如：姑姑" /></div><div class="field"><label class="field-label">留言（选填）</label><textarea class="textarea" id="joinNote" rows="3" maxlength="100" placeholder="告诉管理员你是谁"></textarea></div><div class="field"><label class="field-label">申请身份</label><select class="input" id="joinRole"><option value="member">普通成员</option><option value="owner">家庭管理员（由管理员最终决定）</option></select></div>`,
       foot: `<button class="btn ghost" data-act="close-sheet">取消</button><button class="btn" data-act="send-join-family">提交申请</button>`,
     });
   },
@@ -4894,7 +5007,12 @@ const ACTIONS = {
     const h = households().find((x) => x.id === target || x.name === target);
     const householdId = h ? h.id : target;
     try {
-      await api('POST', '/api/join-requests', { householdId, name, note: String($('#joinNote')?.value || '').trim() });
+      await api('POST', '/api/join-requests', {
+        householdId,
+        name,
+        note: String($('#joinNote')?.value || '').trim(),
+        requestedRole: String($('#joinRole')?.value || 'member') === 'owner' ? 'owner' : 'member',
+      });
       closeSheet();
       toast('申请已提交，等待家庭管理员批准', 3200);
     } catch (e) { toast('提交失败：' + e.message); }
@@ -5000,6 +5118,11 @@ const ACTIONS = {
     $('#searchInput').value = '';
     render();
   },
+  'clear-manage-search'() {
+    S.manageKeyword = '';
+    render();
+    $('#manageKeyword')?.focus();
+  },
 
   /* 菜单 */
   'filter-scope'(el) {
@@ -5053,9 +5176,21 @@ const ACTIONS = {
   'open-dish'(el) {
     openDish(el.dataset.id);
   },
-  async random() {
-    const list = scopeDishes();
-    if (!list.length) return toast('还没有菜可以抽哦');
+  random() {
+    openRandomSheet();
+  },
+  'random-run'() {
+    const filters = {
+      scope: $('#randomScope')?.value || 'all',
+      category: $('#randomCategory')?.value || '全部',
+      tags: $('#randomTags')?.value || '',
+      notCooked: !!$('#randomNotCooked')?.checked,
+      excludeOrdered: !!$('#randomExcludeOrdered')?.checked,
+    };
+    const list = randomCandidates(filters);
+    if (!list.length) return toast('没有符合条件的菜，换个范围或条件试试', 3200);
+    S.randomFilters = filters;
+    closeSheet();
     openDish(list[Math.floor(Math.random() * list.length)].id);
   },
 
@@ -5632,6 +5767,7 @@ const ACTIONS = {
         name,
         householdId: target,
         note: (($('#joinNote') || {}).value || '').trim(),
+        requestedRole: (($('#joinRole') || {}).value || 'member') === 'owner' ? 'owner' : 'member',
       });
       // 还没批下来，所以还不是成员、没有成员 id 可认 —— 先记着名字，
       // 顶栏就能显示「姑姑（等批准）」而不是「还没登记」
@@ -5652,10 +5788,13 @@ const ACTIONS = {
     try {
       const r = await api('PUT', `/api/join-requests/${encodeURIComponent(id)}`, {
         status: el.dataset.ok === '1' ? 'ok' : 'no',
+        role: el.dataset.role === 'owner' ? 'owner' : 'member',
       });
       await loadState(true);
       render();
-      toast(r.data.status === 'ok' ? `已批准，${r.data.name} 现在是这个家的成员了` : '已拒绝');
+      toast(r.data.status === 'ok'
+        ? `已批准，${r.data.name} 现在是${r.data.approvedRole === 'owner' ? '这个家的管理员' : '这个家的成员'}了`
+        : '已拒绝');
     } catch (err) {
       toast('处理失败：' + err.message);
     }
@@ -6828,8 +6967,27 @@ document.addEventListener('input', (e) => {
     S.keyword = e.target.value.trim();
     render();
   }
+  if (e.target.id === 'manageKeyword') {
+    S.manageKeyword = e.target.value.trim();
+    const keyword = manageSearchText(S.manageKeyword);
+    document.querySelectorAll('.manage-group').forEach((group) => {
+      const hay = manageSearchText(group.dataset.manageSearch || group.textContent);
+      const match = !keyword || hay.includes(keyword);
+      group.hidden = !match;
+      if (match && keyword) group.open = true;
+    });
+    const clear = document.querySelector('.manage-search .icon-mini');
+    if (clear) clear.hidden = !S.manageKeyword;
+  }
   if (e.target.id === 'fPresetSearch') renderPresetGrid();
 });
+
+document.addEventListener('toggle', (e) => {
+  const group = e.target;
+  if (!group || !group.matches || !group.matches('.manage-group')) return;
+  const key = group.dataset.manageGroup;
+  if (key) S.manageGroups[key] = group.open;
+}, true);
 
 /* 改分类时，常见食材快选跟着换 */
 document.addEventListener('change', (e) => {
