@@ -23,6 +23,11 @@
         <span class="house-btn-name" id="houseName">我家</span>
         <span class="house-btn-caret" aria-hidden="true">⌄</span>
       </button>
+      <button class="me-btn" id="meBtn" data-act="open-me" aria-label="我是谁">
+        <span class="me-btn-avatar" id="meEmoji">🙋</span>
+        <span class="me-btn-name" id="meName">…</span>
+        <span class="me-btn-role" id="meRole" hidden></span>
+      </button>
       <button class="icon-btn" data-act="random" title="随机来一道" aria-label="随机来一道">🎲</button>
       <button class="icon-btn" data-act="open-search" title="搜索" aria-label="搜索">🔍</button>
     </div>
@@ -34,6 +39,7 @@
   </div>
 
   <main id="view" class="view" aria-live="polite"></main>
+  <div id="whoami" class="whoami" hidden></div>
 
   <nav class="tabbar" id="tabbar">
     <button class="tab" data-act="nav" data-view="menu">

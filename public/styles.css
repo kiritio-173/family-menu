@@ -112,6 +112,157 @@ a { color: var(--primary-dark); }
 .house-btn-badge.cold { background: var(--danger); }
 .topbar-actions { position: relative; }
 
+/* ---------- 「我是谁」按钮 ---------- */
+
+.me-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  max-width: 26vw;
+  height: 34px; padding: 0 10px;
+  border-radius: 999px;
+  background: var(--surface); color: var(--text-mid);
+  border: 1px solid var(--line-strong);
+  font-size: 13.5px; font-weight: 600;
+  transition: transform 0.12s ease, filter 0.15s ease;
+}
+.me-btn:active { transform: scale(0.96); }
+.me-btn-avatar { font-size: 15px; flex: 0 0 auto; }
+.me-btn-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 没认领过的身份要显眼：它正顶着别人家的点餐单在看 */
+.me-btn.pending {
+  background: #fdf0e3; color: #a1620d;
+  border-color: #e8cf9e; border-style: dashed;
+}
+/* 报了名还没批：不是错误，但也别让人以为没提交上 */
+.me-btn.waiting {
+  background: #eef3fb; color: #3a5a91;
+  border-color: #c3d3ee;
+}
+/* 角色角标：顶栏那点地方只够放一个词 */
+.me-btn-role {
+  font-size: 10.5px; font-weight: 600; opacity: 0.7;
+  padding-left: 5px; margin-left: 1px;
+  border-left: 1px solid currentColor;
+  white-space: nowrap;
+}
+
+/* ---------- 首次进入的「你是谁」向导 ---------- */
+
+.whoami {
+  position: fixed; inset: 0; z-index: 60;
+  display: grid; place-items: center;
+  padding: 20px;
+  background: rgba(38, 26, 18, 0.44);
+  backdrop-filter: blur(3px);
+  overflow-y: auto;
+}
+.whoami-card {
+  width: 100%; max-width: 380px;
+  background: var(--surface);
+  border-radius: 20px; box-shadow: var(--shadow);
+  padding: 26px 22px 20px;
+  text-align: center;
+}
+.whoami-emoji { font-size: 40px; line-height: 1.1; }
+.whoami-title { margin: 6px 0 6px; font-size: 19px; font-weight: 700; }
+.whoami-sub { margin: 0 0 16px; font-size: 13px; color: var(--muted); line-height: 1.6; }
+
+.whoami-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.whoami-row {
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  padding: 11px 13px; text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.whoami-row:active { transform: scale(0.99); }
+.whoami-row-emoji { font-size: 22px; flex: 0 0 auto; }
+.whoami-row-main { flex: 1; min-width: 0; }
+.whoami-row-name { display: block; font-weight: 650; font-size: 14.5px; }
+.whoami-row-sub {
+  display: block; font-size: 12px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.whoami-row-go { color: var(--muted); font-size: 20px; flex: 0 0 auto; }
+
+.whoami-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 8px; margin-bottom: 14px;
+}
+.whoami-pick {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 12px 6px;
+  background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.whoami-pick.on { border-color: var(--primary); background: var(--primary-soft); }
+.whoami-pick:active { transform: scale(0.97); }
+.whoami-pick-emoji { font-size: 24px; }
+.whoami-pick-name {
+  font-size: 13px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+}
+/* 管理员 / 已设密码的标记。挤在一张小卡片上，所以用极简的字而不是徽章 */
+.whoami-pick-role,
+.whoami-pick-lock {
+  font-size: 10px; color: var(--muted); line-height: 1.2;
+  white-space: nowrap;
+}
+.whoami-pick-role { color: var(--primary); font-weight: 600; }
+/* 密码输错：留在原地，不用关弹层重来 */
+.whoami-err {
+  margin: 8px 0 0; font-size: 12.5px; color: var(--danger); text-align: left;
+}
+.whoami .input { text-align: center; letter-spacing: 3px; font-size: 16px; }
+
+.whoami-row-btns { display: flex; gap: 8px; margin-top: 10px; }
+.whoami-row-btns .btn { flex: 1; }
+
+/* ---------- 二选一（普通成员 / 管理员） ---------- */
+
+.seg {
+  display: flex; gap: 4px; padding: 3px;
+  background: var(--surface-2, #f4f1ec);
+  border-radius: var(--radius-sm);
+}
+.seg-opt {
+  flex: 1; padding: 7px 10px;
+  background: transparent; border: 0; border-radius: 6px;
+  font-size: 13px; font-weight: 600; color: var(--muted);
+}
+.seg-opt.on { background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm, 0 1px 2px rgba(0,0,0,.06)); }
+
+/* ---------- 同名折叠 ---------- */
+
+/* 卡片上的折叠提示条。整条能点，标题行除外 */
+.card-dupes {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px; margin: 0 8px 6px;
+  background: var(--primary-soft); color: var(--text-mid);
+  border-radius: 8px; font-size: 11.5px; line-height: 1.4;
+}
+.card-dupes span { flex: 1; min-width: 0; }
+
+/* 「🔒 我家私房」那一屏的归属筛选条，比普通分类条更醒目一点 */
+.chip-scope { font-weight: 650; }
+
+.dup-list { display: flex; flex-direction: column; gap: 8px; }
+.dup-row {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 11px 13px; text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.dup-row:active { transform: scale(0.99); }
+.dup-row-main { flex: 1; min-width: 0; }
+.dup-row-name { display: block; font-weight: 650; font-size: 14.5px; }
+.dup-row-sub {
+  display: block; font-size: 12px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dup-row-go { color: var(--muted); font-size: 20px; }
+
+/* 留言栏里「这个人还没在这台设备上登录过」 */
+.who-lock { font-size: 10px; opacity: 0.75; }
+
 /* ---------- 搜索 ---------- */
 
 .searchbar {

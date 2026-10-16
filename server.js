@@ -41,10 +41,30 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.10.1';
+const APP_VERSION = '1.12.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.12.0',
+    date: '2026-10-16',
+    title: '多个家庭管理员与文本登录身份',
+    items: [
+      '一个家庭可以有多个家庭管理员，每个管理员独立登录和管理本家庭',
+      '登录 ID 支持汉字、字母和数字，密码支持一般文本，不再限制为纯数字 PIN',
+      '旧成员 PIN 自动迁移为个人密码，前端只显示是否设置，不回传密码明文',
+      '身份不再靠自报：「你是谁」向导多一步密码，每个成员自己设一个，别人拿到设备也冒充不了',
+      '「记住我」：输一次密码换一枚 30 天令牌，之后打开就是自己。令牌存在本机，绝不进备份',
+      '超级管理员（全局口令）/ 家庭管理员（家庭口令）/ 普通成员（成员密码）三层权限',
+      '菜品记下作者是谁：一家人里只有管理员和作者本人能改这一道',
+      '危险动作不认「记住我」的令牌：改成员、重置密码、改家庭口令、删家庭、批申请，都要当场重新输一次密码',
+      '每个家庭一个口令：这个家的管理员用它解锁，不影响别的家',
+      '新建的家庭是「普通家庭」，要超级管理员点头才升级为「正式家庭」',
+      '菜单页加「🌐 共享 / 🔒 我家私房」筛选：同名的只露共享那一版，你家的私房版收在私房那一屏',
+      '成员可以重名（爸爸和儿子都叫「小明」）：身份认的是人不是名字',
+      '家庭管理员只能改自己家 —— 以前 A 家的管理员能把 B 家的名字也改了',
+    ],
+  },
   {
     version: '1.10.1',
     date: '2026-10-16',
@@ -221,6 +241,37 @@ const todayStr = () => {
 function safeText(v, max = 500) {
   if (v === null || v === undefined) return '';
   return String(v).slice(0, max);
+}
+
+/** 用户可见的登录 ID：允许汉字、字母、数字和常用符号，不接受控制字符。 */
+function normalizeLoginId(value, fallback = '') {
+  const raw = safeText(value, 32).trim();
+  const cleaned = raw.replace(/[\u0000-\u001f\u007f]/g, '');
+  return cleaned || safeText(fallback, 32).trim();
+}
+
+function uniqueLoginId(members, value, fallback = '') {
+  const requested = normalizeLoginId(value, fallback) || '成员';
+  const used = new Set((members || []).map((m) => m && m.loginId).filter(Boolean));
+  let result = requested;
+  let suffix = 2;
+  while (used.has(result)) result = `${requested}-${suffix++}`;
+  return result;
+}
+
+/** 成员密码允许一般文本；旧 pin 字段只作为迁移兼容来源。 */
+function memberPassword(member) {
+  if (!member) return '';
+  if (typeof member.password === 'string') return member.password;
+  return typeof member.pin === 'string' ? member.pin : '';
+}
+
+function passwordValue(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function validMemberPassword(value) {
+  return value.length >= 4 && value.length <= 64;
 }
 
 function safeList(v) {
@@ -551,7 +602,10 @@ function defaultState() {
         name: '我家',
         emoji: '🏠',
         note: '',
-        members: [{ id: 'm_self', name: '我', emoji: '🙋' }],
+        // 系统自带的家，直接算正式：它是「装上就有」的，不是用户申请来的
+        status: 'approved',
+        pin: '',
+        members: [{ id: 'm_self', name: '我', loginId: '我', emoji: '🙋', role: 'owner', password: '' }],
         createdAt: nowISO(),
         updatedAt: nowISO(),
       },
@@ -592,31 +646,6 @@ const PANTRY_CATEGORIES = [
   { name: '零食', emoji: '🍪' },
   { name: '其他', emoji: '📦' },
 ];
-
-/**
- * 家庭成员统一成 {id, name, emoji}
- * 兼容早期存成 ["妈妈","爸爸"] 的字符串数组，老数据不用手动改
- */
-function normMembers(input) {
-  if (!Array.isArray(input)) return null;
-  const out = [];
-  const seen = new Set();
-  for (const m of input.slice(0, 30)) {
-    const name = safeText(typeof m === 'object' && m ? m.name : m, 12).trim();
-    if (!name || seen.has(name)) continue;
-    seen.add(name);
-    const emoji =
-      typeof m === 'object' && m && typeof m.emoji === 'string' && m.emoji.trim()
-        ? safeText(m.emoji.trim(), 4)
-        : MEMBER_EMOJI[out.length % MEMBER_EMOJI.length];
-    out.push({
-      id: typeof m === 'object' && m && typeof m.id === 'string' && m.id ? m.id : uid('m_'),
-      name,
-      emoji,
-    });
-  }
-  return out;
-}
 
 /* ------------------------------------------------------------------ *
  * 预置食材库：录入库存时点一下就有名字、分类、单位、参考保质期
@@ -699,19 +728,89 @@ function normDate(v) {
 }
 
 /**
- * 家庭统一成 {id, name, emoji, note, members[]}
+ * 家庭成员统一成 {id, name, loginId, emoji, role, password}
+ * 兼容早期存成 ["妈妈","爸爸"] 的字符串数组，老数据不用手动改
+ *
+ * role 是写权限的分界：
+ *   owner  —— 知道本家口令（或者本来就是这个家的创建者），能改本家所有人的菜
+ *   member —— 只能改**自己添加**的那几条
+ * 老成员一律升成 owner：他们本来就是自己家的管理员，硬降级只会让
+ * 「我明明是户主却改不了」比迁移前更糟。
+ *
+ * password 是**这个人自己设**的认领密码，别人不知道，所以才是凭证。
+ * 老成员没有 password（空）—— 意味着「还没设」，第一次认领时补上。
+ * 明文存，跟全局 adminPin 一个规矩：备份里本来就有口令明文，
+ * 给它加一层 hash 只是让源码多几行，挡不住能导出备份的人。
+ *
+ * 唯一键是 id 不是 name，所以爸爸和儿子可以都叫「小明」。
+ * 老数据里重名的会在迁移时被并成一个人（见 loadState）。
+ */
+function normMembers(input, prevById, prevByName) {
+  if (!Array.isArray(input)) return null;
+  const out = [];
+  const seenId = new Set();
+  const seenLoginId = new Set();
+  for (const m of input.slice(0, 30)) {
+    const isObj = typeof m === 'object' && m;
+    const name = safeText(isObj ? m.name : m, 12).trim();
+    if (!name) continue;
+    const id = isObj && typeof m.id === 'string' && m.id ? m.id : uid('m_');
+    if (seenId.has(id)) continue;
+    seenId.add(id);
+    const old = (prevById && prevById.get(id)) || (prevByName && prevByName.get(name)) || null;
+    const emoji =
+      isObj && typeof m.emoji === 'string' && m.emoji.trim()
+        ? safeText(m.emoji.trim(), 4)
+        : old && old.emoji
+        ? old.emoji
+        : MEMBER_EMOJI[out.length % MEMBER_EMOJI.length];
+    // 角色：显式给了就认；没给沿用老的；再没有默认 owner（见 normHousehold 的兜底）
+    let role = isObj ? m.role : '';
+    if (role !== 'owner' && role !== 'member') role = old && old.role === 'member' ? 'member' : 'owner';
+    // 密码只有服务端认得的才留下，客户端传来的当作没设；旧 pin 自动迁移。
+    const password = old ? memberPassword(old) : '';
+    const requestedLoginId = normalizeLoginId(isObj ? m.loginId : '', old && old.loginId ? old.loginId : name);
+    let loginId = requestedLoginId || id;
+    let suffix = 2;
+    while (seenLoginId.has(loginId)) loginId = `${requestedLoginId || id}-${suffix++}`;
+    seenLoginId.add(loginId);
+    out.push({ id, name, loginId, emoji, role, password });
+  }
+  return out;
+}
+
+/**
+ * 家庭统一成 {id, name, emoji, note, status, pin, members[]}
  * 名字可以是房号（301）、门牌（西苑 2 栋 501），也可以是随便起的称呼
+ *
+ * status: approved(正式) / normal(普通)
+ *   新建的家庭一律 normal —— 能自己用，但不能拉人进共享菜单，
+ *   要等超级管理员点头。防的是随手建一堆空家庭把共享菜单搅乱。
+ * pin: 本家的管理口令，明文存（跟全局 adminPin 一个规矩，
+ *   备份里本来就含明文口令，README 已写明）。
  */
 function normHousehold(input, prev) {
   const base = prev || {};
   const name = safeText(input.name ?? base.name, 20).trim();
   if (!name) return null;
+  const prevById = new Map();
+  const prevByName = new Map();
+  for (const m of base.members || []) {
+    if (m && m.id) prevById.set(m.id, m);
+    if (m && m.name) prevByName.set(m.name, m);
+  }
+  const members = normMembers(input.members ?? base.members, prevById, prevByName) || [];
+  // 新家庭没有 owner 时让第一个成员成为管理员；已有家庭的最后一个 owner
+  // 由家庭更新 handler 拒绝撤销，不能在这里静默抢走管理员身份。
+  if (members.length && !members.some((m) => m.role === 'owner') && !prev) members[0].role = 'owner';
   return {
     id: base.id || (typeof input.id === 'string' && input.id ? input.id : uid('h_')),
     name,
     emoji: safeText(input.emoji ?? base.emoji, 4) || '🏠',
     note: safeText(input.note ?? base.note, 100),
-    members: normMembers(input.members ?? base.members) || [],
+    status: (input.status ?? base.status) === 'approved' ? 'approved' : 'normal',
+    pin: safeText(input.pin ?? base.pin, 12),
+    members,
     createdAt: base.createdAt || input.createdAt || nowISO(),
     updatedAt: nowISO(),
   };
@@ -879,8 +978,27 @@ function loadState() {
   // 旧版本没有 households，settings.members 里存着家庭成员，搬进第一个家庭
   const legacyMembers = normMembers(state.settings.members) || [];
 
+  /**
+   * 家庭并成员迁移
+   *
+   * 老版本 households.json 里的成员是 {id, name, emoji}，没有 role / pin。
+   * normHousehold 已经把它们补成 owner + 空 pin。
+   *
+   * status 的分界：磁盘上已经存在的家庭一律算**正式**。它们都在用了，
+   * 没道理因为升级就变成「未审核」，那等于凭空收走人家的功能。
+   * 从今往后**新建**的家庭才是普通家庭，要超级管理员点头才能升级 ——
+   * 挡的是随手建一堆空家庭把共享菜单搅乱。
+   *
+   * 成员那边：老版本按名字去重存的，重名成员当时会被静默丢掉，所以文件里
+   * 不会出现两个同名的。现在唯一键换成 id 了，保持原样别再合并 ——
+   * 两个「小明」从此各走各的，靠各自的 PIN 认领。
+   */
+  const hadHouseholdsFile = fromDisk.has('households');
   state.households = (Array.isArray(state.households) ? state.households : [])
-    .map((h) => (h && typeof h === 'object' ? normHousehold(h, undefined) : null))
+    .map((h) => {
+      if (!h || typeof h !== 'object') return null;
+      return normHousehold(h, hadHouseholdsFile && !h.status ? { status: 'approved' } : undefined);
+    })
     .filter(Boolean);
 
   const seenH = new Set();
@@ -888,7 +1006,11 @@ function loadState() {
     seenH.has(h.id) ? false : (seenH.add(h.id), true)
   );
   if (!state.households.length) {
-    state.households = [normHousehold({ name: '我家', emoji: '🏠', members: legacyMembers })];
+    // 全新安装：系统自带的「我家」直接算正式。它是装上就有的，
+    // 不是谁「申请」来的，没道理让人先去找超管认证一遍。
+    state.households = [
+      normHousehold({ name: '我家', emoji: '🏠', status: 'approved', members: legacyMembers }),
+    ];
   } else if (legacyMembers.length && !fromDisk.has('households')) {
     // households.json 是这次升级才有的，说明用户跑的是老版本：
     // settings.members 里的老成员认领给第一个家庭（不要被示例成员占位）
@@ -977,6 +1099,94 @@ function saveNow() {
     saveTimer = null;
   }
   for (const k of Object.keys(FILES)) persist(k);
+  saveDevices();
+}
+
+/* ------------------------------------------------------------------ *
+ * 设备令牌 —— 「登录一次，记住这台设备」
+ *
+ * 成员输一次 PIN，服务端发一枚不透明的随机串，前端存进 localStorage。
+ * 之后这台设备每次请求都带着它，服务端据此知道「你是哪个成员」。
+ * 同一台人的手机 / 平板 / 电脑各认领一次即可，都指向同一个成员。
+ *
+ * 为什么不塞进 state：state 会被备份带走，而设备令牌是**长期有效的冒名凭证**，
+ * 导出备份的人拿到它就能一直冒充那个人。设备令牌只留在本机这台机器上。
+ *
+ * 30 天滑动续期：每次用都往后推。过期了重新输一次 PIN 就行。
+ * 危险动作（改成员、改家庭口令、删家庭、升级家庭）**不认令牌，要重新输 PIN**。
+ * ------------------------------------------------------------------ */
+
+const DEVICE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 天
+const DEVICES_FILE = 'devices.json';
+/** token -> { memberId, householdId, exp } */
+let devices = new Map();
+let devicesDirty = false;
+
+function loadDevices() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(DATA_DIR, DEVICES_FILE), 'utf8'));
+    const now = Date.now();
+    devices = new Map(
+      (Array.isArray(raw) ? raw : [])
+        .filter((d) => d && typeof d.token === 'string' && typeof d.memberId === 'string' && d.exp > now)
+        .map((d) => [d.token, { memberId: d.memberId, householdId: d.householdId || '', exp: d.exp }])
+    );
+  } catch (_) {
+    devices = new Map(); // 文件不存在 = 从来没用过「记住我」，正常
+  }
+}
+
+function saveDevices() {
+  devicesDirty = false;
+  try {
+    const file = path.join(DATA_DIR, DEVICES_FILE);
+    const tmp = file + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify([...devices.entries()], null, 2), 'utf8');
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    console.error('[error] 设备令牌保存失败：', err.message);
+  }
+}
+
+function markDevicesDirty() {
+  devicesDirty = true;
+  const t = setTimeout(saveDevices, 300);
+  if (t.unref) t.unref();
+}
+
+function issueDeviceToken(memberId, householdId) {
+  const token = crypto.randomBytes(24).toString('hex');
+  devices.set(token, { memberId, householdId: householdId || '', exp: Date.now() + DEVICE_TTL });
+  markDevicesDirty();
+  return token;
+}
+
+/** 令牌换成员身份；顺便滑动续期 */
+function deviceMember(req) {
+  const token = req.headers['x-device-token'];
+  if (!token || typeof token !== 'string') return null;
+  const d = devices.get(token);
+  if (!d) return null;
+  if (Date.now() > d.exp) {
+    devices.delete(token);
+    markDevicesDirty();
+    return null;
+  }
+  d.exp = Date.now() + DEVICE_TTL;
+  markDevicesDirty();
+  return { ...d, token };
+}
+
+function revokeDeviceTokens(memberId) {
+  let n = 0;
+  for (const [t, d] of devices) {
+    if (d.memberId === memberId) {
+      devices.delete(t);
+      n++;
+    }
+  }
+  if (n) markDevicesDirty();
+  return n;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1464,6 +1674,12 @@ function normDish(input, prev, keepInputId) {
     // 填了家庭 id = 只有那一家能看到。老数据没这个字段 → 当共享菜，
     // 升级过来你原来那 6 道菜还跟以前一样人人可见。
     householdId: normScope(input, base),
+    // 谁加的这道菜。普通成员只能改自己添加的那几条，管理员谁都能改。
+    // 老数据没有这个字段 → 空字符串，等于「不知道谁加的」。
+    // 那就让谁都能改：菜谱是家里的东西，为一条查不到出处的菜把主人锁在外面，
+    // 代价（可能被人乱改）大于收益（防止改一条几乎不可能发生的事）。
+    authorId: safeText(input.authorId ?? base.authorId, 40),
+    authorName: safeText(input.authorName ?? base.authorName, 20),
     description: safeText(input.description, 300),
     images: safeList(input.images ?? base.images)
       .map((s) => safeText(s, 300))
@@ -1743,42 +1959,286 @@ function sendError(res, code, message) {
  * ------------------------------------------------------------------ */
 
 const SESSION_TTL = 12 * 60 * 60 * 1000; // 12 小时
-const sessions = new Map(); // token -> 过期时间戳
+
+/**
+ * 会话：token -> { exp, scope }
+ *
+ * scope 决定这枚 token 能干什么，是三层身份的地基：
+ *   { kind: 'super' }        超级管理员：全局口令换的，管所有家庭和系统设置
+ *   { kind: 'house', id }    家庭管理员：本家口令换的，只管这一家
+ *   { kind: 'anon' }         没解锁的匿名会话，只用日常功能
+ *
+ * 老版本发出去的 token 在 sessions 里存的是**数字**（就是过期时间），
+ * 读的时候照旧当成 super —— 升级不该把所有人踢下线。
+ */
+const sessions = new Map();
 
 function pruneSessions() {
   const now = Date.now();
-  for (const [t, exp] of sessions) if (exp <= now) sessions.delete(t);
+  for (const [t, s] of sessions) {
+    const exp = typeof s === 'number' ? s : s && s.exp;
+    if (!exp || exp <= now) sessions.delete(t);
+  }
 }
 
-function issueSession() {
+function issueSession(scope) {
   if (sessions.size > 200) pruneSessions();
   const token = crypto.randomBytes(24).toString('hex');
-  sessions.set(token, Date.now() + SESSION_TTL);
+  sessions.set(token, { exp: Date.now() + SESSION_TTL, scope: scope || { kind: 'anon' } });
   return token;
 }
 
-/** 没设口令 → 放行；设了 → 必须带有效 token */
-function isAuthed(req) {
-  const pin = state.settings.adminPin;
-  if (!pin) return true;
+function sessionOf(req) {
   const token = req.headers['x-auth-token'];
-  if (!token || typeof token !== 'string') return false;
-  const exp = sessions.get(token);
-  if (!exp) return false;
-  if (Date.now() > exp) {
+  if (!token || typeof token !== 'string') return null;
+  const s = sessions.get(token);
+  if (!s) return null;
+  const exp = typeof s === 'number' ? s : s && s.exp;
+  if (!exp || Date.now() > exp) {
     sessions.delete(token);
-    return false;
+    return null;
   }
-  sessions.set(token, Date.now() + SESSION_TTL); // 滑动续期
-  return true;
+  const scope = (typeof s === 'object' && s.scope) || { kind: 'super' };
+  sessions.set(token, { exp: Date.now() + SESSION_TTL, scope }); // 滑动续期
+  return { token, scope };
 }
 
 /**
- * 需要管理权限的写操作。
- * 点餐、库存、本周计划**不在列** —— 那是家里人每天都要用的，
+ * 这个请求「是谁」。
+ *
+ * 三条线索，谁强用谁：
+ *   1. 超级管理员会话（全局口令换的）—— 什么都能干
+ *   2. 设备令牌（成员 PIN 换的，30 天）—— 知道自己是哪个成员，能改自己写的
+ *   3. 什么都没带 —— 匿名，只能用日常功能
+ * 家庭口令换来的会话只提升到「家庭管理员」，不改变「我是谁」。
+ */
+function whoami(req) {
+  if (isSuperAdmin(req)) return { kind: 'super', memberId: '', name: '' };
+  const d = deviceMember(req);
+  if (!d) return { kind: 'anon', memberId: '', name: '' };
+  // 令牌可能已经被撤销（成员被删了、PIN 被重置）——认不得就当匿名
+  for (const h of state.households) {
+    const m = (h.members || []).find((x) => x.id === d.memberId);
+    if (m) return { kind: 'member', memberId: m.id, name: m.name, householdId: h.id };
+  }
+  return { kind: 'anon', memberId: '', name: '' };
+}
+
+/**
+ * 超级管理员。没设全局口令时一律算 —— 保持「装了就能用」，
+ * 设了口令才启用分工。
+ */
+function isSuperAdmin(req) {
+  if (!state.settings.adminPin) return true;
+  const s = sessionOf(req);
+  return !!s && s.scope.kind === 'super';
+}
+
+/** 家庭口令换来的会话。跟超管会话分开存，所以要单独读 X-House-Token */
+function houseSessionOf(req) {
+  const token = req.headers['x-house-token'];
+  if (!token || typeof token !== 'string') return null;
+  const s = sessions.get(token);
+  if (!s) return null;
+  const exp = typeof s === 'number' ? s : s && s.exp;
+  if (!exp || Date.now() > exp) {
+    sessions.delete(token);
+    return null;
+  }
+  const scope = (typeof s === 'object' && s.scope) || { kind: 'super' };
+  if (scope.kind !== 'house') return null;
+  sessions.set(token, { exp: Date.now() + SESSION_TTL, scope }); // 滑动续期
+  return { token, scope };
+}
+
+/* ------------------------------------------------------------------
+ * 「刚验过密码」凭证 —— 只活 5 分钟，只对危险动作有效
+ *
+ * 为什么要有它：改成员、重置密码、改家庭口令、删家庭 —— 这几件事
+ * 能改谁的身份，就等于能冒充谁。手上那把 30 天的设备令牌证明的是
+ * 「这台设备以前是你」，不是「此刻可以替这个家做主」。
+ * 所以危险动作必须配一张新鲜的、刚刚用密码换来的凭证。
+ * ------------------------------------------------------------------ */
+
+const VERIFIED_TTL = 5 * 60 * 1000; // 5 分钟
+
+function issueVerified(householdId, memberId) {
+  const token = crypto.randomBytes(18).toString('hex');
+  sessions.set(token, {
+    exp: Date.now() + VERIFIED_TTL,
+    scope: { kind: 'verified', id: householdId, memberId },
+  });
+  return token;
+}
+
+function verifiedSessionOf(req) {
+  const token = req.headers['x-verified-token'];
+  if (!token || typeof token !== 'string') return null;
+  const s = sessions.get(token);
+  if (!s) return null;
+  const exp = typeof s === 'number' ? s : s && s.exp;
+  if (!exp || Date.now() > exp) {
+    sessions.delete(token); // 过期的顺手清掉，别攒一堆死凭证
+    return null;
+  }
+  const scope = (typeof s === 'object' && s.scope) || {};
+  if (scope.kind !== 'verified') return null;
+  return { token, scope }; // 刻意**不**续期 —— 5 分钟就是 5 分钟
+}
+
+const SENSITIVE_HINT =
+  '这是危险操作，需要重新确认身份：用超级管理员口令登录，或输一次这个家的口令 / 你的成员密码。';
+
+/**
+ * 危险动作放行。
+ *
+ * 按「这个家里到底有没有秘密」分三种情况：
+ *   1. 超管会话 —— 全局的，什么都能干
+ *   2. 这家的口令会话 —— 刚输过这个家的口令
+ *   3. 5 分钟内刚用成员密码验过
+ *   4. 这一家谁都没设密码 —— 那本来就没有秘密可保护，按老规矩开着
+ *      （等谁设了密码，这条路自动关上，不用谁记得来开）
+ *
+ * 光有设备令牌（30 天那把）永远过不了这一关。
+ */
+function canDoSensitive(req, householdId) {
+  if (isSuperAdmin(req)) return true;
+  const hs = houseSessionOf(req);
+  if (hs && hs.scope.id === householdId) return true;
+  const vs = verifiedSessionOf(req);
+  if (vs && vs.scope.id === householdId) return true;
+  const house = state.households.find((h) => h.id === householdId);
+  if (!house) return false;
+  if (house.pin) return false; // 这个家有口令，没输过就不算数
+  const me = deviceMember(req);
+  if (!me) return false;
+  const member = (house.members || []).find((x) => x.id === me.memberId);
+  // 还没设密码的 owner：这一家既然一个密码都没有，就没有冒充可谈
+  return !!(member && member.role === 'owner' && !memberPassword(member));
+}
+
+/**
+ * 家庭管理员：这个家的 owner，或者超级管理员。
+ *
+ * 没设本家口令时，本家 owner 名单上的人天然就是管理员 —— 装了就能用的老传统。
+ * 设了本家口令之后，光「在 owner 名单上」不够，还得输过那家的口令。
+ */
+function isHouseAdmin(req, householdId) {
+  if (isSuperAdmin(req)) return true;
+  const house = state.households.find((h) => h.id === householdId);
+  if (!house) return false;
+  const s = houseSessionOf(req);
+  if (s && s.scope.id === householdId) return true;
+  if (house.pin) return false; // 这个家设了口令，没输过就不算管理员
+  const me = deviceMember(req);
+  const isOwner = me
+    ? (house.members || []).some((m) => m.id === me.memberId && m.role === 'owner')
+    : false;
+  return isOwner;
+}
+
+/**
+ * 这条能不能改这个对象 —— 三层权限里最常问的一句。
+ *
+ * 共享菜（householdId 为空）：超级管理员，或者任何一个家庭管理员。
+ * 本家菜：管理员随便改；普通成员只能改 authorId 是自己的那些。
+ * 查不到出处的（老数据没 authorId）一律放开：宁可让人改一条菜，
+ * 也不要把主人锁在自己家门外。
+ */
+function canWrite(req, obj) {
+  if (!obj) return false;
+  if (!obj.householdId) return canWriteShared(req);
+  const who = whoami(req);
+  if (who.kind === 'super') return true;
+  if (isHouseAdmin(req, obj.householdId)) return true;
+  // 本家的菜，但作者查不到出处 → 放开
+  if (!obj.authorId) return who.kind === 'member' && isMyMember(req, obj.householdId);
+  return who.kind === 'member' && obj.authorId === who.memberId;
+}
+
+/** 菜谱或分类的可见性：不再按「私房」锁死，一律可见，只分能不能改 */
+function isMyMember(req, householdId) {
+  const me = deviceMember(req);
+  if (!me) return false;
+  const h = state.households.find((x) => x.id === householdId);
+  return !!(h && (h.members || []).some((m) => m.id === me.memberId));
+}
+
+/**
+ * 拒绝时的说法。笼统一句「没权限」只会让人以为是程序坏了 ——
+ * 说清楚是哪一条、归谁、谁能改。
+ */
+function writeDenied(obj) {
+  if (!obj.householdId) return '共享菜谱由管理员维护，改不了。';
+  const who = obj.authorName || '别人';
+  return `这道菜是「${who}」加的，你改不了自己的以外那些。\n自己加的随便改；想动别人的，找家庭管理员。`;
+}
+
+/** 共享菜谁都能管：任何一家的管理员，或者超级管理员 */
+function canWriteShared(req) {
+  if (isSuperAdmin(req)) return true;
+  // 家庭会话走的是 X-House-Token，这里必须用 houseSessionOf，否则读到的是超管那条头
+  if (houseSessionOf(req)) return true;
+  // 本家没设口令的 owner 也算，免得「没设口令反而什么都干不了」
+  const me = deviceMember(req);
+  if (!me) return false;
+  for (const h of state.households) {
+    if (h.pin) continue;
+    if ((h.members || []).some((m) => m.id === me.memberId && m.role === 'owner')) return true;
+  }
+  return false;
+}
+
+/**
+ * 是不是**至少一个**家庭的管理员（或者超管）。
+ *
+ * 这是统一守卫的粗筛：只回答「有没有资格碰管理区」，
+ * 具体能不能动某一条菜、某一家，交给各 handler 里的 canWrite。
+ */
+function isAnyHouseAdmin(req) {
+  if (isSuperAdmin(req)) return true;
+  if (houseSessionOf(req)) return true;
+  const me = deviceMember(req);
+  if (!me) return false;
+  return state.households.some(
+    (h) => !h.pin && (h.members || []).some((m) => m.id === me.memberId && m.role === 'owner')
+  );
+}
+
+/** 成员往外发的时候抹掉 password/pin —— 那是凭证，永远不该出现在任何响应里 */
+function publicMember(m) {
+  if (!m) return null;
+  const { pin, password, ...rest } = m;
+  const hasPassword = !!(typeof password === 'string' ? password : pin);
+  return { ...rest, hasPassword, hasPin: hasPassword };
+}
+
+function publicMembers(house) {
+  return ((house && house.members) || []).map(publicMember);
+}
+
+/** 同样抹掉家庭口令 */
+function publicHousehold(h) {
+  if (!h) return null;
+  const { pin, ...rest } = h;
+  return { ...rest, hasPin: !!pin, members: publicMembers(h) };
+}
+
+function publicHouseholds() {
+  return state.households.map(publicHousehold);
+}
+
+/** 没设口令 → 放行；设了 → 必须带有效 token（旧的单层判断，保留给备份/AI 这些全局功能） */
+function isAuthed(req) {
+  return isSuperAdmin(req);
+}
+
+/**
+ * 需要管理员级的写操作（粗筛，真正的逐条判定在各 handler 里）。
+ * 点餐提交、库存、本周计划、留言**不在列** —— 那是家里人每天都要用的，
  * 口令不该挡着他们正常吃饭。
  */
-const ADMIN_WRITES = new Set(['households', 'dishes', 'categories', 'settings', 'import', 'upload']);
+const ADMIN_WRITES = new Set(['households', 'dishes', 'categories', 'orders', 'join-requests']);
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -1858,26 +2318,175 @@ async function handleAPI(req, res, url) {
     const given = typeof body.pin === 'string' ? body.pin.trim() : '';
     if (!pin) return sendJSON(res, 200, { ok: true, data: { token: '', hasPin: false } });
     if (given !== pin) return sendError(res, 401, '口令不对');
-    return sendJSON(res, 200, { ok: true, data: { token: issueSession(), hasPin: true } });
+    return sendJSON(res, 200, { ok: true, data: { token: issueSession({ kind: 'super' }), hasPin: true } });
+  }
+
+  /* ---- 身份认领 ----
+   *
+   * 这一组在统一守卫**之前**处理：它们是「怎么证明自己是谁」的地方，
+   * 没法要求先证明身份。「成员第一次认领时自己设密码」是整套三层身份的地基，
+   * 放在这儿才说得通。
+   */
+  if (route[0] === 'claim' && method === 'POST') {
+    const body = await readBody(req);
+    const houseId = safeText(body.householdId, 40);
+    const memberId = safeText(body.memberId, 40);
+    const requestedLoginId = normalizeLoginId(body.loginId, '');
+    const givenPassword = passwordValue(body.password !== undefined ? body.password : body.pin);
+    const house = state.households.find((h) => h.id === houseId);
+    if (!house) return sendError(res, 404, '这个家庭不存在');
+    const idx = memberId
+      ? (house.members || []).findIndex((m) => m.id === memberId)
+      : requestedLoginId
+      ? (house.members || []).findIndex((m) => m.loginId === requestedLoginId)
+      : -1;
+    if (idx < 0) return sendError(res, 404, '这个家里没有这个成员');
+    const m = house.members[idx];
+    const currentPassword = memberPassword(m);
+
+    // 已经有密码了 → 校验
+    if (currentPassword) {
+      if (givenPassword !== currentPassword) return sendError(res, 401, `「${m.name}」的密码不对`);
+      return sendJSON(res, 200, {
+        ok: true,
+        data: {
+          deviceToken: issueDeviceToken(m.id, house.id),
+          member: publicMember(m),
+          remember: body.remember !== false,
+        },
+      });
+    }
+
+    // 还没设过 → 第一次设。
+    //
+    // 这里分不出「本人」和「冒充的人」—— 第一次来设密码的和跑来顶替他密码的，
+    // 在服务端看来是同一个请求。硬要分，就得要求管理员在场，那新成员
+    // 第一次打开应用就得先找到管理员，反而更麻烦。
+    //
+    // 所以这里选择信任：成员名单本身就是管理员写下的，这一步等于
+    // 「管理员认可你在这个家里」。真正的门槛在**加成员**那一步 ——
+    // 那是管理员的活。想更严的场合，把 PIN 留给管理员当面交付。
+    if (!validMemberPassword(givenPassword)) return sendError(res, 400, '密码设成 4~64 个字符');
+    if (requestedLoginId) {
+      const duplicate = (house.members || []).some((x, i) => i !== idx && x.loginId === requestedLoginId);
+      if (duplicate) return sendError(res, 409, '这个登录 ID 已经在本家使用');
+      house.members[idx].loginId = requestedLoginId;
+    }
+    house.members[idx].password = givenPassword;
+    house.updatedAt = nowISO();
+    scheduleSave('households');
+    // 改了密码就把这台设备上旧的令牌全作废，免得「知道旧密码的人」还在用
+    revokeDeviceTokens(m.id);
+    return sendJSON(res, 200, {
+      ok: true,
+      data: {
+        deviceToken: issueDeviceToken(m.id, house.id),
+        member: publicMember(house.members[idx]),
+        firstTime: true,
+      },
+    });
+  }
+
+  // 核对 PIN：危险动作（改成员、改家庭口令、删家庭）令牌不够，要重新输一次
+  if (route[0] === 'verify-pin' && method === 'POST') {
+    const body = await readBody(req);
+    const house = state.households.find((h) => h.id === safeText(body.householdId, 40));
+    const memberId = safeText(body.memberId, 40);
+    const loginId = normalizeLoginId(body.loginId, '');
+    const m = house && (house.members || []).find((x) => (memberId && x.id === memberId) || (!memberId && loginId && x.loginId === loginId));
+    const currentPassword = memberPassword(m);
+    if (!m || !currentPassword) return sendError(res, 400, '这个成员还没设密码');
+    const given = passwordValue(body.password !== undefined ? body.password : body.pin);
+    if (given !== currentPassword) return sendError(res, 401, '密码不对');
+    // 顺手发一张 5 分钟的「刚验过」凭证：下一步那个危险动作凭它放行。
+    // 不发给前端就没法把「验密码」和「执行」拆成两次请求，而拆开是有必要的 ——
+    // 输错密码时该停的是密码这一步，不是让操作带着半截状态往下走。
+    return sendJSON(res, 200, {
+      ok: true,
+      data: { ok: true, name: m.name, verifiedToken: issueVerified(house.id, m.id) },
+    });
+  }
+
+  // 管理员给成员设 / 重置 / 清掉登录 ID 和密码。
+  // 成员自己只能通过 /api/claim 设自己那个（那是身份认领的一部分），
+  // 这里是管理员替人做 —— 所以要 canDoSensitive 那道额外的门槛。
+  // member-pin 是旧客户端兼容别名，新的界面使用 member-password。
+  if (
+    method === 'PUT' &&
+    route.length === 3 &&
+    route[0] === 'households' &&
+    (route[2] === 'member-pin' || route[2] === 'member-password')
+  ) {
+    const house = state.households.find((h) => h.id === route[1]);
+    if (!house) return sendError(res, 404, '这个家庭不存在');
+    if (!canDoSensitive(req, house.id)) return sendError(res, 403, SENSITIVE_HINT);
+    const body = await readBody(req);
+    const mi = (house.members || []).findIndex((x) => x.id === safeText(body.memberId, 40));
+    if (mi < 0) return sendError(res, 404, '这个家里没有这个成员');
+    const target = house.members[mi];
+    let nextLoginId = target.loginId;
+    if (typeof body.loginId === 'string') {
+      const loginId = normalizeLoginId(body.loginId, '');
+      if (!loginId) return sendError(res, 400, '登录 ID 不能为空');
+      const duplicate = (house.members || []).some((x, i) => i !== mi && x.loginId === loginId);
+      if (duplicate) return sendError(res, 409, '这个登录 ID 已经在本家使用');
+      nextLoginId = loginId;
+    }
+    let nextPassword = target.password;
+    let shouldRevokeTokens = false;
+    if (body.clear === true || body.clearPassword === true) {
+      nextPassword = '';
+      shouldRevokeTokens = true; // 密码没了，那把 30 天的钥匙也得一起收
+    } else {
+      const password = passwordValue(body.password !== undefined ? body.password : body.pin);
+      if (!validMemberPassword(password)) return sendError(res, 400, '密码设成 4~64 个字符');
+      nextPassword = password;
+      shouldRevokeTokens = true;
+    }
+    target.loginId = nextLoginId;
+    target.password = nextPassword;
+    if (shouldRevokeTokens) revokeDeviceTokens(target.id);
+    house.updatedAt = nowISO();
+    scheduleSave('households');
+    return sendJSON(res, 200, { ok: true, data: publicMember(target) });
+  }
+
+  // 家庭口令换会话：知道这个家的口令 = 这个家的管理员
+  if (method === 'POST' && route.length === 3 && route[0] === 'households' && route[2] === 'auth') {
+    const house = state.households.find((h) => h.id === route[1]);
+    if (!house) return sendError(res, 404, '这个家庭不存在');
+    const body = await readBody(req);
+    if (!house.pin) {
+      return sendJSON(res, 200, { ok: true, data: { token: issueSession({ kind: 'house', id: house.id }), hasPin: false } });
+    }
+    const given = typeof body.pin === 'string' ? body.pin.trim() : '';
+    if (given !== house.pin) return sendError(res, 401, '这个家的口令不对');
+    return sendJSON(res, 200, { ok: true, data: { token: issueSession({ kind: 'house', id: house.id }), hasPin: true } });
   }
 
   // ---- 统一守卫 ----
-  // 管理类的写操作要有有效会话；导出/导入因为文件里含口令明文，同样要认证。
-  // AI 调用要花钱，也不能让别人白用。
+  // 两级：全局功能（设置/备份/AI/导入导出）只认超级管理员；
+  // 菜单和家庭相关的写操作，管理员级即可 —— 到底能不能碰这一条，
+  // 由各 handler 里的 canWrite 按对象逐个判。
   // 点餐、库存、本周计划不在保护范围内 —— 那是家里人每天都要用的。
-  // 统一守卫。备份一律要认证，GET 也要 —— 备份里存着管理口令明文，
-  // 「只能下载不能看列表」等于没保护。
-  const needsAuth =
+  const SUPER_ONLY = new Set(['settings', 'import', 'upload']);
+  const needsSuper =
     route[0] === 'export' ||
     route[0] === 'backups' ||
     route[0] === 'ai' ||
-    // 普通用户可以提交点餐，但不能改做饭状态、删除点餐或清空已完成记录。
-    (route[0] === 'orders' && method !== 'GET' && !(method === 'POST' && !route[1])) ||
-    // 加入申请：提交谁都能做（人总得有个申请入口），批准/拒绝是管理员的活
-    (route[0] === 'join-requests' && method !== 'GET' && !!route[1]) ||
-    (method !== 'GET' && method !== 'HEAD' && ADMIN_WRITES.has(route[0]));
-  if (needsAuth && !isAuthed(req)) {
+    (method !== 'GET' && method !== 'HEAD' && SUPER_ONLY.has(route[0]));
+  if (needsSuper && !isSuperAdmin(req)) {
     return sendError(res, 401, '需要管理口令，请先在「管理」页解锁');
+  }
+  const needsAdmin =
+    route[0] === 'households' ||
+    route[0] === 'dishes' ||
+    route[0] === 'categories' ||
+    // 点餐提交谁都能做（人总得能点菜），但改状态、删除是管理员的活
+    (route[0] === 'orders' && method !== 'GET' && !(method === 'POST' && !route[1])) ||
+    (route[0] === 'join-requests' && method !== 'GET' && !!route[1]);
+  if (needsAdmin && !isAnyHouseAdmin(req)) {
+    return sendError(res, 401, '这个操作要管理员，先解锁或让家里管理员输一次口令');
   }
 
   // ---- AI ----
@@ -2056,7 +2665,8 @@ async function handleAPI(req, res, url) {
           ? state.orders
           : state.orders.filter((o) => o.householdId === visibleHouseholdId),
         settings: { ...pubSettings, hasPin: !!adminPin },
-        households: state.households,
+        // 家庭和成员的口令**永远不进这个响应** —— 这个接口局域网里谁都能调
+        households: publicHouseholds(),
         pantry: fullState
           ? state.pantry
           : state.pantry.filter((p) => p.householdId === visibleHouseholdId),
@@ -2087,17 +2697,19 @@ async function handleAPI(req, res, url) {
   }
 
   // ---- 加入申请 ----
-  // 提交申请谁都能做（人总得有个申请入口）；批准/拒绝是管理员的活，要口令。
+  // 提交申请谁都能做（人总得有个申请入口）；
+  // 批准/拒绝由**这个家的管理员**点头 —— 不是全局管理员，见下面 PUT。
   if (route[0] === 'join-requests') {
     const id = route[1];
     const body = method !== 'GET' ? await readBody(req) : {};
 
     if (method === 'GET') {
-      const fullAccess = !state.settings.adminPin || isAuthed(req);
-      const memberName = safeText(url.searchParams.get('memberName'), 20).trim();
+      // 管理员看全部（超管，或者至少管着一个家的 owner）；
+      // 其余人只看得到自己那条，名字从 device token 推，不靠客户端报
+      const fullAccess = isAnyHouseAdmin(req);
       const requests = fullAccess
         ? state.access.requests
-        : state.access.requests.filter((r) => r.name === memberName);
+        : state.access.requests.filter((r) => r.name === whoami(req).name);
       return sendJSON(res, 200, { ok: true, data: requests });
     }
 
@@ -2137,29 +2749,49 @@ async function handleAPI(req, res, url) {
     }
 
     if (method === 'PUT' && id) {
-      const req = state.access.requests.find((r) => r.id === id);
-      if (!req) return sendError(res, 404, '申请不存在');
+      // 局部变量叫 jr 不叫 req：req 是那个 HTTP 请求，
+      // 一旦遮蔽，isHouseAdmin 拿到的就成了申请记录，判权全错。
+      const jr = state.access.requests.find((r) => r.id === id);
+      if (!jr) return sendError(res, 404, '申请不存在');
+      // 批的是「谁进这个家」，所以由**这个家的管理员**点头，不是全局管理员。
+      // 不然家庭管理员这个角色就只剩「改菜」一件事，形同虚设。
+      if (!isHouseAdmin(req, jr.householdId)) {
+        return sendError(res, 403, '这条申请要这个家的管理员批');
+      }
+      // 批准 = 往成员名单里塞一个人 = 改「谁是谁」。跟改成员一样是危险动作，
+      // 得是刚刚用密码换来的授权，光靠「记住我」的令牌不行。
+      if (!canDoSensitive(req, jr.householdId)) return sendError(res, 403, SENSITIVE_HINT);
       const status = body.status === 'ok' ? 'ok' : 'no';
-      req.status = status;
-      req.at = nowISO();
+      jr.status = status;
+      jr.at = nowISO();
       // 批准 = 真的把人加进这个家庭。光改状态不生效的话，
       // 被批准的人在成员列表里还是找不到自己，等于没批
       if (status === 'ok') {
-        const house = state.households.find((h) => h.id === req.householdId);
-        if (house && !house.members.some((m) => m.name === req.name)) {
+        const house = state.households.find((h) => h.id === jr.householdId);
+        if (house && !house.members.some((m) => m.name === jr.name)) {
           house.members.push({
             id: uid('m_'),
-            name: req.name,
+            name: jr.name,
+            loginId: uniqueLoginId(house.members, jr.name, jr.name),
             emoji: MEMBER_EMOJI[house.members.length % MEMBER_EMOJI.length],
+            // 新人一律是普通成员。把他设成管理员等于把家门钥匙寄过去。
+            role: 'member',
+            password: '',
           });
           scheduleSave('households');
         }
       }
       scheduleSave('access');
-      return sendJSON(res, 200, { ok: true, data: req });
+      return sendJSON(res, 200, { ok: true, data: jr });
     }
 
     if (method === 'DELETE' && id) {
+      const found = state.access.requests.find((r) => r.id === id);
+      if (!found) return sendError(res, 404, '申请不存在');
+      if (!isHouseAdmin(req, found.householdId)) {
+        return sendError(res, 403, '这条申请要这个家的管理员处理');
+      }
+      if (!canDoSensitive(req, found.householdId)) return sendError(res, 403, SENSITIVE_HINT);
       const before = state.access.requests.length;
       state.access.requests = state.access.requests.filter((r) => r.id !== id);
       scheduleSave('access');
@@ -2200,6 +2832,9 @@ async function handleAPI(req, res, url) {
         copy.name = src.name;
         copy.isFavorite = false;
         copy.createdAt = nowISO();
+        const who = whoami(req);
+        copy.authorId = who.kind === 'member' ? who.memberId : '';
+        copy.authorName = who.kind === 'member' ? who.name : '';
         const bad = categoryProblem(copy);
         if (bad) return sendError(res, 400, bad);
         state.dishes.unshift(copy);
@@ -2208,8 +2843,17 @@ async function handleAPI(req, res, url) {
       }
 
       if (method === 'POST' && !id) {
+        // 加菜必须先认领身份。「你添加的菜」这句话要有主语 ——
+        // 没有身份的人加的菜，主人栏只能永远空着，权限也判不了。
+        // 超管例外：他能替任何一家建菜（迁移、恢复、给别人家帮忙加一道）。
+        if (!isMyMember(req, hhId) && !isHouseAdmin(req, hhId)) {
+          return sendError(res, 403, '先说说你是谁，这道菜才好记下是谁加的');
+        }
         const dish = normDish({ ...(await readBody(req)), householdId: hhId });
         if (!dish || !dish.name) return sendError(res, 400, '菜名不能为空');
+        const who = whoami(req);
+        dish.authorId = who.kind === 'member' ? who.memberId : '';
+        dish.authorName = who.kind === 'member' ? who.name : '';
         const bad = categoryProblem(dish);
         if (bad) return sendError(res, 400, bad);
         state.dishes.unshift(dish);
@@ -2222,7 +2866,13 @@ async function handleAPI(req, res, url) {
         if (!owns(state.dishes[idx])) {
           return sendError(res, 403, '这是公共菜谱（或别人家的菜），改不了。要改可以「收进我家」自己抄一份。');
         }
+        // 同属一家也不代表能改 —— 普通成员只能改自己添加的那些
+        if (!canWrite(req, state.dishes[idx])) {
+          return sendError(res, 403, writeDenied(state.dishes[idx]));
+        }
         const dish = normDish({ ...(await readBody(req)), householdId: hhId }, state.dishes[idx]);
+        dish.authorId = state.dishes[idx].authorId;
+        dish.authorName = state.dishes[idx].authorName;
         const bad = categoryProblem(dish);
         if (bad) return sendError(res, 400, bad);
         state.dishes[idx] = dish;
@@ -2248,12 +2898,15 @@ async function handleAPI(req, res, url) {
           if (!owns(one)) {
             return sendError(res, 403, '这是公共菜谱（或别人家的菜），删不了。想改成自己的版本，用「收进我家」抄一份。');
           }
+          if (!canWrite(req, one)) return sendError(res, 403, writeDenied(one));
         }
-        // 只删真正属于这一家的。混进来的共享菜一条都不动 ——
+        // 只删真正属于这一家、而且这个人改得动的。混进来的共享菜一条都不动 ——
         // 非管理员不该有「顺手把公共菜删了」这种可能。
-        const kill = state.dishes.filter((d) => ids.has(d.id) && owns(d));
-        const shared = ids.size - kill.length;
-        state.dishes = state.dishes.filter((d) => !(ids.has(d.id) && owns(d)));
+        const kill = state.dishes.filter((d) => ids.has(d.id) && owns(d) && canWrite(req, d));
+        // 按 kill 里的 id 删，不能按 owns 删 —— owns 会把「同属一家但不是你写的」
+        // 那几条一起算进去，而它们在上面已经被 canWrite 滤掉了。
+        const killedIds = new Set(kill.map((d) => d.id));
+        state.dishes = state.dishes.filter((d) => !killedIds.has(d.id));
         for (const gone of kill) {
           state.orders = state.orders.filter((o) => !(o.dishId === gone.id && o.status !== 'done'));
           state.plans.forEach((p) => {
@@ -2273,7 +2926,7 @@ async function handleAPI(req, res, url) {
         scheduleSave('notes');
         return sendJSON(res, 200, {
           ok: true,
-          data: { removed: kill.length, kept: shared, first: kill[0] || null },
+          data: { removed: kill.length, kept: ids.size - kill.length, first: kill[0] || null },
         });
       }
       return sendError(res, 405, '不支持的请求');
@@ -2331,25 +2984,90 @@ async function handleAPI(req, res, url) {
         emoji: safeText(body.emoji, 4) || HOUSEHOLD_EMOJI[state.households.length % HOUSEHOLD_EMOJI.length],
       });
       if (!h) return sendError(res, 400, '家庭名称不能为空');
+      // 新建的一律是「普通家庭」：能自己用，但共享菜单和拉人进家要超级管理员点头。
+      // status 不接受前端传值 —— 自己给自己发「已认证」就等于这套审核不存在。
+      h.status = 'normal';
       state.households.push(h);
+      // 谁建的，他就是这家的第一个管理员
+      const me = deviceMember(req);
+      if (me) {
+        const target = state.households[state.households.length - 1];
+        target.members.push({
+          id: me.memberId,
+          name: me.name,
+          loginId: uniqueLoginId(target.members, me.name, me.name),
+          emoji: MEMBER_EMOJI[0],
+          role: 'owner',
+          password: '',
+        });
+      }
       scheduleSave('households');
-      return sendJSON(res, 200, { ok: true, data: h });
+      return sendJSON(res, 200, { ok: true, data: publicHousehold(h) });
     }
     if (method === 'PUT' && id) {
       const idx = state.households.findIndex((h) => h.id === id);
       if (idx < 0) return sendError(res, 404, '家庭不存在');
-      const next = normHousehold(await readBody(req), state.households[idx]);
+      const body = await readBody(req);
+      // 改名字、改图标、改备注也要对准「是这个家的管理员」：
+      // 统一守卫只问「有没有资格碰管理区」，答不出「能不能改这一家」。
+      // 不在这里补这道，A 家的管理员就能把 B 家的名字改成自己的。
+      // 没设口令的家，owner 靠「记住我」的令牌就能改自己家 —— 装了就能用的老规矩。
+      if (!isSuperAdmin(req)) {
+        const hs = houseSessionOf(req);
+        const vs = verifiedSessionOf(req);
+        const mine = (hs && hs.scope.id === id) || (vs && vs.scope.id === id) || isHouseAdmin(req, id);
+        if (!mine) return sendError(res, 403, '只能改自己这个家');
+      }
+      // 只改名字、图标、备注这类无害字段的不用二次验证 —— 那是日常维护。
+      // 动成员名单、家庭口令、家庭状态才是危险动作：那几样能改「谁是谁」。
+      const touchesIdentity =
+        body.members !== undefined ||
+        typeof body.pin === 'string' ||
+        body.clearPin === true ||
+        typeof body.status === 'string';
+      if (touchesIdentity && !canDoSensitive(req, id)) return sendError(res, 403, SENSITIVE_HINT);
+      // 口令三态：不传 = 不动；传空串 = 取消；传非空 = 换。
+      // 前端拿不到旧口令明文（响应里已抹掉），所以「取消」只能靠显式标记。
+      if (body.clearPin === true) body.pin = '';
+      else if (typeof body.pin === 'string' && body.pin.trim()) body.pin = body.pin.trim();
+      else delete body.pin;
+      // status 只有超级管理员能改
+      if (typeof body.status === 'string') {
+        if (!isSuperAdmin(req)) return sendError(res, 403, '只有超级管理员能把这个家庭升级为正式');
+        body.status = body.status === 'approved' ? 'approved' : 'normal';
+      }
+      const next = normHousehold(body, state.households[idx]);
       if (!next) return sendError(res, 400, '家庭名称不能为空');
+      const hadOwner = (state.households[idx].members || []).some((m) => m.role === 'owner');
+      const nextOwners = (next.members || []).filter((m) => m.role === 'owner');
+      if (hadOwner && nextOwners.length === 0) {
+        return sendError(res, 400, '家庭至少要保留一名管理员');
+      }
+      // 成员被删了 → 那些设备令牌一并作废。
+      // 就算不撤，whoami() 找不到这个成员也只会当匿名 —— 但留着等于让一把
+      // 没人再认领的钥匙一直挂着，过期之前都是隐患。
+      const keptIds = new Set((next.members || []).map((m) => m.id));
+      for (const m of state.households[idx].members || []) {
+        if (m && m.id && !keptIds.has(m.id)) revokeDeviceTokens(m.id);
+      }
+      // 口令换了 → 这个家的管理员会话全部作废
+      if (next.pin !== state.households[idx].pin) {
+        for (const [t, s] of sessions) {
+          if (typeof s === 'object' && s.scope && s.scope.kind === 'house' && s.scope.id === id) sessions.delete(t);
+        }
+      }
       state.households[idx] = next;
       scheduleSave('households');
-      return sendJSON(res, 200, { ok: true, data: next });
+      return sendJSON(res, 200, { ok: true, data: publicHousehold(next) });
     }
     if (method === 'DELETE' && id) {
       if (state.households.length <= 1) {
         return sendError(res, 400, '至少要保留一个家庭');
       }
       const idx = state.households.findIndex((h) => h.id === id);
-      if (idx < 0) return sendError(res, 404, '家庭不存在');
+      if (idx < 0) return sendError(res, 404, '这个家庭不存在');
+      // 删家庭 = 把一整家人的数据抹掉，没有比这更危险的了
+      if (!canDoSensitive(req, id)) return sendError(res, 403, SENSITIVE_HINT);
       const [gone] = state.households.splice(idx, 1);
       // 家庭没了，它名下的点餐和库存也一并清掉，免得数据无处安放
       const removedOrders = state.orders.filter((o) => o.householdId === id).length;
@@ -2695,11 +3413,24 @@ async function handleAPI(req, res, url) {
   }
 
   // ---- 菜品 ----
+  // 写权限交给 canWrite：共享菜要管理员，本家菜管理员随便改、
+  // 普通成员只能改自己添加的那几条。
   if (route[0] === 'dishes') {
     const id = route[1];
     if (method === 'POST' && !id) {
-      const dish = normDish(await readBody(req));
+      const body = await readBody(req);
+      const dish = normDish(body);
       if (!dish) return sendError(res, 400, '菜名不能为空');
+      // 归属和作者都以服务端为准：客户端写了也不算
+      if (!dish.householdId && !canWriteShared(req)) {
+        return sendError(res, 403, '往共享菜单加菜要管理员');
+      }
+      if (dish.householdId && !isHouseAdmin(req, dish.householdId) && !isMyMember(req, dish.householdId)) {
+        return sendError(res, 403, '只能往自己家加菜');
+      }
+      const who = whoami(req);
+      dish.authorId = who.kind === 'member' ? who.memberId : dish.authorId;
+      dish.authorName = who.kind === 'member' ? who.name : dish.authorName;
       const bad = categoryProblem(dish);
       if (bad) return sendError(res, 400, bad);
       state.dishes.unshift(dish);
@@ -2709,7 +3440,17 @@ async function handleAPI(req, res, url) {
     if (method === 'PUT' && id) {
       const idx = state.dishes.findIndex((d) => d.id === id);
       if (idx < 0) return sendError(res, 404, '菜品不存在');
+      if (!canWrite(req, state.dishes[idx])) {
+        return sendError(res, 403, writeDenied(state.dishes[idx]));
+      }
       const dish = normDish(await readBody(req), state.dishes[idx]);
+      // 作者不许改：这条要是你写的，以后就一直是你的
+      dish.authorId = state.dishes[idx].authorId;
+      dish.authorName = state.dishes[idx].authorName;
+      // 也不能把别人的私菜拽到共享区去 —— 那是管理员的动作
+      if (!state.dishes[idx].householdId && dish.householdId && !canWriteShared(req)) {
+        return sendError(res, 403, '把共享菜改成仅本家可见，要管理员');
+      }
       const bad = categoryProblem(dish);
       if (bad) return sendError(res, 400, bad);
       state.dishes[idx] = dish;
@@ -2722,6 +3463,9 @@ async function handleAPI(req, res, url) {
       // 副本跟原菜一个归属：复制我家私菜不该把它变成全体共享
       const copy = normDish({ ...src, id: '', name: src.name + '（副本）' });
       copy.isFavorite = false;
+      const who = whoami(req);
+      copy.authorId = who.kind === 'member' ? who.memberId : '';
+      copy.authorName = who.kind === 'member' ? who.name : '';
       state.dishes.unshift(copy);
       scheduleSave('dishes');
       return sendJSON(res, 200, { ok: true, data: copy });
@@ -2729,6 +3473,9 @@ async function handleAPI(req, res, url) {
     if (method === 'DELETE' && id) {
       const idx = state.dishes.findIndex((d) => d.id === id);
       if (idx < 0) return sendError(res, 404, '菜品不存在');
+      if (!canWrite(req, state.dishes[idx])) {
+        return sendError(res, 403, writeDenied(state.dishes[idx]));
+      }
       const [gone] = state.dishes.splice(idx, 1);
       // 同时清掉该菜品相关的未完成点餐
       state.orders = state.orders.filter(
@@ -3276,6 +4023,7 @@ function init() {
     fs.mkdirSync(dir, { recursive: true });
   }
   loadState();
+  loadDevices();
   saveNow();
   scheduleAutoBackup();
 }

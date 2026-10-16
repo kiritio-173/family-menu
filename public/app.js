@@ -9,6 +9,7 @@
 const S = {
   view: 'menu',
   category: '全部',
+  dishScope: 'all', // 菜单归属筛选：all / shared / own
   keyword: '',
   orderStatus: 'pending',
   groupByMember: true,
@@ -29,7 +30,12 @@ const S = {
   backups: null, // /api/backups 的结果，管理页显示自动备份状态
   access: [], // 加入申请（/api/join-requests），管理页审批、管理员之外的人看自己的状态
   householdId: '', // 当前家庭，存在本机 localStorage：每台设备各选各的
-  meName: '', // 留言板里「我是谁」，默认取当前家庭的第一个成员
+  meName: '', // 「我是谁」；没认领过就是 GUEST，不替任何人冒名
+  whoamiStep: '', // 向导停在哪一步（'' = 不显示）：house / member / pin
+  whoamiPick: '', // 向导里选中的成员 id，正要给它设/输 PIN
+  whoamiFrom: '', // 是从哪儿点进来的（note-me / meBtn），回头好退回去
+  verifiedToken: '', // 刚验过成员密码换来的 5 分钟凭证，只在内存里
+  verifiedExp: 0, // 到期时间戳，过期就不发了
   noteReplyTo: '', // 正在回复哪条留言的 id（空 = 只是新建一条）
   data: {
     categories: [], dishes: [], orders: [], settings: {},
@@ -46,7 +52,15 @@ const S = {
 /** 老的 households.json 还没建时，历史数据都落在 h_home 上 */
 const FALLBACK_HOUSE = 'h_home';
 const LS_HOUSE = 'familyMenu.householdId';
-const LS_MEMBER = 'familyMenu.memberNames';
+const LS_MEMBER = 'familyMenu.memberIds';
+// 走过一次「你是谁」向导就别再拦着人家。设备级的，不跟家庭走 ——
+// 认领过 A 家再切到 B 家，B 家没登记过还得再问一次，那是对的。
+const LS_ONBOARD = 'familyMenu.onboarded';
+// 已经报过名、还没被批的人的名字。批下来之前他还不是成员，没有成员 id 可认，
+// 但也没必要让他在顶栏显示成「还没登记」—— 那看着像谁都不认识他。
+const LS_PENDING = 'familyMenu.pendingNames';
+// 「先随便看看」的人用的占位名。不是任何人的真名，所以不会冒名。
+const GUEST = '还没登记';
 
 /* ---------------- 工具 ---------------- */
 
@@ -120,15 +134,71 @@ function scopeDishes() {
 }
 
 /**
+ * 同名折叠：共享里有这道，就只露共享那份。
+ *
+ * 为什么共享优先：共享菜是管理员维护的、全家共用的那一版，改一次全家受益；
+ * 私房那版是某个人自己的一手菜。菜名一样时并排放两张卡，等于让人对着两道
+ * 长得一样的菜猜哪道是真的 —— 所以只留共享的，把私房那份收起来。
+ *
+ * 折叠不是删除：被收起来的那几道还完整地在「🔒 我家私房」里，展开就看得见。
+ * 万一有人就是想留一版自己的（比如自己的辣度），那里进得去。
+ */
+function sameKey(name) {
+  return String(name || '').trim().toLowerCase().replace(/\s+/g, '');
+}
+
+/** 按归属过滤：全部 / 只有共享 / 只有本家私房 */
+function byScope(list, scope) {
+  if (scope === 'shared') return list.filter((d) => !d.householdId);
+  if (scope === 'own') return list.filter((d) => !!d.householdId);
+  return list;
+}
+
+/**
+ * 折叠同名菜。返回 [{ dish, folded: [被折叠的那些] }]
+ * 「我家私房」那个视角不做折叠 —— 那本来就是来看自己那几道的。
+ */
+function collapseDupes(list, scope) {
+  if (scope === 'own') return list.map((d) => ({ dish: d, folded: [] }));
+  const shared = new Map();
+  for (const d of list) {
+    if (!d.householdId) {
+      const k = sameKey(d.name);
+      if (!shared.has(k)) shared.set(k, d);
+    }
+  }
+  const out = [];
+  const foldedByKey = new Map();
+  for (const d of list) {
+    if (d.householdId) {
+      const k = sameKey(d.name);
+      const s = shared.get(k);
+      if (s) {
+        if (!foldedByKey.has(k)) foldedByKey.set(k, []);
+        foldedByKey.get(k).push(d);
+        continue;
+      }
+    }
+    out.push({ dish: d, folded: [] });
+  }
+  for (const item of out) item.folded = foldedByKey.get(sameKey(item.dish.name)) || [];
+  return out;
+}
+
+/** 有多少道同名菜被折叠了 —— 给「展开」提示用 */
+function foldedCount(items) {
+  return items.reduce((n, i) => n + i.folded.length, 0);
+}
+
+/**
  * 改一道菜 —— 按权限走不同端点。
  *
- * 管理员打 /api/dishes（有口令保护），家里人打 /api/my-dishes
- * （只能改本家私菜，服务端会再验一遍归属）。
+ * 两端的守卫是一样的（都走服务端的 canWrite），区别只在裸接口不认成员令牌。
  * patch 里只需要给要改的字段，归属不在其中时原样带过去。
  */
 async function saveDishBody(dish, patch) {
   const body = { ...dish, ...patch };
-  if (isAdmin()) {
+  if (isHouseAdmin(dish.householdId) || !dish.householdId) {
     await api('PUT', `/api/dishes/${encodeURIComponent(dish.id)}`, body);
     return body;
   }
@@ -139,19 +209,86 @@ async function saveDishBody(dish, patch) {
   );
 }
 
-/* ---------------- 谁能改什么 ----------------
-   共享菜谱是管理员的地盘，本家私菜是家里人自己的。
-   没设口令时谁都算管理员（保持「装了就能用」），
-   设了口令之后，非管理员只能动自己家的私菜 —— 公共的只能看和抄。 */
+/* ---------------- 谁能改什么（三层身份） ----------------
+   三种凭证各管一段，服务端收到请求后按同样的顺序重算一遍：
 
-function isAdmin() {
+     超级管理员  全局口令换的会话   管所有家庭 + 共享菜单 + 系统设置/AI/备份
+     家庭管理员  某个家的口令换的   管共享菜单 + 本家所有私菜 + 本家成员
+     普通成员    成员 PIN 换的令牌   只能改「作者是自己」的那些
+
+   这一层的用途只有一个：别让界面亮出按下去必然报错的按钮。
+   真的能不能改，以服务端为准 —— 前端说能不代表能。 */
+
+/** 超级管理员。没设全局口令时一律算 —— 保持「装了就能用」。 */
+function isSuper() {
   return !S.data.settings.hasPin || S.authed;
 }
 
-/** 这道菜 / 这个分类当前用户能不能改、能删 */
+/**
+ * 家庭管理员。
+ * 超管 > 本家口令会话 > （本家没设口令时）本家 owner。
+ * 一旦这个家设了口令，光「在 owner 名单上」就不再够了。
+ */
+function isHouseAdmin(householdId, member) {
+  if (isSuper()) return true;
+  if (!householdId) return false;
+  if (houseToken(householdId)) return true;
+  const h = households().find((x) => x.id === householdId);
+  if (!h || h.hasPin) return false;
+  const me = member || memberOf(householdId);
+  return !!me && me.role === 'owner';
+}
+
+/** 至少管着一家 —— 决定能不能碰共享菜单、能不能改点餐状态、能不能建/删家庭 */
+function anyHouseAdmin() {
+  if (isSuper()) return true;
+  if (households().some((h) => houseToken(h.id))) return true;
+  const m = meMember();
+  if (!m || m.role !== 'owner') return false;
+  return households().some((h) => !h.hasPin);
+}
+
+/** 我是不是这家的成员（不管是不是管理员） */
+function isMemberOf(householdId) {
+  return householdId === S.householdId && !!meMember();
+}
+
+/** 能不能往共享菜单里加东西 */
+function canWriteShared() {
+  return anyHouseAdmin();
+}
+
+/**
+ * 这道菜 / 这个分类能不能改、能删。
+ *
+ * 共享的：任意管理员。自家的：管理员随便改，普通成员只能动作者是自己的。
+ * 查不到作者的（老数据没记 authorId）放开 —— 宁可让人改一条，
+ * 也不把主人锁在自己家门外。跟服务端 canWrite 是同一套规则。
+ */
 function canEdit(o) {
-  if (isAdmin()) return true;
-  return !!(o && o.householdId && o.householdId === S.householdId);
+  if (!o) return false;
+  if (!o.householdId) return canWriteShared();
+  const me = memberOf(o.householdId);
+  if (isHouseAdmin(o.householdId, me)) return true;
+  if (!me || o.householdId !== S.householdId) return false;
+  if (!o.authorId) return true; // 查不到出处的，放开
+  return o.authorId === me.id;
+}
+
+/** 这个人的身份在界面上叫什么 —— 顶栏、菜品作者、报错提示都用它 */
+function myRole() {
+  if (isSuper()) return 'super';
+  if (isHouseAdmin(S.householdId)) return 'house';
+  if (meMember()) return 'member';
+  return 'guest';
+}
+
+const ROLE_LABEL = { super: '超级管理员', house: '家庭管理员', member: '普通成员', guest: '还没登记' };
+
+/** 这道菜是谁写的 —— 作者没了就明说「不知道谁写的」，不瞎编 */
+function dishAuthor(d) {
+  if (!d.authorName) return d.householdId ? '不知道谁加的' : '不知道谁加的（老数据）';
+  return d.authorName;
 }
 
 /** 不能改的共享菜上，改挂这个按钮 */
@@ -309,14 +446,34 @@ function memberList() {
   return raw
     .map((m, i) =>
       typeof m === 'string'
-        ? { id: 'legacy_' + i, name: m, emoji: ['🙋', '👩', '👨', '👧', '👦'][i % 5] }
-        : { id: m.id || 'm_' + i, name: m.name, emoji: m.emoji || '🙋' }
+        ? {
+            id: 'legacy_' + i,
+            name: m,
+            loginId: m,
+            emoji: ['🙋', '👩', '👨', '👧', '👦'][i % 5],
+            role: 'member',
+            hasPassword: false,
+            hasPin: false,
+          }
+        : {
+            id: m.id || 'm_' + i,
+            name: m.name,
+            loginId: m.loginId || m.name,
+            emoji: m.emoji || '🙋',
+            role: m.role || 'member',
+            hasPassword: m.hasPassword !== undefined ? !!m.hasPassword : !!m.hasPin,
+            hasPin: m.hasPassword !== undefined ? !!m.hasPassword : !!m.hasPin,
+          }
     )
     .filter((m) => m.name);
 }
 
 function memberByName(name) {
   return memberList().find((m) => m.name === name) || null;
+}
+
+function memberById(id) {
+  return memberList().find((m) => m.id === id) || null;
 }
 
 function memberEmoji(name) {
@@ -355,7 +512,13 @@ function dishVote(dishId) {
   return { want: (hit && hit.want) || [], cook: (hit && hit.cook) || [] };
 }
 
-/** 「我是谁」：默认跟着当前家庭的第一个成员走 */
+/**
+ * 认领过的身份：{ 家庭id: 成员id }
+ *
+ * 存的是**成员 id** 不是名字。名字会重名（爸爸和儿子都叫「小明」），
+ * 服务端判「这道菜是不是你写的」也对的是 authorId，不是显示名。
+ * 老版本存的是名字，读的时候顺手换成 id —— 换一次就干净了。
+ */
 function memberSelections() {
   try {
     const raw = JSON.parse(localStorage.getItem(LS_MEMBER) || '{}');
@@ -365,29 +528,186 @@ function memberSelections() {
   }
 }
 
-function rememberMeName(name) {
-  const next = String(name || '').trim();
-  if (!next) return;
-  S.meName = next;
+/** 老数据里的名字 → 当下的成员 id。找不到就是 null（不硬凑）。 */
+function nameToMemberId(name) {
+  const m = memberList().find((x) => x.name === name);
+  return m ? m.id : '';
+}
+
+/** 当前家庭认领的是哪个成员（对象）；没认领 / 成员被删了都是 null */
+function meMember() {
+  const saved = S.householdId ? memberSelections()[S.householdId] : '';
+  if (!saved) return null;
+  const byId = memberById(saved);
+  if (byId) return byId;
+  // 存的是老格式的名字，认到人就升级成 id
+  const legacy = memberByName(saved);
+  if (legacy) {
+    rememberMeId(legacy.id);
+    return legacy;
+  }
+  return null;
+}
+
+/**
+ * 「我在**这一家**是谁」。
+ *
+ * 认领是按家记的：A 家的成员 id 在 B 家是没意义的。所以问别的家的时候
+ * 必须显式说清楚是哪一家，答不上来就是 null —— 宁可少算一个管理员，
+ * 也不能把「我在这家是管理员」张冠李戴到别的家去。
+ */
+function memberOf(householdId) {
+  if (householdId && householdId !== S.householdId) return null;
+  return meMember();
+}
+
+function meMemberId() {
+  const m = meMember();
+  return m ? m.id : '';
+}
+
+function rememberMeId(id) {
+  if (!id || !S.householdId) return;
   const map = memberSelections();
-  if (S.householdId) map[S.householdId] = next;
+  map[S.householdId] = id;
   localStorage.setItem(LS_MEMBER, JSON.stringify(map));
 }
 
+function forgetMeId() {
+  const map = memberSelections();
+  if (S.householdId) delete map[S.householdId];
+  localStorage.setItem(LS_MEMBER, JSON.stringify(map));
+  S.meName = '';
+}
+
+/**
+ * 「我是谁」—— 显示用的名字。
+ *
+ * 以前这里是「猜」的：没选过身份就默认成成员列表里的第一个人。
+ * 那意味着你妈在自己手机上发的留言，署的是户主的名字 —— 在留言板上看着
+ * 像家里人在回话，其实是个从没登记过的人。现在没认领过就明说「还没登记」，
+ * 不替任何人冒名。
+ *
+ * 认领过、但后来管理员把这个成员删了：不再自动写回一个假身份 ——
+ * 身份认的是人，管理员那边的一次删除不该让你变成别人。
+ */
 function meName() {
-  const list = memberList();
-  const saved = S.householdId ? memberSelections()[S.householdId] : '';
-  const wanted = saved || S.meName;
-  if (list.some((m) => m.name === wanted)) S.meName = wanted;
-  else S.meName = list.length ? list[0].name : '我';
-  if (S.householdId && S.meName) {
-    const map = memberSelections();
-    if (map[S.householdId] !== S.meName) {
-      map[S.householdId] = S.meName;
-      localStorage.setItem(LS_MEMBER, JSON.stringify(map));
-    }
-  }
+  const m = meMember();
+  S.meName = m ? m.name : GUEST;
   return S.meName;
+}
+
+/** 这个人是登记过的成员，还是只是「先随便看看」 */
+function isRegistered() {
+  return !!meMember();
+}
+
+/**
+ * 改不动的时候，说清楚是哪一条、归谁、谁能改。
+ *
+ * 一句「没权限」只会让人以为是程序坏了 —— 共享菜、本家别人的菜、
+ * 还没认领身份，是三种完全不同的处境，给出的下一步也不一样。
+ */
+function denyWhy(o) {
+  if (!o) return '这道菜已经不在了';
+  if (!o.householdId) return '共享菜谱由管理员维护。想改成自己的版本，用「👇 收进我家」。';
+  if (!meMember()) return '先在右上角认领身份，才知道哪些是你自己的菜。';
+  if (o.authorId && o.authorId !== meMemberId()) {
+    return `这道菜是「${o.authorName || '别人'}」加的，只有他本人和${householdName(o.householdId)}的管理员能改。`;
+  }
+  return `这道菜属于${householdName(o.householdId)}，得那个家的管理员才能改。`;
+}
+
+/** 这台设备走过一次「你是谁」没有 */
+function onboarded() {
+  return localStorage.getItem(LS_ONBOARD) === '1';
+}
+
+function markOnboarded() {
+  localStorage.setItem(LS_ONBOARD, '1');
+}
+
+function forgetOnboard() {
+  localStorage.removeItem(LS_ONBOARD);
+}
+
+/**
+ * 首次进入要不要拦一下。
+ *
+ * 只有两种情况：这台设备从没走过向导；或者它记着的那个家庭已经不存在了
+ * （被管理员删了、或者恢复过备份）。其余一律不打扰 ——
+ * 一个人天天被问「你是谁」，比不问更烦。
+ */
+function needWhoami() {
+  const list = households();
+  if (!list.length) return false; // 一个家庭都没有，问了也白问
+  if (!onboarded()) return true;
+  const savedHouse = localStorage.getItem(LS_HOUSE) || '';
+  if (savedHouse && !list.some((h) => h.id === savedHouse)) {
+    // 记着的家没了。别自作主张顶到 list[0] —— 那是另一个人的家，
+    // 让人家以为自己进了别人家，看到不属于自己的点餐单。
+    forgetOnboard();
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 认领一个成员身份 —— 用登录 ID + 密码换这台设备的令牌（30 天滑动续期）。
+ *
+ * 这是整个权限体系的地基：称呼是公开信息，登录 ID 是本家唯一标识，密码才是凭证。
+ * 服务端第一次收到某个成员的密码时是「设」，之后就是「验」。
+ */
+async function claimMember(memberId, loginId, password) {
+  const data = await api('POST', '/api/claim', {
+    householdId: S.householdId,
+    memberId,
+    loginId,
+    password,
+  });
+  if (data && data.deviceToken) setDeviceToken(S.householdId, data.deviceToken);
+  rememberMeId(memberId);
+  clearPendingName();
+  return data;
+}
+
+/** 申请已提交但还没批下来的人用的名字 */
+function pendingName() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_PENDING) || '{}');
+    return (raw && raw[S.householdId]) || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function rememberPendingName(name) {
+  const next = String(name || '').trim();
+  if (!next) return;
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_PENDING) || '{}');
+    if (S.householdId) raw[S.householdId] = next;
+    localStorage.setItem(LS_PENDING, JSON.stringify(raw));
+  } catch (_) {
+    /* 存不下就算了 */
+  }
+}
+
+function clearPendingName() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_PENDING) || '{}');
+    if (S.householdId) delete raw[S.householdId];
+    localStorage.setItem(LS_PENDING, JSON.stringify(raw));
+  } catch (_) {
+    /* 同上 */
+  }
+}
+
+/** 顶栏上显示的名字：认领了用真名，申请中用报的名字，都没有就说没登记 */
+function displayName() {
+  const m = meMember();
+  if (m) return m.name;
+  return pendingName() || GUEST;
 }
 
 /** 谁点过这个表情 —— 用来在 title 里念出来 */
@@ -452,8 +772,8 @@ async function loadBackups() {
  * 绝不让 AI 的问题影响到菜谱/点餐这些主流程。
  */
 async function askAI(task, prompt, imageUrl) {
-  if (!isAdmin()) {
-    toast('AI 助手由管理员使用');
+  if (!isSuper()) {
+    toast('AI 助手由超级管理员使用');
     return null;
   }
   if (!aiReady()) {
@@ -537,6 +857,49 @@ function setAuthToken(t) {
   else localStorage.removeItem(LS_AUTH);
 }
 
+// 家庭口令换来的会话。分家庭存：解了 A 家的锁不等于解了 B 家的。
+const LS_HOUSE_AUTH = 'familyMenu.houseTokens';
+function houseToken(householdId) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_HOUSE_AUTH) || '{}');
+    return (raw && raw[householdId]) || '';
+  } catch (_) {
+    return '';
+  }
+}
+function setHouseToken(householdId, t) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_HOUSE_AUTH) || '{}');
+    if (t) raw[householdId] = t;
+    else delete raw[householdId];
+    localStorage.setItem(LS_HOUSE_AUTH, JSON.stringify(raw));
+  } catch (_) {
+    /* 存不下就算了，不该因此让整个页面打不开 */
+  }
+}
+
+// 成员 PIN 换来的设备令牌（「登录一次，记住这台设备」）。
+// 按家庭存：一个家认了身份，不代表在另一个家也认了 —— 成员名单是各家的。
+const LS_DEVICE = 'familyMenu.deviceTokens';
+function deviceToken(householdId) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_DEVICE) || '{}');
+    return (raw && raw[householdId]) || '';
+  } catch (_) {
+    return '';
+  }
+}
+function setDeviceToken(householdId, t) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_DEVICE) || '{}');
+    if (t) raw[householdId] = t;
+    else delete raw[householdId];
+    localStorage.setItem(LS_DEVICE, JSON.stringify(raw));
+  } catch (_) {
+    /* 同上 */
+  }
+}
+
 async function api(method, path, body, rawContentType) {
   const opts = { method, headers: {} };
   if (body !== undefined) {
@@ -551,6 +914,17 @@ async function api(method, path, body, rawContentType) {
   }
   const t = authToken();
   if (t) opts.headers['X-Auth-Token'] = t;
+  // 当前家庭的两种凭证：家庭会话（解了本家管理锁）+ 设备令牌（认领了身份）
+  const hh = S.householdId;
+  if (hh) {
+    const h = houseToken(hh);
+    if (h) opts.headers['X-House-Token'] = h;
+    const d = deviceToken(hh);
+    if (d) opts.headers['X-Device-Token'] = d;
+  }
+  // 「刚验过密码」的凭证只放 5 分钟、只对危险动作有效，所以压根不落盘 ——
+  // 关掉页面就没了，这正是我们要的。
+  if (S.verifiedToken && Date.now() < S.verifiedExp) opts.headers['X-Verified-Token'] = S.verifiedToken;
   const res = await fetch(path, opts);
   const text = await res.text();
   let json = {};
@@ -590,6 +964,9 @@ async function loadState(silent) {
     }
     meName();
     S.loading = false;
+    // 第一次来这台设备，先问清楚「你是哪家的、你是谁」。
+    // 只问这一次，问完写进 localStorage，以后直接进。
+    if (!S.whoamiStep && needWhoami()) S.whoamiStep = 'house';
     if (!silent) render();
   } catch (err) {
     S.loading = false;
@@ -723,6 +1100,7 @@ function openSheet({ title, body, foot, onMount, draftKey }) {
 
 function closeSheet() {
   aiBusyDone(); // 弹层没了，忙碌遮罩不能留着
+  cancelPinCheck(); // 密码弹层被关掉 = 放弃验证，别让等着的人永远挂着
   const root = $('#modalRoot');
   root.hidden = true;
   root.innerHTML = '';
@@ -949,6 +1327,22 @@ function visibleDishes() {
   });
 }
 
+/** 菜单页那一屏：先按归属筛，再按分类/搜索筛，最后折叠同名的 */
+function visibleDishItems() {
+  return collapseDupes(byScope(visibleDishes(), S.dishScope), S.dishScope);
+}
+
+/** 计数用的是「折叠之后」的数量，否则「全部 12 / 私房 5」会让人以为漏了 5 道 */
+function dishScopeCounts() {
+  const scoped = byScope(visibleDishes(), 'x'); // 分类/搜索筛过，还没按归属筛
+  const all = collapseDupes(scoped, 'all');
+  return {
+    all: all.length,
+    shared: all.filter((i) => !i.dish.householdId).length,
+    own: all.reduce((n, i) => n + i.folded.length + (i.dish.householdId ? 1 : 0), 0),
+  };
+}
+
 /**
  * 一条留言。
  *
@@ -1037,7 +1431,7 @@ function noteCard(n, opts) {
   return `<article class="note ${o.compact ? 'compact' : ''}" data-note="${esc(n.id)}">${inner}</article>`;
 }
 
-function dishCard(d) {
+function dishCard(d, folded) {
   const cover = d.images && d.images[0];
   const img = cover
     ? `<img src="${esc(cover)}" alt="${esc(d.name)}" loading="lazy" />`
@@ -1046,6 +1440,15 @@ function dishCard(d) {
   if (d.duration) meta.push(`<span class="tag">⏱ ${d.duration}′</span>`);
   if (d.servings) meta.push(`<span class="tag">👥 ${esc(d.servings)}</span>`);
   if ((d.tags || []).length) meta.push(`<span class="tag hot">${esc(d.tags[0])}</span>`);
+
+  // 同名折叠的提示。共享那版优先露出来，但得让人知道自家那份没丢 ——
+  // 默默藏起来会让人以为自己的菜被谁删了。
+  const dupes = (folded || []).length
+    ? `<div class="card-dupes" data-stop="1">
+        <span>共享里已有这道，你家的 ${folded.length} 版私房菜收在这儿</span>
+        <button class="btn ghost sm" data-act="unfold-dish" data-id="${esc(d.id)}">展开</button>
+      </div>`
+    : '';
 
   // 菜品互动条：想吃 / 我来做 / 留言。
   // 卡片整块是「打开做法」，所以这里每个按钮都带 stop，点了不该顺手把菜谱也打开。
@@ -1079,13 +1482,16 @@ function dishCard(d) {
       ${d.description ? `<div class="card-desc">${esc(d.description)}</div>` : ''}
       <div class="card-meta">${meta.join('')}</div>
     </div>
+    ${dupes}
     ${interact}
   </article>`;
 }
 
 function viewMenu() {
   const cats = sortedCategories();
-  const list = visibleDishes();
+  const items = visibleDishItems();
+  const counts = dishScopeCounts();
+  const hidden = foldedCount(items);
   const activeCount = pendingOrders().length;
   const week = planWeek();
   const planned = planItems(week).length;
@@ -1116,22 +1522,53 @@ function viewMenu() {
     )
     .join('');
 
+  // 归属筛选：共享 / 我家私房。放分类前面 —— 先决定看谁的那本，再决定看哪一类。
+  const scopes = [
+    ['all', '全部', counts.all],
+    ['shared', '🌐 共享', counts.shared],
+    ['own', '🔒 我家私房', counts.own],
+  ]
+    .map(
+      ([k, label, n]) => `<button class="chip chip-scope" data-act="filter-scope" data-scope="${k}"
+        aria-pressed="${S.dishScope === k}">${label}<span class="chip-count">${n}</span></button>`
+    )
+    .join('');
+
   let body;
   if (S.loading) {
     body = `<div class="grid">${'<div class="skeleton"></div>'.repeat(4)}</div>`;
-  } else if (!list.length) {
+  } else if (!items.length) {
     body = `<div class="empty">
       <span class="empty-emoji">${S.keyword ? '🔍' : '🍳'}</span>
-      <p class="empty-title">${S.keyword ? '没找到这道菜' : '还没有菜'}</p>
-      <p class="empty-text">${S.keyword ? '换个词试试' : '点右下角「记一道菜」，把家里常做的录进来'}</p>
+      <p class="empty-title">${S.keyword ? '没找到这道菜' : S.dishScope === 'own' ? '我家还没有私房菜' : '还没有菜'}</p>
+      <p class="empty-text">${
+        S.keyword
+          ? '换个词试试'
+          : S.dishScope === 'own'
+          ? '共享菜单里已有的菜，直接抄一份到你家，改成自己的做法'
+          : '点右下角「记一道菜」，把家里常做的录进来'
+      }</p>
+      ${
+        S.dishScope === 'own' && !S.keyword
+          ? '<button class="btn soft" style="margin-top:16px" data-act="filter-scope" data-scope="shared">看共享菜单</button>'
+          : ''
+      }
     </div>`;
   } else {
-    body = `<div class="grid">${list.map(dishCard).join('')}</div>`;
+    body = `<div class="grid">${items.map((i) => dishCard(i.dish, i.folded)).join('')}</div>`;
   }
 
   return `
     ${planCard}
+    <div class="chip-row">${scopes}</div>
     <div class="chip-row">${chips}</div>
+    ${
+      hidden && S.dishScope === 'all'
+        ? `<p class="section-sub" style="margin:2px 0 10px">
+             🌐 共享里有的菜只露共享那一版，${hidden} 道同名的私房版收在「🔒 我家私房」里。
+           </p>`
+        : ''
+    }
     ${
       activeCount
         ? `<div class="section-head">
@@ -1141,7 +1578,7 @@ function viewMenu() {
         : ''
     }
     ${body}
-    <button class="fab" data-act="new-dish">${isAdmin() ? '＋ 记一道菜' : '＋ 记我家私菜'}</button>`;
+    <button class="fab" data-act="new-dish">${canWriteShared() ? '＋ 记一道菜' : '＋ 记我家私菜'}</button>`;
 }
 
 /* ---------------- 菜品详情 ---------------- */
@@ -1413,7 +1850,7 @@ function orderItem(o) {
     : (d ? dishEmoji(d.name) : '✍️');
 
   let actions = '';
-  if (!isAdmin()) {
+  if (!anyHouseAdmin()) {
     actions = '<span class="section-sub">管理员更新状态</span>';
   } else if (o.status === 'pending') {
     actions = `<button class="btn soft sm" data-act="set-status" data-id="${esc(o.id)}" data-status="cooking">开做</button>`;
@@ -1625,7 +2062,7 @@ function viewOrder() {
   const all = householdOrders();
   const today = todayStr();
   const house = currentHousehold();
-  const admin = isAdmin();
+  const admin = anyHouseAdmin();
 
   const tabs = [
     ['pending', '待做 ' + all.filter((o) => o.status === 'pending').length],
@@ -2169,16 +2606,19 @@ const pantryNames = (ids) => {
 
 /** 写留言的那一栏：选「我是谁」+ 挑贴纸 + 输入 */
 function noteComposer() {
-  const me = meName();
+  const me = meMemberId();
   const list = memberList();
   const picked = S.noteSticker || '';
+  const unlocked = !!deviceToken(S.householdId); // 这台设备认过人，随便切
   return `<div class="composer">
       <div class="composer-who">
         ${list
           .map(
             (m) =>
-              `<button class="who ${m.name === me ? 'on' : ''}" data-act="note-me" data-name="${esc(m.name)}"
-                aria-pressed="${m.name === me}">${m.emoji} ${esc(m.name)}</button>`
+              `<button class="who ${m.id === me ? 'on' : ''}" data-act="note-me" data-id="${esc(m.id)}"
+                aria-pressed="${m.id === me}">${m.emoji} ${esc(m.name)}${
+                  unlocked || !m.hasPin ? '' : ' <span class="who-lock">🔑</span>'
+                }</button>`
           )
           .join('')}
       </div>
@@ -2543,23 +2983,26 @@ function backupsHtml() {
 }
 
 /**
- * 家里人（没有管理员口令）看到的「管理」页。
+ * 不是超级管理员时看到的「管理」页。
  *
- * 规则很简单：**自己家的菜随便改，公共菜谱只读**。
- * 想在公共菜谱上动土，按「👇 收进我家」抄一份到自己名下再改 ——
- * 管理员维护的那份原样保留，谁也不会被别人的手滑改坏。
+ * 分两种人，差别很大：
+ *   家庭管理员 —— 能管共享菜单、这家所有私菜、成员和家庭口令
+ *   普通成员   —— 只能动自己写的那几道；别人的和共享的都是只读，
+ *                 想改成自己的做法就按「👇 收进我家」抄一份
  */
 function viewManageMember() {
-  const mine = manageDishRows().filter((x) => canEdit(x));
-  const shared = manageDishRows().filter((x) => !canEdit(x));
+  const admin = anyHouseAdmin();
   const house = currentHousehold();
+  const locked = house && house.hasPin && !houseToken(house.id);
 
   const row = (x) => {
     const ok = canEdit(x);
     return `<div class="list-row">
       <span class="icon-mini act">${x.images && x.images[0] ? '🖼️' : dishEmoji(x.name)}</span>
       <span class="list-row-main">
-        <span class="list-row-title">${esc(x.name)}${ownTag(x)}</span>
+        <span class="list-row-title">${esc(x.name)}${ownTag(x)}${
+          x.authorName ? `<span class="pill-now" title="作者">${esc(memberEmoji(x.authorName))} ${esc(x.authorName)}</span>` : ''
+        }</span>
         <span class="list-row-sub">${esc(x.category)} · ${(x.methods || []).length} 种做法 · ${(x.seasonings || []).length} 样调料</span>
       </span>
       ${
@@ -2571,32 +3014,79 @@ function viewManageMember() {
     </div>`;
   };
 
+  const dishes = manageDishRows();
+  const mine = dishes.filter((x) => canEdit(x));
+  const shared = dishes.filter((x) => !canEdit(x));
   const myCats = sortedCategories().filter((c) => canEdit(c));
   const publicCats = sortedCategories().filter((c) => !canEdit(c));
 
+  const roleLine = admin
+    ? locked
+      ? `这个家的口令还没在这台设备上解锁 —— 现在你是普通成员视角。输一次口令才能管共享菜单和全家的私菜。`
+      : `你是「${house ? house.name : ''}」的管理员：共享菜单、这家所有私菜、成员和家庭口令都能改。`
+    : `这里是 <b>你自己写的</b>那几道菜。别人的和公共菜谱改不动 —— 想改成自己的做法，按「👇 收进我家」抄一份。`;
+
   return `
     <div class="admin-warn" style="background:#f1f6f2;border-color:#cfe3d4">
-      <div class="admin-warn-title" style="color:#2f6b45">🏠 ${esc(house ? house.name : '')}的厨房</div>
-      <p class="admin-warn-text" style="color:var(--text-mid)">
-        这里是你能改的地方：<b>只有本家的菜</b>可以随便增删改。
-        公共菜谱由管理员维护，改不动 —— 但你可以按「👇 收进我家」抄一份，改成自家的做法。
-      </p>
+      <div class="admin-warn-title" style="color:#2f6b45">
+        ${admin ? '🔑' : '🏠'} ${esc(house ? house.name : '')}的厨房
+        <span class="pill-now" style="margin-left:8px">${esc(ROLE_LABEL[myRole()])}</span>
+      </div>
+      <p class="admin-warn-text" style="color:var(--text-mid)">${esc(roleLine)}</p>
+      ${
+        locked
+          ? '<button class="btn soft sm" style="margin-top:10px" data-act="unlock-house">🔑 输家庭口令解锁</button>'
+          : ''
+      }
     </div>
 
+    ${
+      house && house.status !== 'approved'
+        ? `<div class="admin-warn" style="background:#fdf6ec;border-color:#f0e0c8">
+             <div class="admin-warn-title" style="color:#8a5a12">⏳ 这是一个「普通家庭」</div>
+             <p class="admin-warn-text" style="color:var(--text-mid)">
+               自己用没问题，但往共享菜单放东西、拉人进家，得超级管理员点头升级成「正式家庭」。
+             </p>
+           </div>`
+        : ''
+    }
+
+    ${
+      admin
+        ? `<div class="section-head">
+             <h2 class="section-title">共享菜单<span class="section-sub" style="margin-left:8px">全体家庭共用</span></h2>
+             <button class="btn soft sm" style="margin-left:auto" data-act="new-dish">＋ 记一道</button>
+           </div>
+           ${
+             shared.length
+               ? shared.map(row).join('')
+               : '<div class="empty" style="padding:24px"><p class="empty-text">共享菜单还是空的</p></div>'
+           }`
+        : ''
+    }
+
     <div class="section-head">
-      <h2 class="section-title">我家私菜</h2>
+      <h2 class="section-title">${admin ? '我家私菜' : '我写的菜'}</h2>
       <button class="btn soft sm" style="margin-left:auto" data-act="new-dish">＋ 记一道</button>
     </div>
     ${
       mine.length
         ? mine.map(row).join('')
-        : '<div class="empty" style="padding:28px"><p class="empty-text">还没记过自家私菜。点上面「＋ 记一道」，或者从下面的公共菜谱抄一份</p></div>'
+        : `<div class="empty" style="padding:28px"><p class="empty-text">${
+            admin ? '还没记过自家私菜。' : '你还没写过菜。'
+          }点上面「＋ 记一道」${
+            shared.length ? '，或者从下面的共享菜单抄一份' : ''
+          }</p></div>`
     }
 
-    <div class="section-head">
-      <h2 class="section-title">公共菜谱<span class="section-sub" style="margin-left:8px">只读</span></h2>
-    </div>
-    ${shared.length ? shared.map(row).join('') : '<div class="empty" style="padding:24px"><p class="empty-text">还没有公共菜谱</p></div>'}
+    ${
+      !admin && shared.length
+        ? `<div class="section-head">
+             <h2 class="section-title">共享菜单<span class="section-sub" style="margin-left:8px">只读</span></h2>
+           </div>
+           ${shared.map(row).join('')}`
+        : ''
+    }
 
     <div class="section-head">
       <h2 class="section-title">我的分类</h2>
@@ -2621,7 +3111,7 @@ function viewManageMember() {
 
     ${
       publicCats.length
-        ? `<div class="section-head"><h2 class="section-title">公共分类<span class="section-sub" style="margin-left:8px">只读</span></h2></div>
+        ? `<div class="section-head"><h2 class="section-title">共享分类<span class="section-sub" style="margin-left:8px">只读</span></h2></div>
            ${publicCats
              .map(
                (c) => `<div class="list-row">
@@ -2635,19 +3125,31 @@ function viewManageMember() {
         : ''
     }
 
-    <div class="section-head"><h2 class="section-title">管理员入口</h2></div>
-    <div class="list-row"><span class="icon-mini">🔐</span><span class="list-row-main">
-      <span class="list-row-title">共享菜单与家庭设置</span>
-      <span class="list-row-sub">共享菜谱、成员、做饭状态和系统设置由管理员维护</span>
-    </span><button class="btn ghost sm" data-act="unlock">输入管理口令</button></div>`;
+    ${
+      admin
+        ? `<div class="section-head"><h2 class="section-title">这个家的设置</h2></div>
+           <div class="list-row"><span class="icon-mini">👨‍👩‍👧</span><span class="list-row-main">
+             <span class="list-row-title">家庭成员</span>
+             <span class="list-row-sub">${memberList().length} 位 · 每人一个密码，改成员要先确认身份</span>
+           </span><button class="btn ghost sm" data-act="open-members">管理</button></div>
+           <div class="list-row"><span class="icon-mini">🔑</span><span class="list-row-main">
+             <span class="list-row-title">家庭口令</span>
+             <span class="list-row-sub">${house && house.hasPin ? '已设置' : '没设 —— 这个家的 owner 天然是管理员'}</span>
+           </span><button class="btn ghost sm" data-act="edit-household" data-id="${esc(S.householdId)}">${house && house.hasPin ? '修改' : '设置'}</button></div>`
+        : `<div class="section-head"><h2 class="section-title">管理员入口</h2></div>
+           <div class="list-row"><span class="icon-mini">🔐</span><span class="list-row-main">
+             <span class="list-row-title">共享菜单与家庭设置</span>
+             <span class="list-row-sub">共享菜谱、成员、做饭状态和系统设置由管理员维护</span>
+           </span><button class="btn ghost sm" data-act="unlock">输入管理口令</button></div>`
+    }`;
 }
 
 function viewManage() {
   // 前端拿不到口令明文了，改成看 hasPin 标记 + 本机有没有会话 token
-  if (S.data.settings.hasPin && !S.authed) return viewManageMember();
+  if (!isSuper()) return viewManageMember();
 
   const s = S.data.settings;
-  const admin = isAdmin();
+  const admin = isSuper();
   const d = scopeDishes();
   const nPrivate = d.filter((x) => isPrivate(x)).length;
 
@@ -2811,27 +3313,7 @@ function viewManage() {
       <h2 class="section-title">家庭成员<span class="section-sub" style="margin-left:8px">${esc(currentHousehold() ? currentHousehold().name : '')}</span></h2>
       <button class="btn soft sm" style="margin-left:auto" data-act="new-member">＋ 添加</button>
     </div>
-    ${
-      memberList().length
-        ? memberList()
-            .map((m) => {
-              const st = memberStats(m.name);
-              const sub = st.count
-                ? `点过 ${st.count} 次 · 共 ${st.people} 份`
-                : '还没点过';
-              return `<div class="list-row">
-                <span class="member-avatar">${esc(m.emoji)}</span>
-                <span class="list-row-main">
-                  <span class="list-row-title">${esc(m.name)}</span>
-                  <span class="list-row-sub">${esc(sub)}</span>
-                </span>
-                <button class="icon-mini" data-act="edit-member" data-id="${esc(m.id)}" title="编辑">✏️</button>
-                <button class="icon-mini" data-act="del-member" data-id="${esc(m.id)}" title="删除">🗑️</button>
-              </div>`;
-            })
-            .join('')
-        : '<div class="empty" style="padding:28px"><p class="empty-text">还没有登记成员，点右上角添加</p></div>'
-    }
+    ${membersHtml()}
 
     <div class="section-head">
       <h2 class="section-title">分类管理</h2>
@@ -2888,8 +3370,10 @@ function openHouseholdEditor(house) {
     emoji: HOUSE_EMOJI[households().length % HOUSE_EMOJI.length],
     note: '',
   };
+  const editing = !!house;
+  const canPin = editing && isHouseAdmin(h.id);
   openSheet({
-    title: house ? `编辑「${house.name}」` : '添加家庭',
+    title: editing ? `编辑「${house.name}」` : '添加家庭',
     body: `
       <div class="field">
         <label class="field-label">名字或房号 *<span class="field-hint">例如：301、外婆家、单身公寓</span></label>
@@ -2900,7 +3384,7 @@ function openHouseholdEditor(house) {
         <div class="emoji-grid">
           ${HOUSE_EMOJI.map(
             (e) =>
-              `<button class="emoji-opt ${e === h.emoji ? 'on' : ''}" data-act="pick-house-emoji" data-e="${e}">${e}</button>`
+              `<button class="emoji-opt ${e === h.emoji ? 'on' : ''}" data-act="pick-house-emoji" data-e="${esc(e)}">${esc(e)}</button>`
           ).join('')}
         </div>
       </div>
@@ -2908,9 +3392,64 @@ function openHouseholdEditor(house) {
         <label class="field-label">备注<span class="field-hint">住哪、几口人，随你写</span></label>
         <input class="input" id="hNote" value="${esc(h.note)}" placeholder="例如：3 号楼 502" />
       </div>
-      <p class="section-sub">
-        新建的家庭从零开始：没有点餐记录、库存是空的。菜谱是所有家庭共享的，不用重复录。
-      </p>`,
+      ${
+        editing
+          ? `<div class="field">
+              <label class="field-label">家庭状态</label>
+              <div class="list-row static">
+                <span class="list-row-title">${
+                  h.status === 'approved' ? '✅ 正式家庭' : '⏳ 普通家庭（待启用）'
+                }</span>
+                <span class="list-row-sub">${
+                  h.status === 'approved'
+                    ? '可以进共享菜单、拉人进家'
+                    : '能用，但共享菜单和拉人得超级管理员点头'
+                }</span>
+              </div>
+              ${
+                isSuper() && h.status !== 'approved'
+                  ? '<button class="btn soft sm" style="margin-top:8px" data-act="approve-household" data-id="' +
+                    esc(h.id) +
+                    '">✅ 升级为正式家庭</button>'
+                  : ''
+              }
+              ${
+                isSuper() && h.status === 'approved'
+                  ? '<button class="btn ghost sm" style="margin-top:8px" data-act="downgrade-household" data-id="' +
+                    esc(h.id) +
+                    '">降回普通家庭</button>'
+                  : ''
+              }
+            </div>
+            <div class="field">
+              <label class="field-label">家庭口令<span class="field-hint">${
+                h.hasPin ? '已设置。管这个家的人用它解锁管理员权限。' : '没设。这个家的 owner 天然就是管理员。'
+              }</span></label>
+              ${
+                canPin
+                  ? `<input class="input" id="hPin" type="password" placeholder="${
+                      h.hasPin ? '已设置，留空表示不修改' : '例如 8899'
+                    }" />
+                     ${
+                       h.hasPin
+                         ? '<label class="field-label" style="display:flex;align-items:center;gap:8px;margin-top:10px"><input type="checkbox" id="hPinClear" style="width:18px;height:18px" />取消口令保护（勾上后保存即刻生效）</label>'
+                         : ''
+                     }`
+                  : '<p class="field-hint">只有这个家的管理员能改。</p>'
+              }
+            </div>
+            <p class="section-sub">${
+              canPin
+                ? '改了家庭口令，这个家所有设备上的管理员解锁都会失效，需要重新输。'
+                : '家庭口令是「这个家」的管理凭证，不是成员的个人密码。'
+            }</p>`
+          : `<p class="section-sub">
+              新建的家庭从零开始：没有点餐记录、库存是空的。菜谱是所有家庭共享的，不用重复录。
+            </p>
+            <p class="section-sub" style="margin-top:8px">
+              新建的一律是「普通家庭」—— 自己用没问题，但要进共享菜单、拉人进家，得超级管理员点一下同意。
+            </p>`
+      }`,
     foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
            <button class="btn" data-act="save-household" data-id="${house ? esc(house.id) : ''}">保存</button>`,
   });
@@ -2924,7 +3463,7 @@ function openHouseholdEditor(house) {
 function openDishEditor(dish) {
   const cats = sortedCategories();
   // 家里人记的菜一律是自家私菜：往公共菜谱里加东西是管理员的活儿
-  const admin = isAdmin();
+  const admin = canWriteShared();
   const d =
     dish ||
     {
@@ -3229,10 +3768,16 @@ function collectDish() {
   const d = S.draft.dish;
   d.name = g('fName').value.trim();
   d.category = g('fCat').value;
-  // 非管理员没有「谁看得见」这个选择权：写死成本家私菜
+  // 非管理员没有「谁看得见」这个选择权：写死成本家私菜。
+  // 改动一道菜的归属等于往共享菜单搬东西，那要 canWriteShared —— 放在服务端兜底，
+  // 这里只是不让界面给出做不到的选项。
   const scopeSel = g('fScope');
   d.householdId =
-    scopeSel && scopeSel.value === 'own' && S.householdId ? S.householdId : isAdmin() ? null : S.householdId || null;
+    scopeSel && scopeSel.value === 'own' && S.householdId
+      ? S.householdId
+      : canWriteShared()
+      ? null
+      : S.householdId || null;
   d.description = g('fDesc').value.trim();
   d.servings = g('fServ').value.trim();
   d.duration = Number(g('fDur').value) || 0;
@@ -3353,7 +3898,7 @@ function compressImage(file, maxSize = 1400, quality = 0.82) {
 
 function openCatEditor(cat) {
   const houseName = (currentHousehold() || {}).name || '当前家庭';
-  const admin = isAdmin();
+  const admin = canWriteShared();
   openSheet({
     title: cat ? '重命名分类' : '新增分类',
     body: `<div class="field">
@@ -3401,7 +3946,7 @@ function openSettings() {
           : '没设 = 局域网里任何人都能改菜谱。建议设一个，让菜单的编辑只落在几个管理员手上'
       }</span></label>
         <input class="input" id="setPin" type="password" placeholder="${
-          s.hasPin ? '已设置口令，留空表示不修改' : '例如 1234'
+          s.hasPin ? '已设置口令，留空表示不修改' : '例如：家庭厨房口令'
         }" />
         ${
           s.hasPin
@@ -3423,26 +3968,200 @@ function openSettings() {
 
 const QUICK_EMOJI = ['🙋', '👩', '👨', '👧', '👦', '🧒', '👵', '👴', '🐱', '🐶', '😋', '🧑‍🍳'];
 
+/**
+ * 成员列表。管理页和家庭管理员的弹层共用一份 ——
+ * 两边看到的必须是同一套东西，不然会出现「页面上写着管理员，点进去却不是」。
+ */
+function membersHtml() {
+  if (!memberList().length) return '<div class="empty" style="padding:28px"><p class="empty-text">还没有登记成员，点右上角添加</p></div>';
+  return memberList()
+    .map((m) => {
+      const st = memberStats(m.name);
+      const bits = [st.count ? `点过 ${st.count} 次` : '还没点过'];
+      if (m.role === 'owner') bits.push('管理员');
+      bits.push(m.hasPassword ? '已设密码' : '还没设密码');
+      return `<div class="list-row">
+        <span class="member-avatar">${esc(m.emoji)}</span>
+        <span class="list-row-main">
+          <span class="list-row-title">${esc(m.name)}${
+            m.id === meMemberId() ? ' <span class="pill-now">这台设备</span>' : ''
+          }</span>
+        <span class="list-row-sub">登录 ID：${esc(m.loginId || m.name)} · ${esc(bits.join(' · '))}</span>
+        </span>
+        <button class="icon-mini" data-act="edit-member" data-id="${esc(m.id)}" title="编辑">✏️</button>
+        <button class="icon-mini" data-act="del-member" data-id="${esc(m.id)}" title="删除">🗑️</button>
+      </div>`;
+    })
+    .join('');
+}
+
+/**
+ * 危险动作前的二次验证。
+ *
+ * 改成员、重置密码、改家庭口令、删家庭 —— 这几件事能改「谁是谁」，
+ * 就等于能冒充谁。手上那把 30 天的设备令牌证明的是「这台设备以前是你」，
+ * 不是「此刻可以替这个家做主」，所以危险动作必须配一张刚刚用密码换来的凭证。
+ *
+ * 问谁，取决于这一家有什么秘密：
+ *   设了家庭口令 → 问家庭口令（它才是这一家的管理员凭证）
+ *   没设口令、这个人自己有密码 → 问他的成员密码
+ *   谁都没设 → 没什么可冒充的，直接放行（跟服务端同一条规矩）
+ *
+ * 服务端 /api/verify-pin、/api/households/:id/auth 会再验一遍 ——
+ * 这里只是提前问清楚，别让人输完才发现还是不行。
+ */
+let pendingPinCheck = null;
+let pendingPinTarget = null;
+
+function askPinDialog(title, hint, placeholder, onOk) {
+  return new Promise((resolve) => {
+    pendingPinCheck = resolve;
+    pendingPinOnOk = onOk;
+    openSheet({
+      title,
+      body: `<p class="section-sub" style="margin:0 0 12px">${hint}</p>
+        <input class="input" id="dangerPin" type="password" placeholder="${esc(placeholder)}" autocomplete="off" />
+        <p class="whoami-err" id="dangerErr" hidden></p>`,
+      foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
+             <button class="btn" data-act="danger-pin-ok">确认</button>`,
+    });
+    const input = $('#dangerPin');
+    if (input) input.focus();
+  });
+}
+
+let pendingPinOnOk = null;
+
+/** 用家庭口令换会话 */
+function askHousePin(house, what) {
+  return askPinDialog(
+    '输一下家庭口令',
+    `${what}是危险操作，需要「${house.name}」的管理口令。`,
+    '家庭口令',
+    async (pin) => {
+      const r = await api('POST', `/api/households/${house.id}/auth`, { pin });
+      if (r && r.token) setHouseToken(house.id, r.token);
+    }
+  );
+}
+
+/** 用成员密码换那张 5 分钟的「刚验过」凭证 */
+function askMemberPassword(house, member, what) {
+  pendingPinTarget = member;
+  return askPinDialog(
+    '再确认一下',
+    `${what}是危险操作。请输入「${member.name}」的密码再继续。`,
+    '成员密码',
+    async (pin) => {
+      const r = await api('POST', '/api/verify-pin', {
+        householdId: house.id,
+        memberId: member.id,
+        password: pin,
+      });
+      // 收下这张 5 分钟的凭证，接下来那个危险动作才走得通
+      if (r && r.verifiedToken) {
+        S.verifiedToken = r.verifiedToken;
+        S.verifiedExp = Date.now() + 5 * 60 * 1000;
+      }
+    }
+  );
+}
+
+/** 按「这一家有什么秘密」决定问哪个密码 */
+async function askSensitiveAuth(house, what, member) {
+  if (!house) return false;
+  if (isSuper()) return true;
+  if (houseToken(house.id)) return true; // 这个家刚解过锁，12 小时内都算数
+  if (house.hasPin) return askHousePin(house, what);
+  if (member && member.hasPassword && member.id) return askMemberPassword(house, member, what);
+  if (member && member.role === 'owner' && !member.hasPassword) return true; // 这一家一个密码都没有
+  // 走到这儿说明这个人手上没有任何能验的东西。问家庭口令；没口令的话
+  // 服务端会自己给一张会话，等于把决定权交回服务端 —— 比前端猜要准。
+  return askHousePin(house, what);
+}
+
+function clearPinCheck() {
+  pendingPinCheck = null;
+  pendingPinOnOk = null;
+  pendingPinTarget = null;
+}
+
+/** 关掉弹层也算放弃：把等着的人叫醒，不然调用方会一直挂着 */
+function cancelPinCheck() {
+  const done = typeof pendingPinCheck === 'function' ? pendingPinCheck : null;
+  clearPinCheck();
+  if (done) done(false);
+}
+
+/** 危险动作的统一入口：先验身份，再跑真正的操作 */
+async function withDangerPin(member, what, run) {
+  const house = currentHousehold();
+  const ok = await askSensitiveAuth(house, what, member);
+  if (!ok) return;
+  try {
+    await run();
+  } catch (e) {
+    toast(e.message || '没做成');
+  }
+}
+
 function openMemberEditor(member) {
   const m =
     member || { id: null, name: '', emoji: QUICK_EMOJI[memberList().length % QUICK_EMOJI.length] };
+  const dupes = member && memberList().filter((x) => x.name === m.name && x.id !== m.id).length;
   openSheet({
     title: member ? '编辑成员' : '添加成员',
     body: `
       <div class="field">
         <label class="field-label">称呼<span class="field-hint">点餐时会显示这个名字</span></label>
         <input class="input" id="mName" value="${esc(m.name)}" placeholder="例如：外婆" />
+        ${
+          dupes
+            ? `<p class="field-hint" style="margin-top:6px">家里已经有人叫「${esc(m.name)}」了。可以重名 —— 身份认的是人不是名字，别人拿不到密码就冒充不了。</p>`
+            : ''
+        }
       </div>
       <div class="field">
         <label class="field-label">头像</label>
         <div class="emoji-grid">
           ${QUICK_EMOJI.map(
             (e) =>
-              `<button class="emoji-opt ${e === m.emoji ? 'on' : ''}" data-act="pick-emoji" data-e="${e}">${e}</button>`
+              `<button class="emoji-opt ${e === m.emoji ? 'on' : ''}" data-act="pick-emoji" data-e="${esc(e)}">${esc(e)}</button>`
           ).join('')}
         </div>
         <input class="input" id="mEmoji" value="${esc(m.emoji)}" placeholder="也可以直接输入任意表情" style="margin-top:8px" />
       </div>
+      ${`<div class="field">
+              <label class="field-label">权限</label>
+              <div class="seg" role="radiogroup">
+                <button class="seg-opt ${m.role !== 'owner' ? 'on' : ''}" data-act="m-role" data-v="member"
+                  aria-pressed="${m.role !== 'owner'}">普通成员</button>
+                <button class="seg-opt ${m.role === 'owner' ? 'on' : ''}" data-act="m-role" data-v="owner"
+                  aria-pressed="${m.role === 'owner'}">管理员</button>
+              </div>
+              <p class="field-hint" style="margin-top:6px">${
+                m.role === 'owner'
+                  ? '能改共享菜谱、改这家所有私菜、管成员。'
+                  : '只能改自己写的那几道菜。'
+              }${m.role === 'owner' && !currentHousehold().hasPin ? '' : ''}</p>
+            </div>
+            <div class="field">
+              <label class="field-label">登录 ID<span class="field-hint">同一个家庭内不能重名，支持汉字和字母。</span></label>
+              <input class="input" id="mLoginId" value="${esc(m.loginId || m.name)}" maxlength="32" placeholder="例如：厨房大管家" />
+            </div>
+            <div class="field">
+              <label class="field-label">成员密码<span class="field-hint">${
+                m.hasPassword ? '已设置。改密码会让 TA 所有设备重新登录。' : '还没设。TA 第一次打开时自己设。'
+              }</span></label>
+              <input class="input" id="mPassword" type="password" maxlength="64" placeholder="${
+                m.hasPassword ? '已设置，留空表示不修改' : '留空表示不设置'
+              }" />
+              ${
+                m.hasPassword
+                  ? `<button class="btn ghost sm" style="margin-top:8px" data-act="m-password-clear">清掉密码（TA 下次打开要重设）</button>`
+                  : ''
+              }
+            </div>`}
       ${
         member && memberStats(m.name).count
           ? `<p class="section-sub">${esc(m.name)} 已点过 ${memberStats(m.name).count} 次。删除成员不会删掉 TA 的历史点餐记录。</p>`
@@ -3454,6 +4173,11 @@ function openMemberEditor(member) {
   $('#mName').focus();
 }
 
+/**
+ * 存成员。成员 id 是唯一键，所以：
+ *   - 不查重名（爸爸和儿子可以都叫「小明」）
+ *   - 角色和密码分成两次 PUT —— 改密码要二次验证，混在一起会被一起挡掉
+ */
 async function saveMembers(list) {
   const h = currentHousehold();
   if (!h) return toast('还没有家庭');
@@ -3473,15 +4197,16 @@ function render() {
   $('#brandSub').textContent = s.welcome || '今天想吃点什么？';
 
   renderHouseBtn();
+  renderMeBtn();
 
   const manageTab = document.querySelector('.tab[data-view="manage"]');
   if (manageTab) {
-    const admin = isAdmin();
+    const admin = isSuper();
     const icon = manageTab.querySelector('.tab-icon');
     const label = manageTab.querySelector('.tab-label');
     if (icon) icon.textContent = admin ? '🧺' : '🥣';
     if (label) label.textContent = admin ? '管理' : '我的私菜';
-    manageTab.title = admin ? '家庭管理' : '维护我家私菜';
+    manageTab.title = admin ? '超级管理：设置、备份、家庭' : '维护我家私菜';
   }
 
   document.querySelectorAll('.tab').forEach((t) => {
@@ -3528,6 +4253,8 @@ function render() {
   else if (S.view === 'board') view.innerHTML = viewBoard();
   else if (S.view === 'pantry') view.innerHTML = viewPantry();
   else view.innerHTML = viewManage();
+
+  renderWhoami();
 }
 
 /** 顶栏上的「当前家庭」按钮 */
@@ -3568,6 +4295,178 @@ function renderHouseBtn() {
   }
 }
 
+/**
+ * 顶栏的「我是谁」。
+ *
+ * 以前身份只藏在留言板的输入栏里，切到别的页就忘了自己是以谁的名义在点餐、
+ * 在看谁的库存。常驻一个按钮，「我在这儿是谁」永远看得见，也随时能换。
+ *
+ * 三种状态说三件事：
+ *   认领了   → 名字 + 角色（超级管理员 / 家庭管理员 / 普通成员）
+ *   申请中   → 报了名但还没批，顶栏明说「等批准」，别让人以为没提交上
+ *   都没登记 → 虚线高亮 inviting 点一下，这是最容易漏掉的一步
+ */
+function renderMeBtn() {
+  const btn = $('#meBtn');
+  if (!btn) return;
+  const m = meMember();
+  const pend = !m && pendingName();
+  const guest = !m && !pend;
+  const avatar = $('#meEmoji');
+  const label = $('#meName');
+  const role = $('#meRole');
+  if (avatar) avatar.textContent = m ? m.emoji : pend ? '⏳' : '👤';
+  if (label) label.textContent = m ? m.name : pend ? `${pend}（等批准）` : displayName();
+  if (role) {
+    role.hidden = guest;
+    role.textContent = m ? ROLE_LABEL[myRole()] : '等管理员批准';
+  }
+  btn.classList.toggle('pending', guest);
+  btn.classList.toggle('waiting', !!pend);
+  btn.title = guest
+    ? '这台设备还没认领身份 —— 点一下说说你是谁'
+    : m
+    ? `${m.name}（${ROLE_LABEL[myRole()]}）· 点一下可以换身份或换家庭`
+    : `${pend} · 申请已提交，等${householdName(S.householdId)}管理员批准`;
+}
+
+/* ---------------- 「你是谁」向导 ---------------- */
+
+/** 打开展向。step = house / member / pin；from 记一下是哪儿点进来的 */
+function openWhoami(step, from) {
+  S.whoamiStep = step || 'house';
+  if (from !== undefined) S.whoamiFrom = from || '';
+  renderWhoami();
+}
+
+function closeWhoami() {
+  S.whoamiStep = '';
+  S.whoamiPick = '';
+  S.whoamiFrom = '';
+  renderWhoami();
+}
+
+function whoamiHouseRow(h) {
+  const mem = (h.members || []).map((m) => (typeof m === 'string' ? m : m.name)).filter(Boolean);
+  const here = h.id === S.householdId;
+  const sub = [
+    mem.length ? `${mem.length} 位家人` : '还没登记成员',
+    h.status === 'normal' ? '待启用' : '',
+    here ? '' : h.note || '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  return `<button class="whoami-row" data-act="who-house" data-id="${esc(h.id)}">
+      <span class="whoami-row-emoji">${esc(h.emoji || '🏠')}</span>
+      <span class="whoami-row-main">
+        <span class="whoami-row-name">${esc(h.name)}${here ? ' <span class="pill-now">当前</span>' : ''}</span>
+        <span class="whoami-row-sub">${esc(sub)}</span>
+      </span>
+      <span class="whoami-row-go" aria-hidden="true">›</span>
+    </button>`;
+}
+
+/** 这台设备是不是已经认领过这个成员（有令牌就是认过了） */
+function claimedOn(hid, mid) {
+  return !!(hid && mid && deviceToken(hid));
+}
+
+function renderWhoami() {
+  const box = $('#whoami');
+  if (!box) return;
+  const step = S.whoamiStep;
+  if (!step) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  box.hidden = false;
+
+  if (step === 'house') {
+    const list = households();
+    box.innerHTML = `<div class="whoami-card">
+      <div class="whoami-emoji">🏠</div>
+      <h2 class="whoami-title">你是哪家的？</h2>
+      <p class="whoami-sub">
+        这台设备会记住你的选择，以后打开就直接进你家。<br/>
+        先看看别人的菜谱也行 —— 下面可以跳过。
+      </p>
+      <div class="whoami-list">${list.length ? list.map(whoamiHouseRow).join('') : '<p class="whoami-sub">还没有任何家庭。</p>'}</div>
+      <button class="btn ghost block" data-act="who-skip">先随便看看</button>
+    </div>`;
+    return;
+  }
+
+  const h = currentHousehold();
+
+  /* --- 第三步：设 / 输密码 --- */
+  if (step === 'pin') {
+    const m = memberById(S.whoamiPick);
+    if (!m) {
+      // 成员被删了，别把人卡在这一步
+      S.whoamiPick = '';
+      S.whoamiStep = 'member';
+      return renderWhoami();
+    }
+    const first = !m.hasPassword;
+    box.innerHTML = `<div class="whoami-card">
+      <div class="whoami-emoji">${esc(m.emoji)}</div>
+      <h2 class="whoami-title">${first ? '给「' + esc(m.name) + '」设个登录密码' : '「' + esc(m.name) + '」的登录密码'}</h2>
+      <p class="whoami-sub">
+        ${
+          first
+            ? '登录 ID 可以是汉字或字母；密码支持汉字、字母、数字和符号，4 到 64 个字符。<br/>以后你加的菜、发的留言才算在你自己名下，别的成员改不动。'
+            : '这个成员还没在这台设备上登录过。输对密码才认得你 —— 别人拿到这台设备也冒充不了。'
+        }
+      </p>
+      <div class="whoami-row">
+        <input class="input" id="whoLoginId" value="${esc(m.loginId || m.name)}" maxlength="32" placeholder="登录 ID，例如：厨房大管家" />
+      </div>
+      <div class="whoami-row">
+        <input class="input" id="whoPassword" type="password" autocomplete="off"
+          placeholder="${first ? '设个 4-64 个字符的密码' : '输密码'}" maxlength="64" />
+      </div>
+      <p class="whoami-err" id="whoPasswordErr" hidden></p>
+      <button class="btn block" data-act="who-password" data-id="${esc(m.id)}">${first ? '设好了' : '记下我'}</button>
+      <div class="whoami-row-btns">
+        <button class="btn ghost" data-act="who-password-back">← 换一个</button>
+        <button class="btn ghost" data-act="who-skip">先随便看看</button>
+      </div>
+    </div>`;
+    const input = $('#whoPassword');
+    if (input) input.focus();
+    return;
+  }
+
+  /* --- 第二步：选成员 --- */
+  const list = memberList();
+  const me = meMemberId();
+  box.innerHTML = `<div class="whoami-card">
+    <div class="whoami-emoji">🙋</div>
+    <h2 class="whoami-title">你是「${esc(h ? h.name : '')}」的谁？</h2>
+    <p class="whoami-sub">选一个，这台设备就记成他。忘了密码找管理员重设。</p>
+    ${
+      list.length
+        ? `<div class="whoami-grid">${list
+            .map(
+              (m) => `<button class="whoami-pick${m.id === me ? ' on' : ''}" data-act="who-member" data-id="${esc(m.id)}">
+          <span class="whoami-pick-emoji">${esc(m.emoji)}</span>
+          <span class="whoami-pick-name">${esc(m.name)}</span>
+          ${m.role === 'owner' ? '<span class="whoami-pick-role">管理员</span>' : ''}
+          ${m.hasPassword ? '<span class="whoami-pick-lock">🔑</span>' : '<span class="whoami-pick-lock">未设密码</span>'}
+        </button>`
+            )
+            .join('')}</div>`
+        : '<p class="whoami-sub">这个家还没登记成员。你可以先随便看看，或者报个名让管理员加上你。</p>'
+    }
+    <button class="btn soft block" data-act="who-apply" data-id="${esc(S.householdId)}">我不在名单上，报个名</button>
+    <div class="whoami-row-btns">
+      <button class="btn ghost" data-act="who-back">← 换一个家庭</button>
+      <button class="btn ghost" data-act="who-skip">先随便看看</button>
+    </div>
+  </div>`;
+}
+
 function householdBadge() {
   const pending = pendingOrders().length;
   const urgent = householdPantry().filter((p) => {
@@ -3585,9 +4484,13 @@ function householdBadge() {
  */
 function openHouseholdPicker() {
   const list = households();
-  const admin = isAdmin();
+  const admin = anyHouseAdmin();
   const me = meName();
-  const myAccess = (h) => admin || (h.members || []).some((m) => m.name === me);
+  const myId = meMemberId();
+  // 成员 id 是各家各一份的：同一个「爸爸」在 A 家和 B 家是两个 id，
+  // 所以切到别家时要拿「我认领过的那些 id」去比，而不是只认当前这家。
+  const mine = (h) => !!(h.members || []).some((m) => m.id && m.id === myId) || (h.members || []).some((m) => m.name === me);
+  const myAccess = (h) => admin || mine(h);
   const pendingFor = (h) => (S.access || []).filter((r) => r.householdId === h.id && r.status === 'pending' && r.name === me);
 
   const body = `
@@ -3664,7 +4567,7 @@ function openJoinSheet(houseId) {
 
 const ACTIONS = {
   /* 导航 */
-  nav(el) {
+  async nav(el) {
     const v = el.dataset.view;
     if (v === 'manage' && S.data.settings.hasPin && !S.authed) {
       S.view = 'manage';
@@ -3675,12 +4578,101 @@ const ACTIONS = {
     S.view = v;
     closeSheet();
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    // 顺手重新拉一次。这是个多人一起用的页面：妈刚在另一台手机上点了菜，
+    // 爸这边不重拉就还看着进页面那一刻的旧数据，只能靠手动刷新网页才发现。
+    // 顺带把「切家庭之后忘了刷新」的那类脏显示一起治好。
+    await loadState(true);
     render();
   },
   reload() {
     S.loading = true;
     render();
     loadState();
+  },
+
+  /* 「你是谁」 */
+  'open-me'() {
+    // 已经认领过的人走一步就够了：直接改身份，不用再输一遍密码。
+    // 换家庭、换人才需要重新认证 —— 那时才进向导。
+    const m = meMember();
+    if (m && deviceToken(S.householdId)) {
+      return openWhoami('member');
+    }
+    openWhoami(S.householdId ? 'member' : 'house');
+  },
+  'who-house'(el) {
+    S.householdId = el.dataset.id;
+    localStorage.setItem(LS_HOUSE, S.householdId);
+    S.memberFilter = '';
+    S.pantryCat = '全部';
+    S.pantryFilter = 'all';
+    S.category = '全部';
+    openWhoami('member');
+    // 换了家庭就得重新拉：现在选的这家的成员名单，跟刚才那家不是一回事
+    loadState(true).then(() => {
+      S.whoamiStep = 'member';
+      render();
+    });
+  },
+  'who-member'(el) {
+    const id = el.dataset.id;
+    const m = memberById(id);
+    if (!m) return;
+    // 这台设备已经认过他了（令牌还在）→ 直接切，不问密码。
+    if (meMemberId() === id && deviceToken(S.householdId)) {
+      markOnboarded();
+      closeWhoami();
+      return toast(`记下了：${currentHousehold().name} · ${m.name}`);
+    }
+    S.whoamiPick = id;
+    S.whoamiStep = 'pin';
+    renderWhoami();
+  },
+  async 'who-password'(el) {
+    const id = el.dataset.id || S.whoamiPick;
+    const m = memberById(id);
+    if (!m) return;
+    const loginId = (($('#whoLoginId') || {}).value || '').trim();
+    const password = (($('#whoPassword') || {}).value || '').trim();
+    const err = $('#whoPasswordErr');
+    const say = (t) => {
+      if (err) {
+        err.hidden = false;
+        err.textContent = t;
+      }
+    };
+    if (!loginId) return say('先填写登录 ID，可以使用汉字或字母。');
+    if (loginId.length > 32) return say('登录 ID 最多 32 个字符。');
+    if (!/^\S{4,64}$/.test(password)) return say('密码要 4 到 64 个字符，可以使用汉字、字母、数字和符号。');
+    try {
+      await claimMember(id, loginId, password);
+      markOnboarded();
+      const house = currentHousehold();
+      closeWhoami();
+      render();
+      toast(`记下了：${house ? house.name : ''} · ${m.name}（${ROLE_LABEL[myRole()]}）`, 3200);
+      await loadState(true);
+      render();
+    } catch (e) {
+      say(e.message || '不对，再试一次');
+    }
+  },
+  'who-password-back'() {
+    S.whoamiPick = '';
+    S.whoamiStep = 'member';
+    renderWhoami();
+  },
+  'who-back'() {
+    openWhoami('house');
+  },
+  'who-apply'(el) {
+    closeWhoami();
+    openJoinSheet(el.dataset.id || S.householdId);
+  },
+  'who-skip'() {
+    markOnboarded();
+    closeWhoami();
+    toast('先随便看看。想认领身份，点右上角「还没登记」那个按钮', 3600);
   },
 
   /* 搜索 */
@@ -3696,6 +4688,38 @@ const ACTIONS = {
   },
 
   /* 菜单 */
+  'filter-scope'(el) {
+    S.dishScope = el.dataset.scope || 'all';
+    render();
+  },
+  /** 同名的私房版本，按名字列出来让人自己挑 */
+  'unfold-dish'(el) {
+    const d = dishById(el.dataset.id);
+    if (!d) return;
+    const twins = byScope(visibleDishes(), 'own').filter((x) => sameKey(x.name) === sameKey(d.name));
+    if (!twins.length) {
+      S.dishScope = 'own';
+      return render();
+    }
+    openSheet({
+      title: `「${d.name}」的私房版本`,
+      body: `<p class="section-sub" style="margin:0 0 12px">
+          共享里已有这道菜，默认显示共享那一版。这里是你家的 ${twins.length} 个版本，改成什么样只有你看得到。</p>
+        <div class="dup-list">${twins
+          .map(
+            (t) => `<button class="dup-row" data-act="open-dish" data-id="${esc(t.id)}">
+          <span class="dup-row-main">
+            <span class="dup-row-name">${esc(t.name)}</span>
+            <span class="dup-row-sub">${esc([t.authorName ? dishAuthor(t) : '', t.category, t.duration ? t.duration + ' 分钟' : ''].filter(Boolean).join(' · '))}</span>
+          </span>
+          <span class="dup-row-go">›</span>
+        </button>`
+          )
+          .join('')}</div>`,
+      foot: `<button class="btn ghost" data-act="filter-scope" data-scope="own">看我全部私房菜</button>
+             <button class="btn" data-act="close-sheet">知道了</button>`,
+    });
+  },
   'filter-cat'(el) {
     S.category = el.dataset.cat;
     render();
@@ -3858,10 +4882,10 @@ const ACTIONS = {
   async 'del-dish'(el) {
     const d = dishById(el.dataset.id);
     if (!d) return;
-    if (!canEdit(d)) return toast('这是公共菜谱，管理员才能删。想改成自己的版本，用「👇 收进我家」');
+    if (!canEdit(d)) return toast(denyWhy(d));
     if (!confirm(`确定删除「${d.name}」？\n相关的待做点餐也会一起删掉，此操作不可撤销。`)) return;
     const q = `?householdId=${encodeURIComponent(S.householdId)}`;
-    if (isAdmin()) await api('DELETE', `/api/dishes/${el.dataset.id}`);
+    if (!d.householdId || isHouseAdmin(d.householdId)) await api('DELETE', `/api/dishes/${el.dataset.id}`);
     else await api('DELETE', `/api/my-dishes/${el.dataset.id}${q}`);
     await loadState(true);
     toast('已删除');
@@ -3913,8 +4937,11 @@ const ACTIONS = {
   async 'save-dish'() {
     const d = collectDish();
     if (!d.name) return toast('先给这道菜起个名字吧');
-    // 管理员走 /api/dishes（有口令保护），家里人走 /api/my-dishes（只能写自家私菜）
-    const mine = !isAdmin();
+    // 新菜：能管共享就往共享里放，否则只能记成自家私菜。
+    // 改菜：本来是共享的、或我家我能当管理员的，走 /api/dishes；
+    //       普通成员改自己写的那几道，走 /api/my-dishes（服务端再验一遍作者）
+    const target = S.draft.isNew ? null : dishById(S.draft.id);
+    const mine = target ? !(!target.householdId || isHouseAdmin(target.householdId)) : !canWriteShared();
     const q = `?householdId=${encodeURIComponent(S.householdId)}`;
     try {
       if (S.draft.isNew) {
@@ -3925,9 +4952,7 @@ const ACTIONS = {
         // 否则下次「记一道菜」会捞出刚存进去的那份
         dishDrafts.delete('__new__');
       } else {
-        if (!canEdit(dishById(S.draft.id))) {
-          return toast('这道菜是公共菜谱，改不了。先「收进我家」再改');
-        }
+        if (!canEdit(target)) return toast(denyWhy(target));
         if (mine) await api('PUT', `/api/my-dishes/${S.draft.id}${q}`, d);
         else await api('PUT', `/api/dishes/${S.draft.id}`, d);
         toast('已保存');
@@ -3998,21 +5023,21 @@ const ACTIONS = {
     }
   },
   async 'set-status'(el) {
-    if (!isAdmin()) return toast('只有管理员能更新做饭状态');
+    if (!anyHouseAdmin()) return toast('只有管理员能更新做饭状态');
     await api('PATCH', `/api/orders/${el.dataset.id}`, { status: el.dataset.status });
     await loadState(true);
     toast(el.dataset.status === 'done' ? '开吃！🍚' : '开始做菜了');
     render();
   },
   async 'del-order'(el) {
-    if (!isAdmin()) return toast('只有管理员能删除点餐记录');
+    if (!anyHouseAdmin()) return toast('只有管理员能删除点餐记录');
     if (!confirm('删除这条点餐？')) return;
     await api('DELETE', `/api/orders/${el.dataset.id}`);
     await loadState(true);
     render();
   },
   async 'clear-done'() {
-    if (!isAdmin()) return toast('只有管理员能清空已完成记录');
+    if (!anyHouseAdmin()) return toast('只有管理员能清空已完成记录');
     const h = currentHousehold();
     if (!confirm(`清空「${h ? h.name : ''}」所有已完成的点餐记录？`)) return;
     await api('DELETE', `/api/orders/done?householdId=${encodeURIComponent(S.householdId)}`);
@@ -4039,6 +5064,21 @@ const ACTIONS = {
   'new-member'() {
     openMemberEditor(null);
   },
+  /** 家庭管理员从自己的那页进来管成员 */
+  'open-members'() {
+    const h = currentHousehold();
+    if (!isHouseAdmin(S.householdId)) return toast('只有这个家的管理员能管成员');
+    openSheet({
+      title: `${h ? h.name : ''}的成员`,
+      body: `<p class="section-sub" style="margin:0 0 12px">
+          每个成员自己设密码，别人拿到也冒充不了。改成员、重置密码要先确认身份。</p>
+        ${membersHtml()}
+        <p class="section-sub" style="margin-top:14px">
+          家里人可以发「🙋 申请加入家庭」，批了就会自动出现在这份名单里。</p>`,
+      foot: `<button class="btn ghost" data-act="close-sheet">关闭</button>
+             <button class="btn" data-act="new-member">＋ 添加成员</button>`,
+    });
+  },
   'edit-member'(el) {
     openMemberEditor(memberList().find((m) => m.id === el.dataset.id));
   },
@@ -4048,40 +5088,130 @@ const ACTIONS = {
       .querySelectorAll('.emoji-opt')
       .forEach((b) => b.classList.toggle('on', b.dataset.e === el.dataset.e));
   },
+  /** 成员权限：普通成员 / 管理员 */
+  'm-role'(el) {
+    el
+      .closest('.seg')
+      .querySelectorAll('.seg-opt')
+      .forEach((b) => {
+        const on = b.dataset.v === el.dataset.v;
+        b.classList.toggle('on', on);
+        b.setAttribute('aria-pressed', String(on));
+      });
+  },
+  /** 清掉成员密码：只是个标记，真正生效在 save-member */
+  'm-password-clear'() {
+    const box = $('#mPassword');
+    if (!box) return;
+    box.dataset.clear = '1';
+    box.placeholder = '保存后会清掉这个密码';
+  },
+  'm-pin-clear'() {
+    return ACTIONS['m-password-clear']();
+  },
   async 'save-member'(el) {
     const name = $('#mName').value.trim();
     if (!name) return toast('给家人起个称呼');
     const emoji = $('#mEmoji').value.trim() || '🙋';
-    const list = memberList().map((m) => ({ id: m.id, name: m.name, emoji: m.emoji }));
+    const loginId = ($('#mLoginId') ? $('#mLoginId').value : name).trim() || name;
+    if (loginId.length > 32) return toast('登录 ID 最多 32 个字符');
     const id = el.dataset.id;
-    const hit = list.find((m) => m.id === id);
-    if (hit) {
+    const existing = id ? memberList().find((m) => m.id === id) : null;
+    // 成员 id 是唯一键，名字只是显示 —— 爸爸和儿子都叫「小明」是允许的
+    const list = memberList().map((m) => ({
+      id: m.id,
+      name: m.name,
+      loginId: m.loginId || m.name,
+      emoji: m.emoji,
+      role: m.role,
+    }));
+    const seg = el.closest('.sheet').querySelector('.seg-opt.on');
+    const role = seg && seg.dataset.v === 'owner' ? 'owner' : 'member';
+    let hit;
+    if (existing) {
+      hit = list.find((m) => m.id === id);
       hit.name = name;
+      hit.loginId = loginId;
       hit.emoji = emoji;
+      hit.role = role;
     } else {
-      if (list.some((m) => m.name === name)) return toast(`已经有叫「${name}」的成员了`);
-      list.push({ id: 'm_' + Date.now().toString(36), name, emoji });
+      hit = { id: 'm_' + Date.now().toString(36), name, loginId, emoji, role };
+      list.push(hit);
     }
-    await saveMembers(list);
+    // 一个 owner 都不留的话，服务端会把第一个成员顶上去当管理员 —— 那是替用户做决定，
+    // 得先问一句，不然「取消最后一个管理员」会变成「静默换了个人当管理员」。
+    const owners = list.filter((m) => m.role === 'owner');
+    if (existing && existing.role === 'owner' && role !== 'owner' && owners.length === 0) {
+      return toast('这个家还没别的管理员。取消 TA 的话，剩下的成员里得有人接手。');
+    }
+    const passwordBox = $('#mPassword');
+    const password = (passwordBox ? passwordBox.value : '').trim();
+    const clearing = passwordBox && passwordBox.dataset.clear === '1';
+
     closeSheet();
-    toast(hit ? '已保存' : `已添加 ${name}`);
+    // 改成员名单是危险动作 → 先过一次身份验证
+    await withDangerPin(existing || { ...hit, hasPin: false }, '修改成员', async () => {
+      try {
+        await api('PUT', `/api/households/${currentHousehold().id}`, { members: list });
+      } catch (err) {
+        return toast('保存失败：' + err.message);
+      }
+      await loadState(true);
+      if (clearing || password) {
+        try {
+          await api('PUT', `/api/households/${currentHousehold().id}/member-password`, {
+            memberId: hit.id,
+            loginId,
+            ...(clearing ? { clearPassword: true } : { password }),
+          });
+          await loadState(true);
+          toast(
+            clearing
+              ? `「${name}」的密码清掉了，TA 下次打开要自己重设`
+              : `「${name}」的密码设好了，TA 的所有设备要重新登录`,
+            4200
+          );
+        } catch (err) {
+          // 名字已经存下来了，只是密码没改成 —— 说清楚是哪一半成功了
+          toast(`${err.message}（名字已经改好了）`, 5000);
+        }
+      } else {
+        toast(existing ? '已保存' : `已添加 ${name}`);
+      }
+      render();
+    });
   },
   async 'del-member'(el) {
     const m = memberList().find((x) => x.id === el.dataset.id);
     if (!m) return;
     const st = memberStats(m.name);
-    const msg = st.count
-      ? `删除成员「${m.name}」？\nTA 的 ${st.count} 条历史点餐记录会保留，但分组显示时不再带头像。`
-      : `删除成员「${m.name}」？`;
-    if (!confirm(msg)) return;
-    await saveMembers(
-      memberList()
-        .filter((x) => x.id !== el.dataset.id)
-        .map((x) => ({ id: x.id, name: x.name, emoji: x.emoji }))
-    );
-    if (S.memberFilter === m.name) S.memberFilter = '';
-    render();
-    toast('已删除');
+    const owned = scopeDishes().filter((d) => d.authorId === m.id).length;
+    const owners = memberList().filter((x) => x.role === 'owner');
+    let msg = '';
+    if (st.count) msg += `TA 的 ${st.count} 条历史点餐记录会保留，但分组显示时不再带头像。`;
+    if (owned) msg += `\n\nTA 写的 ${owned} 道私菜会变成「不知道谁写的」，之后谁都能改 —— 想留就先把菜转给别的成员。`;
+    if (m.role === 'owner' && owners.length === 1) msg += '\n\nTA 是这个家唯一的管理员，删了之后剩下的成员里没人能管这个家了。';
+    if (!confirm(`删除成员「${m.name}」？${msg}`)) return;
+    await withDangerPin(m, '删除成员', async () => {
+      try {
+        await saveMembers(
+          memberList()
+            .filter((x) => x.id !== m.id)
+            .map((x) => ({ id: x.id, name: x.name, emoji: x.emoji, role: x.role }))
+        );
+      } catch (e) {
+        return toast(e.message || '没删掉');
+      }
+      // 这台设备如果认的就是他 → 身份也一起清掉，别留着一个认不出来的身份
+      if (meMemberId() === m.id) {
+        forgetMeId();
+        setDeviceToken(S.householdId, '');
+        markOnboarded();
+      }
+      if (S.memberFilter === m.name) S.memberFilter = '';
+      render();
+      toast('已删除');
+    });
   },
 
   /* 分类 */
@@ -4095,7 +5225,10 @@ const ACTIONS = {
     const name = $('#catName').value.trim();
     if (!name) return toast('给分类起个名字');
     const id = el.dataset.id;
-    const mine = !isAdmin();
+    const cur = id ? S.data.categories.find((c) => c.id === id) : null;
+    // 分类没有作者，只有归属。所以规则简单：共享的归管理员，
+    // 自家的只认这家管理员（普通成员开出来的分类自己也改不了，那是全家的分类）。
+    const mine = cur ? !(!cur.householdId || isHouseAdmin(cur.householdId)) : !canWriteShared();
     const sel = $('#catScope');
     const body = {
       name,
@@ -4120,7 +5253,7 @@ const ACTIONS = {
   async 'del-cat'(el) {
     const c = S.data.categories.find((x) => x.id === el.dataset.id);
     if (!c) return;
-    if (!canEdit(c)) return toast('这是公共分类，管理员才能改');
+    if (!canEdit(c)) return toast(denyWhy(c));
     // 只数本家看得见的菜：服务端也只把同归属的菜挪走，提示得跟实际发生的一致
     const n = scopeDishes().filter((x) => x.category === c.name).length;
     const msg = n
@@ -4128,7 +5261,7 @@ const ACTIONS = {
       : `删除分类「${c.name}」？`;
     if (!confirm(msg)) return;
     const q = `?householdId=${encodeURIComponent(S.householdId)}`;
-    if (isAdmin()) await api('DELETE', `/api/categories/${el.dataset.id}`);
+    if (!c.householdId || isHouseAdmin(c.householdId)) await api('DELETE', `/api/categories/${el.dataset.id}`);
     else await api('DELETE', `/api/my-categories/${el.dataset.id}${q}`);
     if (S.category === c.name) S.category = '全部';
     await loadState(true);
@@ -4143,8 +5276,11 @@ const ACTIONS = {
     const id = el.dataset.id;
     if (id === S.householdId) return;
     const h = households().find((x) => x.id === id);
-    // 家里人不能直接切进别人家 —— 得管理员批了才算成员
-    if (h && !isAdmin() && !(h.members || []).some((m) => m.name === meName())) {
+    // 家里人不能直接切进别人家 —— 得管理员批了才算成员。
+    // 成员 id 各家一份，所以要比「我在这家认领过没有」，不能只比当前这家的。
+    const myId = meMemberId();
+    const isMemberThere = (x) => !!(myId && (x.members || []).some((m) => m.id === myId));
+    if (h && !anyHouseAdmin() && !isMemberThere(h)) {
       return openJoinSheet(id);
     }
     S.householdId = id;
@@ -4156,30 +5292,39 @@ const ACTIONS = {
     S.pantryFilter = 'all';
     S.category = '全部';
     closeSheet();
-    if (!isAdmin()) await loadState(true);
+    if (!isSuper()) await loadState(true);
     render();
     const now = currentHousehold();
     if (now) toast(`已切到 ${now.emoji} ${now.name}`);
   },
   'new-household'() {
     // 增删改家庭是管理员的活：家里人说「应用里的东西随便改」就没意义了
-    if (!isAdmin()) return toast('添加/删除家庭要管理员口令');
+    if (!anyHouseAdmin()) return toast('添加/删除家庭要管理员口令');
     openHouseholdEditor(null);
   },
   /** 申请加入别人家 */
   async 'send-join'(el) {
     const name = ($('#joinName') || {}).value?.trim();
     if (!name) return toast('先写上你是谁');
+    // 申请是发给**别家**的，所以切过去再记这个名字 —— 记在当前家名下是错的
+    const target = el.dataset.id || S.householdId;
+    if (target !== S.householdId) {
+      S.householdId = target;
+      localStorage.setItem(LS_HOUSE, target);
+    }
     try {
       const r = await api('POST', '/api/join-requests', {
         name,
-        householdId: el.dataset.id,
+        householdId: target,
         note: (($('#joinNote') || {}).value || '').trim(),
       });
-      rememberMeName(name);
+      // 还没批下来，所以还不是成员、没有成员 id 可认 —— 先记着名字，
+      // 顶栏就能显示「姑姑（等批准）」而不是「还没登记」
+      rememberPendingName(name);
       S.access = S.access || [];
       if (!S.access.some((x) => x.id === r.data.id)) S.access.unshift(r.data);
       closeSheet();
+      await loadState(true);
       render();
       toast('申请已送到管理员那里，等他点头', 3200);
     } catch (err) {
@@ -4218,6 +5363,41 @@ const ACTIONS = {
       HOUSE_EMOJI[households().length % HOUSE_EMOJI.length];
     const body = { name, emoji, note: $('#hNote').value.trim() };
     const id = el.dataset.id;
+    const target = id ? households().find((x) => x.id === id) : null;
+    const pinBox = $('#hPin');
+    const pin = pinBox ? pinBox.value.trim() : '';
+    const clearPin = ($('#hPinClear') || {}).checked === true;
+    const sensitive = id && (pin || clearPin);
+
+    // 改这个家之前先确认身份：不管改的是名字还是口令，
+    // 服务端都要求「你是这一家的管理员」，所以这一步是两种改法共用的。
+    if (target && !isHouseAdmin(id, memberOf(id))) {
+      const ok = await askSensitiveAuth(target, '修改家庭设置', memberOf(id));
+      if (!ok) return;
+    }
+
+    // 家庭口令是危险动作，单独一次提交 —— 名字和图标改坏了不该连累口令一起没改成
+    if (sensitive) {
+    if (pin && !/^\S{4,12}$/.test(pin)) return toast('家庭口令要 4 到 12 个字符');
+      // 先把无害的字段存掉，再改口令 —— 反过来的话，用户输错口令会把名字也一起丢掉
+      try {
+        await api('PUT', `/api/households/${id}`, body);
+      } catch (err) {
+        return toast('保存失败：' + err.message);
+      }
+      try {
+        await api('PUT', `/api/households/${id}`, clearPin ? { clearPin: true } : { pin });
+        setHouseToken(id, ''); // 旧会话作废了，本机那把也清掉
+      } catch (err) {
+        await loadState(true);
+        render();
+        return toast(`${err.message}（名字已经改好了）`, 5000);
+      }
+      closeSheet();
+      await loadState(true);
+      render();
+      return toast(clearPin ? '已取消家庭口令' : '已更新家庭口令', 3600);
+    }
     const saved = await (id
       ? api('PUT', `/api/households/${id}`, body)
       : api('POST', '/api/households', body));
@@ -4228,11 +5408,48 @@ const ACTIONS = {
       localStorage.setItem(LS_HOUSE, saved.id);
       S.memberFilter = '';
       render();
-      toast(`已添加 ${saved.name}`);
+      toast(`已添加 ${saved.name}（普通家庭，等超级管理员启用）`, 4200);
     } else {
       render();
       toast('已保存');
     }
+  },
+  /** 超级管理员：把普通家庭升级为正式 */
+  async 'approve-household'(el) {
+    if (!isSuper()) return toast('只有超级管理员能升级家庭');
+    await withDangerPin(null, '升级家庭为正式', async () => {
+      try {
+        await api('PUT', `/api/households/${el.dataset.id}`, { status: 'approved' });
+      } catch (e) {
+        return toast(e.message || '没升级成');
+      }
+      closeSheet();
+      await loadState(true);
+      render();
+      toast('已升级为正式家庭');
+    });
+  },
+  async 'downgrade-household'(el) {
+    if (!isSuper()) return toast('只有超级管理员能改家庭状态');
+    if (!confirm('降回普通家庭？这一家之后就不能往共享菜单放东西了。')) return;
+    try {
+      await api('PUT', `/api/households/${el.dataset.id}`, { status: 'normal' });
+    } catch (err) {
+      return toast(err.message || '没改成');
+    }
+    await loadState(true);
+    render();
+    toast('已降为普通家庭');
+  },
+  /** 用家庭口令解锁这个家的管理员权限 */
+  async 'unlock-house'() {
+    const h = currentHousehold();
+    if (!h) return;
+    const r = await askHousePin(h, '解锁家庭管理员权限');
+    if (!r) return;
+    await loadState(true);
+    render();
+    toast(`已解锁「${h.name}」的管理员权限`, 3200);
   },
   async 'del-household'(el) {
     const h = households().find((x) => x.id === el.dataset.id);
@@ -4249,15 +5466,24 @@ const ACTIONS = {
     // 共享菜不在其中：它们是全体家庭的，换一家照样看得到
     const extra = mine.length ? `\n只有「${h.name}」能看到的 ${mine.join('、')}会一起删掉，` : '';
     if (!confirm(`删除家庭「${h.name}」？${extra}删了找不回来。`)) return;
-    await api('DELETE', `/api/households/${h.id}`);
-    if (S.householdId === h.id) {
-      S.householdId = '';
-      localStorage.removeItem(LS_HOUSE);
-      S.memberFilter = '';
-    }
-    await loadState(true);
-    render();
-    toast('已删除');
+    // 删家庭是这套权限里最危险的一步 —— 没有比「抹掉一整家人的数据」更大的事了
+    await withDangerPin(meMember(), '删除家庭', async () => {
+      try {
+        await api('DELETE', `/api/households/${h.id}`);
+      } catch (err) {
+        return toast(err.message || '没删掉');
+      }
+      setDeviceToken(h.id, '');
+      setHouseToken(h.id, '');
+      if (S.householdId === h.id) {
+        S.householdId = '';
+        localStorage.removeItem(LS_HOUSE);
+        S.memberFilter = '';
+      }
+      await loadState(true);
+      render();
+      toast('已删除');
+    });
   },
 
   /* 本周计划 */
@@ -4496,15 +5722,20 @@ const ACTIONS = {
         .map((x) => dishById(x))
         .filter((d) => d && canEdit(d));
       const skipped = ids.length - targets.length;
-      if (!targets.length) return toast('选中的都是公共菜谱，管理员才能删');
+      if (!targets.length) return toast(denyWhy(ids.map((x) => dishById(x)).find(Boolean)));
       const preview = pickPreview(targets.map((d) => d.name), '道');
       if (!confirm(`删掉 ${preview}？相关的点餐和计划里的这道菜也会一起去掉。`)) return;
-      if (isAdmin()) {
-        for (const d of targets) await api('DELETE', `/api/dishes/${encodeURIComponent(d.id)}`);
-      } else {
+      // 分两拨：走裸接口的是共享的 + 我家我能当管理员的；剩下的是普通成员自己的私菜。
+      // 服务端的两端守卫一样，分开走只是为了少传一堆用不上的 householdId。
+      const plain = targets.filter((d) => !d.householdId || isHouseAdmin(d.householdId));
+      const mineOnly = targets.filter((d) => d.householdId && !isHouseAdmin(d.householdId));
+      if (plain.length) {
+        for (const d of plain) await api('DELETE', `/api/dishes/${encodeURIComponent(d.id)}`);
+      }
+      if (mineOnly.length) {
         await api(
           'DELETE',
-          `/api/my-dishes?householdId=${encodeURIComponent(S.householdId)}&ids=${targets
+          `/api/my-dishes?householdId=${encodeURIComponent(S.householdId)}&ids=${mineOnly
             .map((d) => encodeURIComponent(d.id))
             .join(',')}`
         );
@@ -4514,7 +5745,7 @@ const ACTIONS = {
       if (!scopeDishes().length) S.pick = '';
       render();
       toast(
-        `已删掉 ${targets.length} 道菜` + (skipped ? `，${skipped} 道公共菜谱原样留着（管理员才能删）` : '')
+        `已删掉 ${targets.length} 道菜` + (skipped ? `，${skipped} 道不是你能改的，原样留着` : '')
       );
       return;
     }
@@ -4535,9 +5766,25 @@ const ACTIONS = {
 
   /* ---- 留言板 / 菜品互动 ---- */
 
+  /**
+   * 留言栏里换身份。
+   *
+   * 这台设备已经认过人了 → 直接切，不打扰。
+   * 没认过 → 走一次完整认证：不能因为「在留言栏点了一下」就变成那个人。
+   */
   'note-me'(el) {
-    rememberMeName(el.dataset.name || '');
-    render();
+    const id = el.dataset.id;
+    const m = memberById(id);
+    if (!m) return;
+    if (meMemberId() === id && deviceToken(S.householdId)) {
+      S.whoamiFrom = 'note';
+      render();
+      return;
+    }
+    S.whoamiPick = id;
+    S.whoamiFrom = 'note';
+    S.whoamiStep = 'pin';
+    renderWhoami();
   },
 
   'note-sticker'(el) {
@@ -4817,7 +6064,7 @@ const ACTIONS = {
         }
         if (key === 'dishes' && !sortedCategories().some((c) => c.name === cat)) {
           // 家里人开的新分类只能是自己的私有分类
-          if (isAdmin()) await api('POST', '/api/categories', { name: cat });
+          if (canWriteShared()) await api('POST', '/api/categories', { name: cat });
           else await api('POST', `/api/my-categories?householdId=${encodeURIComponent(S.householdId)}`, { name: cat });
         }
         await loadState(true);
@@ -4934,7 +6181,7 @@ const ACTIONS = {
   /* ---- 点餐批量 ---- */
 
   async 'batch-status'(el) {
-    if (!isAdmin()) return toast('只有管理员能更新做饭状态');
+    if (!anyHouseAdmin()) return toast('只有管理员能更新做饭状态');
     const ids = pickIds('orders');
     if (!ids.length) return toast('先勾几条');
     const status = el.dataset.status;
@@ -4950,7 +6197,7 @@ const ACTIONS = {
   /* ---- 点餐一键开做 ---- */
 
   async 'start-all'() {
-    if (!isAdmin()) return toast('只有管理员能更新做饭状态');
+    if (!anyHouseAdmin()) return toast('只有管理员能更新做饭状态');
     const list = pendingOrders().filter((o) => o.status === 'pending');
     if (!list.length) return toast('没有待做的菜了');
     const names = [...new Set(list.map((o) => o.dishName))];
@@ -5017,7 +6264,7 @@ const ACTIONS = {
   /* 设置 */
   'edit-settings'() {
     // 店名、口令、AI 配置这些是管理员的活
-    if (!isAdmin()) return toast('服务设置要管理员口令');
+    if (!isSuper()) return toast('服务设置要超级管理员口令');
     openSettings();
   },
   async 'save-settings'() {
@@ -5154,7 +6401,7 @@ const ACTIONS = {
 function promptPin() {
   openSheet({
     title: '请输入管理口令',
-    body: `<input class="input" id="pinInput" type="password" inputmode="numeric" placeholder="口令" />`,
+    body: `<input class="input" id="pinInput" type="password" placeholder="输入管理口令" />`,
     foot: `<button class="btn ghost" data-act="close-sheet">取消</button>
            <button class="btn" data-act="check-pin">进入</button>`,
   });
@@ -5180,6 +6427,36 @@ ACTIONS['check-pin'] = async function () {
   }
 };
 
+/* 危险动作的密码弹层：问家庭口令还是问成员密码，由 askSensitiveAuth 决定。
+   注册放在这里 —— ACTIONS 是 const，声明之前写 ACTIONS[...] 会踩 TDZ。 */
+ACTIONS['danger-pin-ok'] = async function () {
+  const el = $('#dangerPin');
+  const err = $('#dangerErr');
+  const onOk = pendingPinOnOk;
+  const fail = (t) => {
+    if (err) {
+      err.hidden = false;
+      err.textContent = t;
+    }
+    if (el) {
+      el.value = '';
+      el.focus();
+    }
+  };
+  const pin = (el ? el.value : '').trim();
+  if (!pin) return fail('先输一下密码。');
+  try {
+    await onOk(pin);
+  } catch (e) {
+    // 输错了就把弹层留着继续试 —— 直接关掉等于让用户重新走一遍成员列表
+    return fail(e.message || '密码不对');
+  }
+  const done = typeof pendingPinCheck === 'function' ? pendingPinCheck : null;
+  clearPinCheck();
+  closeSheet();
+  if (done) done(true);
+};
+
 /* 事件绑定 */
 document.addEventListener('click', (e) => {
   // 菜品卡片整块是「打开做法」，互动条是压在上面的。
@@ -5191,6 +6468,15 @@ document.addEventListener('click', (e) => {
   if (!fn) return;
   e.preventDefault();
   Promise.resolve(fn(el)).catch((err) => toast('出错了：' + err.message));
+});
+
+/* 身份向导密码框里回车 = 提交。密码是要手打的东西，让用户输完还得挪到鼠标上点按钮很别扭。 */
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || e.target.id !== 'whoPassword') return;
+  e.preventDefault();
+  Promise.resolve(ACTIONS['who-password']({ dataset: { id: S.whoamiPick } })).catch((err) =>
+    toast('出错了：' + err.message)
+  );
 });
 
 /* 编辑器里的输入同步 */
