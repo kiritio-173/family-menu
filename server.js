@@ -41,10 +41,22 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.10.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.10.0',
+    date: '2026-10-16',
+    title: '管理员与普通用户工作区优化',
+    items: [
+      '普通用户进入「我的私菜」工作区，只能维护当前家庭的私有菜谱和分类',
+      '普通用户可以点餐、库存、计划和留言，但只能查看做饭状态；开做、完成和删除点餐由管理员处理',
+      '管理员解锁后维护共享菜单、家庭、成员、设置、备份和 AI',
+      '普通用户状态接口按当前家庭过滤，并补齐加入申请状态',
+      '当前家庭和当前成员选择会保存在本机浏览器中',
+    ],
+  },
   {
     version: '1.9.0',
     date: '2026-10-16',
@@ -1842,6 +1854,8 @@ async function handleAPI(req, res, url) {
     route[0] === 'export' ||
     route[0] === 'backups' ||
     route[0] === 'ai' ||
+    // 普通用户可以提交点餐，但不能改做饭状态、删除点餐或清空已完成记录。
+    (route[0] === 'orders' && method !== 'GET' && !(method === 'POST' && !route[1])) ||
     // 加入申请：提交谁都能做（人总得有个申请入口），批准/拒绝是管理员的活
     (route[0] === 'join-requests' && method !== 'GET' && !!route[1]) ||
     (method !== 'GET' && method !== 'HEAD' && ADMIN_WRITES.has(route[0]));
@@ -1987,17 +2001,53 @@ async function handleAPI(req, res, url) {
     // 口令绝不能跟着 state 一起发出去：否则局域网里任何人按 F12
     // 就能在返回的 JSON 里读到明文，管理口令形同虚设。
     const { adminPin, ...pubSettings } = state.settings;
+    const requestedHouseholdId = safeText(url.searchParams.get('householdId'), 40);
+    const requestedHousehold = state.households.find((h) => h.id === requestedHouseholdId);
+    const visibleHouseholdId = requestedHousehold
+      ? requestedHousehold.id
+      : state.households[0]
+      ? state.households[0].id
+      : '';
+    // 没设口令时仍是兼容旧版本的开放模式；设了口令后，只有有效会话能看全量状态。
+    const fullState = !adminPin || isAuthed(req);
+    const visibleDishes = fullState
+      ? state.dishes
+      : state.dishes.filter((d) => !d.householdId || d.householdId === visibleHouseholdId);
+    const visibleDishIds = new Set(visibleDishes.map((d) => d.id));
+    const visibleCategories = fullState
+      ? state.categories
+      : state.categories.filter((c) => !c.householdId || c.householdId === visibleHouseholdId);
+    const visibleNotes = fullState
+      ? state.notes.notes
+      : state.notes.notes.filter((n) => n.householdId === visibleHouseholdId);
+    const visibleVotes = fullState
+      ? state.notes.votes
+      : Object.fromEntries(
+          Object.entries(state.notes.votes).filter(([dishId]) => visibleDishIds.has(dishId))
+        );
+    const visibleAccess = fullState
+      ? state.access.requests
+      : state.access.requests.filter(
+          (r) => r.name === safeText(url.searchParams.get('memberName'), 20).trim()
+        );
     return sendJSON(res, 200, {
       ok: true,
       data: {
-        categories: state.categories,
-        dishes: state.dishes,
-        orders: state.orders,
+        categories: visibleCategories,
+        dishes: visibleDishes,
+        orders: fullState
+          ? state.orders
+          : state.orders.filter((o) => o.householdId === visibleHouseholdId),
         settings: { ...pubSettings, hasPin: !!adminPin },
         households: state.households,
-        pantry: state.pantry,
-        plans: state.plans,
-        notes: state.notes,
+        pantry: fullState
+          ? state.pantry
+          : state.pantry.filter((p) => p.householdId === visibleHouseholdId),
+        plans: fullState
+          ? state.plans
+          : state.plans.filter((p) => p.householdId === visibleHouseholdId),
+        notes: { notes: visibleNotes, votes: visibleVotes },
+        access: { requests: visibleAccess },
       },
     });
   }
@@ -2026,7 +2076,12 @@ async function handleAPI(req, res, url) {
     const body = method !== 'GET' ? await readBody(req) : {};
 
     if (method === 'GET') {
-      return sendJSON(res, 200, { ok: true, data: state.access.requests });
+      const fullAccess = !state.settings.adminPin || isAuthed(req);
+      const memberName = safeText(url.searchParams.get('memberName'), 20).trim();
+      const requests = fullAccess
+        ? state.access.requests
+        : state.access.requests.filter((r) => r.name === memberName);
+      return sendJSON(res, 200, { ok: true, data: requests });
     }
 
     if (method === 'POST' && !id) {

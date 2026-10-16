@@ -1422,7 +1422,7 @@ async function main() {
   eq('碰不到别人家的私菜',
     (await put('/api/my-dishes/' + bDishX.id + '?householdId=' + hhA, { name: '偷改' })).status, 403);
   eq('B 家私菜没被改',
-    (await get('/api/state')).body.data.dishes.find((d) => d.id === bDishX.id).name, 'B 家私菜');
+    (await get('/api/state', tokX)).body.data.dishes.find((d) => d.id === bDishX.id).name, 'B 家私菜');
 
   // 收进我家：公共菜谱上普通人唯一的正当途径
   const adopted = await post('/api/my-dishes/' + ppDish.id + '/adopt?householdId=' + hhA, {});
@@ -1453,6 +1453,33 @@ async function main() {
   eq('删自家私有分类，本家的私菜挪到「其他」',
     after.dishes.find((d) => d.id === mwDish2B.id).category, '其他');
   eq('公共菜一点没动', after.dishes.find((d) => d.id === ppDish.id).category, ppCat);
+
+  // ---- 普通用户状态范围与做饭状态 ----
+  const joinReq = await post('/api/join-requests', {
+    name: '申请人',
+    householdId: hhB,
+    note: '测试申请',
+  });
+  eq('加入申请普通用户可以提交', joinReq.status, 200);
+  const scoped = (await get(`/api/state?householdId=${encodeURIComponent(hhA)}&memberName=申请人`)).body.data;
+  ok('普通用户状态带 access', scoped.access && Array.isArray(scoped.access.requests), scoped.access);
+  eq('普通用户看不到别家私菜', scoped.dishes.some((d) => d.id === bDishX.id), false);
+  eq('普通用户看不到别家点餐', scoped.orders.some((o) => o.householdId === hhB), false);
+  eq('普通用户能看到自己的申请', scoped.access.requests.some((r) => r.id === joinReq.body.data.id), true);
+  const full = (await get('/api/state', tokX)).body.data;
+  eq('管理员状态能看到别家私菜', full.dishes.some((d) => d.id === bDishX.id), true);
+  const cookingOrder = (await post('/api/orders', {
+    householdId: hhA,
+    dishName: '管理员状态测试菜',
+    requester: '申请人',
+  })).body.data;
+  eq('普通用户仍能提交点餐', cookingOrder && cookingOrder.id ? 200 : 500, 200);
+  eq('普通用户不能开做',
+    (await req('PATCH', `/api/orders/${cookingOrder.id}`, { status: 'cooking' })).status, 401);
+  eq('普通用户不能删除点餐', (await del(`/api/orders/${cookingOrder.id}`)).status, 401);
+  eq('管理员能开做',
+    (await req('PATCH', `/api/orders/${cookingOrder.id}`, { status: 'cooking' }, tokX)).status, 200);
+  eq('管理员能删除点餐', (await del(`/api/orders/${cookingOrder.id}`, tokX)).status, 200);
 
   await stop(permInst);
 

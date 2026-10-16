@@ -46,6 +46,7 @@ const S = {
 /** 老的 households.json 还没建时，历史数据都落在 h_home 上 */
 const FALLBACK_HOUSE = 'h_home';
 const LS_HOUSE = 'familyMenu.householdId';
+const LS_MEMBER = 'familyMenu.memberNames';
 
 /* ---------------- 工具 ---------------- */
 
@@ -355,9 +356,37 @@ function dishVote(dishId) {
 }
 
 /** 「我是谁」：默认跟着当前家庭的第一个成员走 */
+function memberSelections() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_MEMBER) || '{}');
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function rememberMeName(name) {
+  const next = String(name || '').trim();
+  if (!next) return;
+  S.meName = next;
+  const map = memberSelections();
+  if (S.householdId) map[S.householdId] = next;
+  localStorage.setItem(LS_MEMBER, JSON.stringify(map));
+}
+
 function meName() {
   const list = memberList();
-  if (!list.some((m) => m.name === S.meName)) S.meName = list.length ? list[0].name : '我';
+  const saved = S.householdId ? memberSelections()[S.householdId] : '';
+  const wanted = saved || S.meName;
+  if (list.some((m) => m.name === wanted)) S.meName = wanted;
+  else S.meName = list.length ? list[0].name : '我';
+  if (S.householdId && S.meName) {
+    const map = memberSelections();
+    if (map[S.householdId] !== S.meName) {
+      map[S.householdId] = S.meName;
+      localStorage.setItem(LS_MEMBER, JSON.stringify(map));
+    }
+  }
   return S.meName;
 }
 
@@ -423,6 +452,10 @@ async function loadBackups() {
  * 绝不让 AI 的问题影响到菜谱/点餐这些主流程。
  */
 async function askAI(task, prompt, imageUrl) {
+  if (!isAdmin()) {
+    toast('AI 助手由管理员使用');
+    return null;
+  }
   if (!aiReady()) {
     toast('还没配置 AI（data/ai.json 里填 API Key）');
     return null;
@@ -534,7 +567,13 @@ async function api(method, path, body, rawContentType) {
 
 async function loadState(silent) {
   try {
-    const data = await api('GET', '/api/state');
+    // 普通用户只请求当前家庭的数据；管理员会话由服务端自动返回全量状态。
+    const savedHouse = localStorage.getItem(LS_HOUSE) || '';
+    const savedMember = savedHouse ? memberSelections()[savedHouse] || '' : '';
+    const query = new URLSearchParams();
+    if (savedHouse) query.set('householdId', savedHouse);
+    if (savedMember) query.set('memberName', savedMember);
+    const data = await api('GET', `/api/state${query.toString() ? '?' + query.toString() : ''}`);
     S.data = data;
     S.shoppingChecked = new Set(data.settings.shoppingChecked || []);
     S.access = data.access && Array.isArray(data.access.requests) ? data.access.requests : [];
@@ -543,13 +582,13 @@ async function loadState(silent) {
     else if (!authToken()) S.authed = false;
     // 当前家庭记在这台设备上：A 家选 301、B 家选 502，互不影响
     const list = households();
-    const saved = localStorage.getItem(LS_HOUSE);
-    if (saved && list.some((h) => h.id === saved)) S.householdId = saved;
+    if (savedHouse && list.some((h) => h.id === savedHouse)) S.householdId = savedHouse;
     else S.householdId = (list[0] && list[0].id) || '';
-    if (S.householdId !== saved) {
+    if (S.householdId !== savedHouse) {
       if (S.householdId) localStorage.setItem(LS_HOUSE, S.householdId);
       else localStorage.removeItem(LS_HOUSE);
     }
+    meName();
     S.loading = false;
     if (!silent) render();
   } catch (err) {
@@ -1374,7 +1413,9 @@ function orderItem(o) {
     : (d ? dishEmoji(d.name) : '✍️');
 
   let actions = '';
-  if (o.status === 'pending') {
+  if (!isAdmin()) {
+    actions = '<span class="section-sub">管理员更新状态</span>';
+  } else if (o.status === 'pending') {
     actions = `<button class="btn soft sm" data-act="set-status" data-id="${esc(o.id)}" data-status="cooking">开做</button>`;
   } else if (o.status === 'cooking') {
     actions = `<button class="btn green sm" data-act="set-status" data-id="${esc(o.id)}" data-status="done">完成</button>`;
@@ -1584,6 +1625,7 @@ function viewOrder() {
   const all = householdOrders();
   const today = todayStr();
   const house = currentHousehold();
+  const admin = isAdmin();
 
   const tabs = [
     ['pending', '待做 ' + all.filter((o) => o.status === 'pending').length],
@@ -1645,12 +1687,12 @@ function viewOrder() {
       <h2 class="section-title">点餐单</h2>
       <span class="section-sub">${esc(house ? house.emoji + ' ' + house.name : '点餐单')} · ${today}</span>
       ${
-        S.orderStatus === 'done' && doneCount
+        admin && S.orderStatus === 'done' && doneCount
           ? `<button class="btn ghost sm" style="margin-left:auto" data-act="clear-done">清空已完成</button>`
           : ''
       }
       ${
-        pendingCount
+        admin && pendingCount
           ? `<button class="btn green sm" style="margin-left:${
               S.orderStatus === 'done' && doneCount ? '8px' : 'auto'
             }"
@@ -1658,7 +1700,7 @@ function viewOrder() {
           : ''
       }
       ${
-        aiReady() && pendingOrders().length >= 2
+        admin && aiReady() && pendingOrders().length >= 2
           ? `<button class="btn soft sm" style="margin-left:${
               S.orderStatus === 'done' && doneCount || pendingCount ? '8px' : 'auto'
             }"
@@ -1667,9 +1709,10 @@ function viewOrder() {
       }
     </div>
     <div class="status-tabs">${tabs}</div>
+    ${!admin ? '<p class="section-sub" style="margin:10px 0 0">点餐由全家提交，做饭状态由管理员统一更新。</p>' : ''}
     ${memberFilterHtml}
     ${
-      picking('orders')
+      admin && picking('orders')
         ? pickBarHtml(
             'orders',
             list.map((o) => o.id),
@@ -1683,7 +1726,7 @@ function viewOrder() {
               { act: 'pick-delete', cls: 'danger', label: '🗑 删除' },
             ].filter(Boolean)
           )
-        : list.length
+        : admin && list.length
         ? `<div class="list-toolbar">
              <span class="section-sub">${S.groupByMember ? '按家人分组' : '按时间排序'}</span>
              ${pickOnBtn('orders', '☑ 批量操作')}
@@ -1694,7 +1737,7 @@ function viewOrder() {
         : ''
     }
     ${listHtml}
-    ${S.pick === 'orders' ? '' : '<button class="fab" data-act="new-order">＋ 我要点餐</button>'}`;
+    ${admin && S.pick === 'orders' ? '' : '<button class="fab" data-act="new-order">＋ 我要点餐</button>'}`;
 }
 
 /** 按点餐人分组：一眼看清谁要吃什么、共几份 */
@@ -1755,7 +1798,7 @@ function openOrderForm(dish) {
     dishId: d ? d.id : null,
     dishName: d ? d.name : '',
     householdId: S.householdId,
-    requester: members[0] ? members[0].name : '',
+    requester: meName(),
     people: 2,
     note: '',
   };
@@ -2592,14 +2635,11 @@ function viewManageMember() {
         : ''
     }
 
-    <div class="section-head"><h2 class="section-title">关于</h2></div>
-    ${versionHtml()}
-
-    <div class="section-head"><h2 class="section-title">家庭设置</h2></div>
+    <div class="section-head"><h2 class="section-title">管理员入口</h2></div>
     <div class="list-row"><span class="icon-mini">🔐</span><span class="list-row-main">
-      <span class="list-row-title">管理口令</span>
-      <span class="list-row-sub">已开启 · 你现在没解锁。点右上角锁图标可用口令进入管理员模式</span>
-    </span><button class="icon-mini" data-act="unlock">🔓</button></div>`;
+      <span class="list-row-title">共享菜单与家庭设置</span>
+      <span class="list-row-sub">共享菜谱、成员、做饭状态和系统设置由管理员维护</span>
+    </span><button class="btn ghost sm" data-act="unlock">输入管理口令</button></div>`;
 }
 
 function viewManage() {
@@ -2991,7 +3031,7 @@ function openDishEditor(dish) {
           </label>
         </div>
         ${
-          aiReady()
+          admin && aiReady()
             ? `<div style="display:flex;gap:8px;margin-top:10px">
                  <label class="btn soft sm ai-btn" style="flex:1">
                    📷 拍张照，AI 帮我写这道菜
@@ -3060,7 +3100,7 @@ function openDishEditor(dish) {
         <textarea class="textarea" id="fNotes" placeholder="例如：花生一定最后放，久炒会软">${esc(d.notes)}</textarea>
       </div>
       ${
-        aiReady()
+        admin && aiReady()
           ? `<button class="btn soft sm ai-btn" data-act="ai-normalize" style="margin:4px 0 16px">
                🧹 让 AI 把这份菜谱整理规范（用量、步骤格式）
              </button>`
@@ -3434,6 +3474,16 @@ function render() {
 
   renderHouseBtn();
 
+  const manageTab = document.querySelector('.tab[data-view="manage"]');
+  if (manageTab) {
+    const admin = isAdmin();
+    const icon = manageTab.querySelector('.tab-icon');
+    const label = manageTab.querySelector('.tab-label');
+    if (icon) icon.textContent = admin ? '🧺' : '🥣';
+    if (label) label.textContent = admin ? '管理' : '我的私菜';
+    manageTab.title = admin ? '家庭管理' : '维护我家私菜';
+  }
+
   document.querySelectorAll('.tab').forEach((t) => {
     const on = t.dataset.view === S.view;
     t.setAttribute('aria-current', on ? 'page' : 'false');
@@ -3618,8 +3668,8 @@ const ACTIONS = {
     const v = el.dataset.view;
     if (v === 'manage' && S.data.settings.hasPin && !S.authed) {
       S.view = 'manage';
+      closeSheet();
       render();
-      promptPin();
       return;
     }
     S.view = v;
@@ -3948,18 +3998,21 @@ const ACTIONS = {
     }
   },
   async 'set-status'(el) {
+    if (!isAdmin()) return toast('只有管理员能更新做饭状态');
     await api('PATCH', `/api/orders/${el.dataset.id}`, { status: el.dataset.status });
     await loadState(true);
     toast(el.dataset.status === 'done' ? '开吃！🍚' : '开始做菜了');
     render();
   },
   async 'del-order'(el) {
+    if (!isAdmin()) return toast('只有管理员能删除点餐记录');
     if (!confirm('删除这条点餐？')) return;
     await api('DELETE', `/api/orders/${el.dataset.id}`);
     await loadState(true);
     render();
   },
   async 'clear-done'() {
+    if (!isAdmin()) return toast('只有管理员能清空已完成记录');
     const h = currentHousehold();
     if (!confirm(`清空「${h ? h.name : ''}」所有已完成的点餐记录？`)) return;
     await api('DELETE', `/api/orders/done?householdId=${encodeURIComponent(S.householdId)}`);
@@ -4086,7 +4139,7 @@ const ACTIONS = {
   'open-houses'() {
     openHouseholdPicker();
   },
-  'pick-house'(el) {
+  async 'pick-house'(el) {
     const id = el.dataset.id;
     if (id === S.householdId) return;
     const h = households().find((x) => x.id === id);
@@ -4103,6 +4156,7 @@ const ACTIONS = {
     S.pantryFilter = 'all';
     S.category = '全部';
     closeSheet();
+    if (!isAdmin()) await loadState(true);
     render();
     const now = currentHousehold();
     if (now) toast(`已切到 ${now.emoji} ${now.name}`);
@@ -4122,7 +4176,7 @@ const ACTIONS = {
         householdId: el.dataset.id,
         note: (($('#joinNote') || {}).value || '').trim(),
       });
-      S.meName = name;
+      rememberMeName(name);
       S.access = S.access || [];
       if (!S.access.some((x) => x.id === r.data.id)) S.access.unshift(r.data);
       closeSheet();
@@ -4482,7 +4536,7 @@ const ACTIONS = {
   /* ---- 留言板 / 菜品互动 ---- */
 
   'note-me'(el) {
-    S.meName = el.dataset.name || '';
+    rememberMeName(el.dataset.name || '');
     render();
   },
 
@@ -4880,6 +4934,7 @@ const ACTIONS = {
   /* ---- 点餐批量 ---- */
 
   async 'batch-status'(el) {
+    if (!isAdmin()) return toast('只有管理员能更新做饭状态');
     const ids = pickIds('orders');
     if (!ids.length) return toast('先勾几条');
     const status = el.dataset.status;
@@ -4895,6 +4950,7 @@ const ACTIONS = {
   /* ---- 点餐一键开做 ---- */
 
   async 'start-all'() {
+    if (!isAdmin()) return toast('只有管理员能更新做饭状态');
     const list = pendingOrders().filter((o) => o.status === 'pending');
     if (!list.length) return toast('没有待做的菜了');
     const names = [...new Set(list.map((o) => o.dishName))];
@@ -5114,6 +5170,7 @@ ACTIONS['check-pin'] = async function () {
     setAuthToken(r.token || '');
     S.authed = true;
     closeSheet();
+    await loadState(true);
     render();
     toast('已解锁');
   } catch (err) {
