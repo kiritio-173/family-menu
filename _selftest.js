@@ -34,7 +34,9 @@ function ok(name, cond, extra) {
 
 const eq = (name, got, want) => ok(name, JSON.stringify(got) === JSON.stringify(want), { got, want });
 
-async function req(method, p, body, token, dev, house, ver) {
+let DEFAULT_ACCOUNT_TOKEN = '';
+
+async function req(method, p, body, token, dev, house, ver, account) {
   const opt = { method, headers: {} };
   if (body !== undefined) {
     opt.headers['Content-Type'] = 'application/json';
@@ -44,6 +46,8 @@ async function req(method, p, body, token, dev, house, ver) {
   if (dev) opt.headers['X-Device-Token'] = dev;
   if (house) opt.headers['X-House-Token'] = house;
   if (ver) opt.headers['X-Verified-Token'] = ver;
+  // 超级会话绑定账户；旧测试请求带超级 token 时模拟前端同时发送当前账户令牌。
+  if (account || (token && DEFAULT_ACCOUNT_TOKEN)) opt.headers['X-Account-Token'] = account || DEFAULT_ACCOUNT_TOKEN;
   const res = await fetch(BASE + p, opt);
   const text = await res.text();
   let json = {};
@@ -55,10 +59,11 @@ async function req(method, p, body, token, dev, house, ver) {
   return { status: res.status, body: json };
 }
 
-const get = (p, t, d, hh, vv) => req('GET', p, undefined, t, d, hh, vv);
-const post = (p, b, t, d, hh, vv) => req('POST', p, b === undefined ? {} : b, t, d, hh, vv);
-const put = (p, b, t, d, hh, vv) => req('PUT', p, b, t, d, hh, vv);
-const del = (p, t, d, hh, vv) => req('DELETE', p, undefined, t, d, hh, vv);
+const get = (p, t, d, hh, vv, aa) => req('GET', p, undefined, t, d, hh, vv, aa);
+const post = (p, b, t, d, hh, vv, aa) =>
+  req('POST', p, b === undefined ? {} : b, t, d, hh, vv, aa || (p === '/api/auth' ? DEFAULT_ACCOUNT_TOKEN : ''));
+const put = (p, b, t, d, hh, vv, aa) => req('PUT', p, b, t, d, hh, vv, aa);
+const del = (p, t, d, hh, vv, aa) => req('DELETE', p, undefined, t, d, hh, vv, aa);
 
 /**
  * 认领一个成员身份，换回设备令牌。
@@ -81,6 +86,21 @@ async function houseAuth(householdId, pin) {
   return { status: r.status, token: r.body && r.body.data && r.body.data.token, body: r.body };
 }
 
+async function registerAccount(loginId) {
+  const r = await post('/api/account/register', loginId ? { loginId } : {});
+  return { status: r.status, token: r.body?.data?.accountToken, user: r.body?.data?.user, body: r.body };
+}
+
+async function loginAccount(loginId, password = '123456') {
+  const r = await post('/api/account/login', { loginId, password });
+  return { status: r.status, token: r.body?.data?.accountToken, user: r.body?.data?.user, body: r.body };
+}
+
+async function authorizeSuper(pin, accountToken) {
+  const r = await req('POST', '/api/auth', { pin }, undefined, undefined, undefined, undefined, accountToken);
+  return { status: r.status, token: r.body?.data?.token, body: r.body };
+}
+
 /**
  * 发原始字节并把响应也按字节拿回来。
  * 备份是 zip 本体，既不能 JSON.stringify 也不能按 text 读（读一次就没了）。
@@ -92,6 +112,7 @@ async function reqRaw(method, p, buf, token, dev, house) {
     opt.body = buf;
   }
   if (token) opt.headers['X-Auth-Token'] = token;
+  if (token && DEFAULT_ACCOUNT_TOKEN) opt.headers['X-Account-Token'] = DEFAULT_ACCOUNT_TOKEN;
   if (dev) opt.headers['X-Device-Token'] = dev;
   if (house) opt.headers['X-House-Token'] = house;
   const res = await fetch(BASE + p, opt);
@@ -171,6 +192,17 @@ async function boot(label, writeData) {
     child.kill();
     throw new Error(`${label} 启动失败`);
   }
+  // 每个临时服务实例都建立一枚本地测试账户，模拟新客户端登录；否则绑定
+  // 账户的超级授权不能跨测试进程复用第一份实例的令牌。
+  if (label !== 'main') {
+    const ar = await fetch(BASE + '/api/account/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const aj = await ar.json();
+    DEFAULT_ACCOUNT_TOKEN = aj?.data?.accountToken || '';
+  }
   return child;
 }
 
@@ -181,6 +213,20 @@ async function main() {
   fs.mkdirSync(TMP, { recursive: true });
 
   let child = await boot('main');
+
+  /* ---------- 全局账户基础 ---------- */
+  console.log('\n[0] 全局账户基础');
+  const accountA = await registerAccount('绑定管理员');
+  eq('账户注册成功', accountA.status, 200);
+  ok('注册自动保留文本登录 ID', accountA.user && accountA.user.loginId === '绑定管理员', accountA.user);
+  ok('注册响应不回传密码', accountA.user && accountA.user.password === undefined && accountA.user.passwordHash === undefined);
+  DEFAULT_ACCOUNT_TOKEN = accountA.token || '';
+  ok('拿到账户令牌', DEFAULT_ACCOUNT_TOKEN.length > 20, DEFAULT_ACCOUNT_TOKEN);
+  const accountLogin = await loginAccount('绑定管理员');
+  eq('默认密码 123456 可以登录', accountLogin.status, 200);
+  eq('错误账户密码被拒', (await loginAccount('绑定管理员', '错误密码')).status, 401);
+  const accountB = await registerAccount('第二账户');
+  eq('第二个账户注册成功', accountB.status, 200);
 
   /* ---------- 初始状态 ---------- */
   console.log('\n[1] 初始状态');
@@ -427,6 +473,23 @@ async function main() {
   eq('可以设置口令', setPin.status, 200);
   ok('设置响应不回显口令明文', !('adminPin' in (setPin.body.data || {})), setPin.body.data);
   eq('设置响应标记已加锁', setPin.body.data.hasPin, true);
+
+  eq('没有账户令牌不能成为超级管理员', (await authorizeSuper('2468')).status, 401);
+  const boundSuper = await authorizeSuper('2468', DEFAULT_ACCOUNT_TOKEN);
+  eq('账户输入全局令牌成为超级管理员', boundSuper.status, 200);
+  ok('超级授权令牌非空', (boundSuper.token || '').length > 20, boundSuper.body);
+  const accountBLogin = await loginAccount('第二账户');
+  eq('第二账户能登录', accountBLogin.status, 200);
+  eq(
+    '超级授权不能借给第二个账户',
+    (await get('/api/state', boundSuper.token, undefined, undefined, undefined, accountBLogin.token)).status,
+    401
+  );
+  ok(
+    '超级授权约 12 小时后过期',
+    boundSuper.body?.data?.expiresAt > Date.now() + 11 * 60 * 60 * 1000,
+    boundSuper.body
+  );
 
   // state 里也绝不能有明文
   const stLocked = (await get('/api/state')).body.data;
@@ -1715,13 +1778,13 @@ async function main() {
   eq('家庭会话不能借 X-Auth-Token 冒充',
     (await post('/api/dishes', { name: '走错头的', category: trCat }, HH)).status, 401);
 
-  /* --- 新建的家庭：普通家庭，要超级管理员点头才变正式 --- */
+  /* --- 新建的家庭：账户创建后立即可用，不需要平台审批 --- */
   const tNew = (await post('/api/households', { name: '新开的家' }, tSuper)).body.data;
-  eq('新建的一律是普通家庭', tNew.status, 'normal');
+  eq('账户创建的家庭立即可用', tNew.status, 'approved');
   eq('新建的家庭没口令', tNew.hasPin, false);
-  eq('家庭管理员不能自己升成正式',
-    (await put('/api/households/' + tNew.id, { status: 'approved' }, undefined, undefined, HH)).status, 403);
-  eq('超级管理员点头才变正式',
+  eq('家庭管理员不能改平台审核状态',
+    (await put('/api/households/' + tNew.id, { status: 'normal' }, undefined, undefined, HH)).status, 403);
+  eq('超级管理员可以改家庭状态',
     (await put('/api/households/' + tNew.id, { status: 'approved' }, tSuper)).body.data.status, 'approved');
 
   /* --- 申请加入：审批权在这个家的管理员，不在全局管理员以外 --- */
@@ -1818,7 +1881,7 @@ async function main() {
   eq('凭证只能用于验的那个家',
     (await put('/api/households/' + tNew.id, { note: '越权' }, undefined, devOwner, undefined, VT)).status, 403);
   eq('凭证混进 X-Auth-Token 不算数',
-    (await put('/api/households/' + tHome, { members: await listNow() }, VT)).status, 401);
+    (await put('/api/households/' + tHome, { members: await listNow() }, VT)).status, 403);
   eq('凭证混进 X-House-Token 不算数',
     (await put('/api/households/' + tHome, { members: await listNow() }, undefined, devOwner, VT)).status, 403);
 
@@ -1918,6 +1981,36 @@ async function main() {
     (await put('/api/households/' + t25.id, { members: t25NoOwners }, tSuper)).status, 400);
 
   await stop(triInst);
+
+  /* ---------- 全局账户跨家庭与 5 户上限 ---------- */
+  console.log('\n[26] 全局账户跨家庭与家庭上限');
+  const accountInst = await boot('account-flow');
+  const accA = await registerAccount('跨家庭用户');
+  eq('账户流程注册成功', accA.status, 200);
+  const created = [];
+  for (let i = 1; i <= 5; i++) {
+    const r = await req('POST', '/api/households', { name: `账户家${i}` }, undefined, undefined, undefined, undefined, accA.token);
+    eq(`账户创建第 ${i} 个家庭`, r.status, 200);
+    created.push(r.body.data);
+  }
+  eq('第六个家庭被 5 户上限拒绝',
+    (await req('POST', '/api/households', { name: '账户家6' }, undefined, undefined, undefined, undefined, accA.token)).status,
+    409);
+  const privateDish = await req('POST', `/api/my-dishes?householdId=${encodeURIComponent(created[0].id)}`, {
+    name: '账户私菜', category: '家常菜',
+  }, undefined, undefined, undefined, undefined, accA.token);
+  eq('账户管理员可以新增本家私菜', privateDish.status, 200);
+  const accB = await registerAccount('申请加入用户');
+  const bBefore = await req('GET', `/api/state?householdId=${encodeURIComponent(created[0].id)}`, undefined, undefined, undefined, undefined, undefined, accB.token);
+  eq('未加入账号看不到目标家庭私菜', bBefore.status, 200);
+  ok('未加入账号状态不含目标私菜', !(bBefore.body.data.dishes || []).some((d) => d.name === '账户私菜'));
+  const join = await req('POST', '/api/join-requests', { householdId: created[0].id, name: '申请加入用户' }, undefined, undefined, undefined, undefined, accB.token);
+  eq('账户申请加入家庭成功', join.status, 200);
+  const approved = await req('PUT', `/api/join-requests/${join.body.data.id}`, { status: 'ok' }, undefined, undefined, undefined, undefined, accA.token);
+  eq('家庭管理员批准账户申请', approved.status, 200);
+  const bMe = await req('GET', '/api/account/me', undefined, undefined, undefined, undefined, undefined, accB.token);
+  ok('批准后账户关系可见', (bMe.body.data.households || []).some((h) => h.id === created[0].id));
+  await stop(accountInst);
 
   /* ---------- 收尾 ---------- */
   fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5 });

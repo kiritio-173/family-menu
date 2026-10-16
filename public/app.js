@@ -47,11 +47,18 @@ const S = {
   draftOrder: null, // 点餐草稿
   shoppingChecked: new Set(),
   loading: true,
+  // 全局账户会话。账户令牌与超级管理员令牌分开保存，切换家庭不会丢失身份。
+  accountToken: '',
+  account: null,
+  accountView: 'login', // login | register
+  accountBusy: false,
 };
 
 /** 老的 households.json 还没建时，历史数据都落在 h_home 上 */
 const FALLBACK_HOUSE = 'h_home';
 const LS_HOUSE = 'familyMenu.householdId';
+const LS_ACCOUNT = 'familyMenu.accountToken';
+const LS_CLIENT_DEVICE = 'familyMenu.clientDeviceId';
 const LS_MEMBER = 'familyMenu.memberIds';
 // 走过一次「你是谁」向导就别再拦着人家。设备级的，不跟家庭走 ——
 // 认领过 A 家再切到 B 家，B 家没登记过还得再问一次，那是对的。
@@ -61,6 +68,69 @@ const LS_ONBOARD = 'familyMenu.onboarded';
 const LS_PENDING = 'familyMenu.pendingNames';
 // 「先随便看看」的人用的占位名。不是任何人的真名，所以不会冒名。
 const GUEST = '还没登记';
+
+function accountToken() {
+  return S.accountToken || localStorage.getItem(LS_ACCOUNT) || '';
+}
+
+function clientDeviceId() {
+  let id = localStorage.getItem(LS_CLIENT_DEVICE) || '';
+  if (!id) {
+    const bytes = new Uint8Array(16);
+    if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(bytes);
+    id = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('') || `${Date.now()}-${Math.random()}`;
+    localStorage.setItem(LS_CLIENT_DEVICE, id);
+  }
+  return id;
+}
+
+function setAccountToken(token) {
+  S.accountToken = token || '';
+  if (token) localStorage.setItem(LS_ACCOUNT, token);
+  else localStorage.removeItem(LS_ACCOUNT);
+}
+
+function accountUser() {
+  return S.account && (S.account.user || S.account) || null;
+}
+
+function accountFamilies() {
+  const a = S.account || {};
+  const list = a.households || a.families || a.memberships || a.data?.households;
+  return Array.isArray(list) ? list : households();
+}
+
+function accountHouseholdCount() {
+  const u = accountUser();
+  const uid = u && (u.id || u.userId);
+  const a = S.account || {};
+  const fromAccount = a.households || a.families || a.memberships;
+  if (Array.isArray(fromAccount)) return fromAccount.length;
+  if (uid) return households().filter((h) => (h.members || []).some((m) => typeof m !== 'string' && (m.userId === uid || m.id === uid))).length;
+  return households().length;
+}
+
+function hasAccount() {
+  return !!accountToken();
+}
+
+function accountRoleFor(h) {
+  if (!h) return 'member';
+  return h.role || h.memberRole || h.membership?.role || (h.owner ? 'owner' : 'member');
+}
+
+function superExpiry() {
+  const raw = S.account && (S.account.superExpiresAt || S.account.superExp || S.account.authExpiresAt);
+  return Number(raw) || 0;
+}
+
+function superRemainingText() {
+  const left = superExpiry() - Date.now();
+  if (left <= 0) return '';
+  const mins = Math.ceil(left / 60000);
+  if (mins < 60) return `约 ${mins} 分钟`;
+  return `约 ${Math.ceil(mins / 60)} 小时`;
+}
 
 /* ---------------- 工具 ---------------- */
 
@@ -221,7 +291,11 @@ async function saveDishBody(dish, patch) {
 
 /** 超级管理员。没设全局口令时一律算 —— 保持「装了就能用」。 */
 function isSuper() {
-  return !S.data.settings.hasPin || S.authed;
+  if (S.authed && superExpiry() && superExpiry() <= Date.now()) {
+    S.authed = false;
+    setAuthToken('');
+  }
+  return hasAccount() ? !!S.authed : !S.data.settings.hasPin || S.authed;
 }
 
 /**
@@ -457,6 +531,7 @@ function memberList() {
           }
         : {
             id: m.id || 'm_' + i,
+            userId: m.userId || m.userID || '',
             name: m.name,
             loginId: m.loginId || m.name,
             emoji: m.emoji || '🙋',
@@ -537,7 +612,17 @@ function nameToMemberId(name) {
 /** 当前家庭认领的是哪个成员（对象）；没认领 / 成员被删了都是 null */
 function meMember() {
   const saved = S.householdId ? memberSelections()[S.householdId] : '';
-  if (!saved) return null;
+  if (!saved) {
+    const uid = accountUser()?.id || accountUser()?.userId;
+    if (uid) {
+      const linked = memberList().find((m) => m.userId === uid || m.id === uid);
+      if (linked) {
+        rememberMeId(linked.id);
+        return linked;
+      }
+    }
+    return null;
+  }
   const byId = memberById(saved);
   if (byId) return byId;
   // 存的是老格式的名字，认到人就升级成 id
@@ -902,6 +987,7 @@ function setDeviceToken(householdId, t) {
 
 async function api(method, path, body, rawContentType) {
   const opts = { method, headers: {} };
+  opts.headers['X-Device-Id'] = clientDeviceId();
   if (body !== undefined) {
     if (rawContentType) {
       // 恢复备份传的是 zip 本体，不能 JSON.stringify —— 服务端按字节嗅探格式
@@ -914,6 +1000,8 @@ async function api(method, path, body, rawContentType) {
   }
   const t = authToken();
   if (t) opts.headers['X-Auth-Token'] = t;
+  const at = accountToken();
+  if (at) opts.headers['X-Account-Token'] = at;
   // 当前家庭的两种凭证：家庭会话（解了本家管理锁）+ 设备令牌（认领了身份）
   const hh = S.householdId;
   if (hh) {
@@ -933,13 +1021,31 @@ async function api(method, path, body, rawContentType) {
   } catch (_) {
     throw new Error('服务器返回异常');
   }
-  // 401 = 口令不对或会话过期，清掉本地 token 逼用户重新解锁
-  if (res.status === 401) setAuthToken('');
+  // 401 = 口令不对或会话过期。账户令牌失效时回登录页，避免继续显示旧家庭数据。
+  if (res.status === 401) {
+    setAuthToken('');
+    S.authed = false;
+    const msg = String(json.error || '');
+    const accountEndpoint = /^\/api\/account\//.test(path) || /^\/api\/state(?:\?|$)/.test(path);
+    const accountFailure = accountEndpoint || /账户|登录|账号令牌|account token|account session/i.test(msg);
+    if (accountFailure && path !== '/api/account/login' && path !== '/api/account/register') {
+      setAccountToken('');
+      S.account = null;
+      S.loading = false;
+      S.view = 'menu';
+      render();
+    }
+  }
   if (!res.ok || json.ok === false) throw new Error(json.error || `请求失败(${res.status})`);
   return json.data;
 }
 
 async function loadState(silent) {
+  if (!hasAccount()) {
+    S.loading = false;
+    if (!silent) render();
+    return null;
+  }
   try {
     // 普通用户只请求当前家庭的数据；管理员会话由服务端自动返回全量状态。
     const savedHouse = localStorage.getItem(LS_HOUSE) || '';
@@ -949,10 +1055,14 @@ async function loadState(silent) {
     if (savedMember) query.set('memberName', savedMember);
     const data = await api('GET', `/api/state${query.toString() ? '?' + query.toString() : ''}`);
     S.data = data;
+    if (data.account) S.account = data.account;
+    if (S.account && (data.superExpiresAt || data.superExp || data.authExpiresAt)) {
+      S.account.superExpiresAt = data.superExpiresAt || data.superExp || data.authExpiresAt;
+    }
     S.shoppingChecked = new Set(data.settings.shoppingChecked || []);
     S.access = data.access && Array.isArray(data.access.requests) ? data.access.requests : [];
     // 没设口令 → 管理区本来就开着；设了 → 看本机有没有有效会话
-    if (!data.settings.hasPin) S.authed = true;
+    if (!data.settings.hasPin) S.authed = !hasAccount();
     else if (!authToken()) S.authed = false;
     // 当前家庭记在这台设备上：A 家选 301、B 家选 502，互不影响
     const list = households();
@@ -970,7 +1080,9 @@ async function loadState(silent) {
     if (!silent) render();
   } catch (err) {
     S.loading = false;
-    if (!silent) {
+    if (!hasAccount()) {
+      if (!silent) render();
+    } else if (!silent) {
       $('#view').innerHTML = `<div class="empty">
         <span class="empty-emoji">😵</span>
         <p class="empty-title">连不上服务</p>
@@ -3146,7 +3258,7 @@ function viewManageMember() {
 
 function viewManage() {
   // 前端拿不到口令明文了，改成看 hasPin 标记 + 本机有没有会话 token
-  if (!isSuper()) return viewManageMember();
+  if (!isSuper()) return accountSettingsHtml() + viewManageMember();
 
   const s = S.data.settings;
   const admin = isSuper();
@@ -3247,7 +3359,7 @@ function viewManage() {
     )
     .join('');
 
-  return `
+  return accountSettingsHtml() + `
     ${
       s.hasPin
         ? ''
@@ -4187,10 +4299,148 @@ async function saveMembers(list) {
 }
 
 /* =========================================================
+ * 全局账户与家庭工作区
+ * ========================================================= */
+
+function accountProfileSummary() {
+  const u = accountUser();
+  if (!u) return '';
+  const id = u.loginId || u.id || '';
+  const name = u.displayName || u.name || id;
+  return `<div class="account-profile"><span class="account-avatar">${esc(u.emoji || '🙋')}</span>
+    <div><b>${esc(name)}</b><span class="account-id">登录 ID：${esc(id)}</span></div></div>`;
+}
+
+function renderAccountGate() {
+  const app = $('#app');
+  const view = $('#view');
+  if (!app || !view) return;
+  app.classList.add('account-gate-mode');
+  document.querySelectorAll('.topbar, .tabbar, #searchbar, #whoami').forEach((el) => { el.hidden = true; });
+  const register = S.accountView === 'register';
+  const title = register ? '创建你的家庭菜单账号' : '登录家庭菜单';
+  const subtitle = register
+    ? '新设备先创建账号，之后可以加入或创建多个家庭。'
+    : '登录后才能查看家庭菜单和你的私菜。';
+  view.innerHTML = `<div class="account-page">
+    <div class="account-hero"><div class="account-logo">🍚</div><h1>${title}</h1><p>${subtitle}</p></div>
+    <form class="account-card" data-account-form>
+      <label class="field-label" for="accountLoginId">登录 ID <span class="field-hint">可用汉字、字母或数字</span></label>
+      <input class="input" id="accountLoginId" name="loginId" maxlength="32" autocomplete="username" placeholder="${register ? '留空自动生成，例如：用户-AB12' : '输入登录 ID'}" />
+      <label class="field-label" for="accountPassword">密码</label>
+      <input class="input" id="accountPassword" name="password" type="password" maxlength="64" autocomplete="${register ? 'new-password' : 'current-password'}" placeholder="${register ? '留空使用初始密码 123456' : '输入密码'}" />
+      ${register ? '<p class="account-risk">初始密码为 <b>123456</b>，可以继续使用，但建议登录后尽快修改。</p>' : ''}
+      <p class="account-error" id="accountError" hidden></p>
+      <button class="btn block account-submit" type="submit">${register ? '创建账号并进入' : '登录'}</button>
+      <button class="btn ghost block" type="button" data-act="account-toggle">${register ? '已有账号，去登录' : '首次使用，创建账号'}</button>
+    </form>
+  </div>`;
+}
+
+function viewHouseholdHome() {
+  const list = households();
+  const user = accountUser() || {};
+  const label = user.displayName || user.loginId || '我的账号';
+  const rows = list.length
+    ? list.map((h) => {
+        const me = memberForHouse(h);
+        const role = me && (me.role === 'owner' ? '家庭管理员' : '普通成员');
+        return `<button class="account-house-row" data-act="pick-house" data-id="${esc(h.id)}">
+          <span class="house-pick-emoji">${esc(h.emoji || '🏠')}</span><span class="house-pick-main">
+          <span class="house-pick-name">${esc(h.name)}</span><span class="house-pick-sub">${esc(role || '已加入')} · ${(h.members || []).length} 位成员</span></span><span class="house-pick-tag">›</span></button>`;
+      }).join('')
+    : '<div class="account-empty"><span>🏠</span><b>还没有加入家庭</b><p>你可以创建一个家庭，或申请加入其他家庭。</p></div>';
+  return `<div class="account-workspace"><div class="account-profile-head"><div><span class="section-sub">当前账号</span><h2>${esc(label)}</h2></div><button class="btn ghost sm" data-act="account-logout">退出登录</button></div>
+    <div class="section-head"><h2 class="section-title">我的家庭</h2><span class="section-sub">${accountHouseholdCount()}/5 个</span></div>
+    <div class="account-house-list">${rows}</div>
+    <div class="account-home-actions"><button class="btn" data-act="new-household">＋ 创建家庭</button><button class="btn soft" data-act="open-join-family">申请加入家庭</button></div>
+    <p class="account-hint">创建家庭后你会自动成为家庭管理员，不需要等待平台批准。</p></div>`;
+}
+
+function memberForHouse(h) {
+  const u = accountUser();
+  if (!h || !u) return null;
+  const uid = u.id || u.userId;
+  return (h.members || []).find((m) => typeof m !== 'string' && (m.userId === uid || m.id === uid)) || null;
+}
+
+async function accountSubmit(form) {
+  const loginId = String(form.loginId?.value || '').trim();
+  const password = String(form.password?.value || '');
+  const register = S.accountView === 'register';
+  const err = $('#accountError');
+  const fail = (msg) => { if (err) { err.hidden = false; err.textContent = msg; } };
+  if (!register && !loginId) return fail('请输入登录 ID。');
+  if (!register && !password) return fail('请输入密码。');
+  S.accountBusy = true;
+  const submit = form.querySelector('.account-submit');
+  if (submit) { submit.disabled = true; submit.textContent = register ? '创建中…' : '登录中…'; }
+  try {
+    const r = await api('POST', register ? '/api/account/register' : '/api/account/login', {
+      ...(loginId ? { loginId } : {}),
+      ...(password ? { password } : {}),
+    });
+    setAccountToken(r.accountToken || r.token || r.data?.accountToken || '');
+    S.account = r.account || r.user ? { ...(r.account || {}), user: r.user || r.account?.user, households: r.households || r.families || r.account?.households } : null;
+    if (S.account && (register && !password || password === '123456')) S.account.usingDefaultPassword = true;
+    if (!accountToken()) throw new Error('服务器没有返回账户令牌');
+    S.accountView = 'login';
+    S.loading = true;
+    await loadState(true);
+    await Promise.allSettled([loadAIStatus(), loadVersion(), loadBackups()]);
+    render();
+    toast(register ? '账号已创建' : '登录成功');
+  } catch (e) {
+    fail(e.message || '登录失败，请重试');
+    if (submit) { submit.disabled = false; submit.textContent = register ? '创建账号并进入' : '登录'; }
+  } finally {
+    S.accountBusy = false;
+  }
+}
+
+function accountLogout() {
+  const t = accountToken();
+  // 退出接口失败也要清理本地身份，避免用户卡在旧会话。
+  api('POST', '/api/account/logout').catch(() => {}).finally(() => {
+    setAccountToken(''); setAuthToken(''); S.account = null; S.data = { categories: [], dishes: [], orders: [], settings: {}, households: [], pantry: [], plans: [], notes: { notes: [], votes: {} } }; S.householdId = ''; localStorage.removeItem(LS_HOUSE); S.authed = false; S.view = 'menu'; render(); toast('已退出登录');
+  });
+}
+
+function accountSettingsHtml() {
+  const u = accountUser() || {};
+  const expiry = superRemainingText();
+  const current = currentHousehold();
+  const relation = memberForHouse(current);
+  const role = current ? (relation && relation.role === 'owner' ? '家庭管理员' : '普通成员') : '未加入家庭';
+  const familyRows = households().map((h) => {
+    const rel = memberForHouse(h);
+    const r = rel && rel.role === 'owner' ? '管理员' : '成员';
+    return `<button class="account-house-row compact" data-act="pick-house" data-id="${esc(h.id)}"><span class="house-pick-emoji">${esc(h.emoji || '🏠')}</span><span class="house-pick-main"><span class="house-pick-name">${esc(h.name)}${h.id === S.householdId ? ' <span class="pill-now">当前</span>' : ''}</span><span class="house-pick-sub">${r}</span></span><span class="house-pick-tag">›</span></button>`;
+  }).join('');
+  return `<div class="account-settings-card">
+    <div class="section-head"><h2 class="section-title">我的账号</h2><span class="pill-now">${esc(role)}</span></div>
+    ${accountProfileSummary()}
+    <p class="account-risk compact">${u.legacyDefaultPassword || u.usingDefaultPassword || u.passwordRisk ? '⚠️ 当前仍在使用初始密码 123456，建议修改。' : '账户密码只用于登录，不会显示给其他成员。'}</p>
+    <div class="row-2"><button class="btn ghost" data-act="account-password">修改密码</button><button class="btn ghost" data-act="account-logout">退出登录</button></div>
+    <div class="section-head" style="margin-top:18px"><h2 class="section-title">超级管理员</h2></div>
+    ${expiry ? `<div class="super-status">🛡️ 超级管理员已授权 · 还剩 ${esc(expiry)}</div>` : `<p class="section-sub">输入全局管理令牌后，当前账号可临时管理所有家庭和平台配置，有效 12 小时。</p>`}
+    <button class="btn ${expiry ? 'soft' : ''} block" data-act="unlock">${expiry ? '重新输入全局管理令牌' : '输入全局管理令牌'}</button>
+    <div class="section-head" style="margin-top:18px"><h2 class="section-title">我的家庭</h2><span class="section-sub">${accountHouseholdCount()}/5</span></div>
+    <div class="account-settings-families">${familyRows || '<p class="section-sub">还没有加入家庭。</p>'}</div>
+    <div class="row-2" style="margin-top:10px"><button class="btn soft" data-act="new-household">＋ 创建家庭</button><button class="btn ghost" data-act="open-join-family">申请加入</button></div>
+  </div>`;
+}
+
+/* =========================================================
  * 渲染主循环
  * ========================================================= */
 
 function render() {
+  if (!hasAccount()) {
+    renderAccountGate();
+    return;
+  }
+  $('#app')?.classList.remove('account-gate-mode');
   const s = S.data.settings || {};
   document.title = s.shopName || '家庭菜单';
   $('#brandName').textContent = s.shopName || '家庭菜单';
@@ -4199,14 +4449,24 @@ function render() {
   renderHouseBtn();
   renderMeBtn();
 
-  const manageTab = document.querySelector('.tab[data-view="manage"]');
+  // 账号登录后若尚未加入任何家庭，先显示家庭工作区，避免把空的菜单工作区当成可用状态。
+  if (!households().length) {
+    document.querySelectorAll('.topbar, .tabbar, #searchbar').forEach((el) => { el.hidden = true; });
+    const home = $('#view');
+    if (home) home.innerHTML = viewHouseholdHome();
+    renderWhoami();
+    return;
+  }
+  document.querySelectorAll('.topbar, .tabbar').forEach((el) => { el.hidden = false; });
+
+  const manageTab = document.querySelector('.tab[data-view="settings"]');
   if (manageTab) {
     const admin = isSuper();
     const icon = manageTab.querySelector('.tab-icon');
     const label = manageTab.querySelector('.tab-label');
     if (icon) icon.textContent = admin ? '🧺' : '🥣';
-    if (label) label.textContent = admin ? '管理' : '我的私菜';
-    manageTab.title = admin ? '超级管理：设置、备份、家庭' : '维护我家私菜';
+    if (label) label.textContent = '设置';
+    manageTab.title = admin ? '账户、家庭、平台配置' : '账户与家庭设置';
   }
 
   document.querySelectorAll('.tab').forEach((t) => {
@@ -4252,6 +4512,7 @@ function render() {
   else if (S.view === 'order') view.innerHTML = viewOrder();
   else if (S.view === 'board') view.innerHTML = viewBoard();
   else if (S.view === 'pantry') view.innerHTML = viewPantry();
+  else if (S.view === 'settings' || S.view === 'manage') view.innerHTML = viewManage();
   else view.innerHTML = viewManage();
 
   renderWhoami();
@@ -4310,16 +4571,18 @@ function renderMeBtn() {
   const btn = $('#meBtn');
   if (!btn) return;
   const m = meMember();
+  const u = accountUser();
+  const accountLabel = u && (u.displayName || u.loginId);
   const pend = !m && pendingName();
-  const guest = !m && !pend;
+  const guest = !m && !pend && !accountLabel;
   const avatar = $('#meEmoji');
   const label = $('#meName');
   const role = $('#meRole');
-  if (avatar) avatar.textContent = m ? m.emoji : pend ? '⏳' : '👤';
-  if (label) label.textContent = m ? m.name : pend ? `${pend}（等批准）` : displayName();
+  if (avatar) avatar.textContent = m ? m.emoji : pend ? '⏳' : u?.emoji || '👤';
+  if (label) label.textContent = m ? m.name : pend ? `${pend}（等批准）` : accountLabel || displayName();
   if (role) {
     role.hidden = guest;
-    role.textContent = m ? ROLE_LABEL[myRole()] : '等管理员批准';
+    role.textContent = m ? ROLE_LABEL[myRole()] : accountLabel ? '已登录' : '等管理员批准';
   }
   btn.classList.toggle('pending', guest);
   btn.classList.toggle('waiting', !!pend);
@@ -4327,7 +4590,9 @@ function renderMeBtn() {
     ? '这台设备还没认领身份 —— 点一下说说你是谁'
     : m
     ? `${m.name}（${ROLE_LABEL[myRole()]}）· 点一下可以换身份或换家庭`
-    : `${pend} · 申请已提交，等${householdName(S.householdId)}管理员批准`;
+    : pend
+    ? `${pend} · 申请已提交，等${householdName(S.householdId)}管理员批准`
+    : `${accountLabel}（账户）· 点一下查看家庭和账户设置`;
 }
 
 /* ---------------- 「你是谁」向导 ---------------- */
@@ -4487,9 +4752,10 @@ function openHouseholdPicker() {
   const admin = anyHouseAdmin();
   const me = meName();
   const myId = meMemberId();
+  const uid = accountUser()?.id || accountUser()?.userId;
   // 成员 id 是各家各一份的：同一个「爸爸」在 A 家和 B 家是两个 id，
   // 所以切到别家时要拿「我认领过的那些 id」去比，而不是只认当前这家。
-  const mine = (h) => !!(h.members || []).some((m) => m.id && m.id === myId) || (h.members || []).some((m) => m.name === me);
+  const mine = (h) => !!(uid && (h.members || []).some((m) => typeof m !== 'string' && (m.userId === uid || m.id === uid))) || !!(myId && (h.members || []).some((m) => m.id === myId)) || (h.members || []).some((m) => (typeof m === 'string' ? m : m.name) === me);
   const myAccess = (h) => admin || mine(h);
   const pendingFor = (h) => (S.access || []).filter((r) => r.householdId === h.id && r.status === 'pending' && r.name === me);
 
@@ -4530,10 +4796,9 @@ function openHouseholdPicker() {
   openSheet({
     title: '切换家庭',
     body,
-    foot: admin
-      ? `<button class="btn soft" data-act="new-household">＋ 添加家庭</button>
+    foot: `<button class="btn soft" data-act="new-household">＋ 添加家庭</button>
          <button class="btn ghost" data-act="edit-settings">服务设置</button>`
-      : '<button class="btn ghost" data-act="close-sheet">关闭</button>',
+      ,
   });
 }
 
@@ -4569,12 +4834,6 @@ const ACTIONS = {
   /* 导航 */
   async nav(el) {
     const v = el.dataset.view;
-    if (v === 'manage' && S.data.settings.hasPin && !S.authed) {
-      S.view = 'manage';
-      closeSheet();
-      render();
-      return;
-    }
     S.view = v;
     closeSheet();
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -4590,8 +4849,63 @@ const ACTIONS = {
     loadState();
   },
 
+  'account-toggle'() {
+    S.accountView = S.accountView === 'register' ? 'login' : 'register';
+    render();
+    const input = $('#accountLoginId');
+    if (input) input.focus();
+  },
+  'account-logout'() {
+    accountLogout();
+  },
+  async 'account-password'() {
+    openSheet({
+      title: '修改账户密码',
+      body: `<div class="field"><label class="field-label">新密码</label><input class="input" id="accountNewPassword" type="password" maxlength="64" placeholder="4 到 64 个字符" /></div><p class="section-sub">修改后其他设备上的账户登录会话可能需要重新登录。</p>`,
+      foot: `<button class="btn ghost" data-act="close-sheet">取消</button><button class="btn" data-act="save-account-password">保存</button>`,
+    });
+    $('#accountNewPassword')?.focus();
+  },
+  async 'save-account-password'() {
+    const password = String($('#accountNewPassword')?.value || '');
+    if (!/^\S{4,64}$/.test(password)) return toast('密码要 4 到 64 个字符');
+    try {
+      const r = await api('PUT', '/api/account/password', { password });
+      if (r && (r.accountToken || r.token)) setAccountToken(r.accountToken || r.token);
+      closeSheet();
+      await loadState(true);
+      render();
+      toast('密码已更新');
+    } catch (e) { toast('修改失败：' + e.message); }
+  },
+  'open-join-family'() {
+    const name = accountUser()?.displayName || accountUser()?.loginId || '';
+    openSheet({
+      title: '申请加入家庭',
+      body: `<div class="field"><label class="field-label">家庭 ID 或名称</label><input class="input" id="joinFamilyTarget" placeholder="输入家庭名称或 ID" /></div><div class="field"><label class="field-label">在家庭中的称呼</label><input class="input" id="joinName" maxlength="20" value="${esc(name)}" placeholder="例如：姑姑" /></div><div class="field"><label class="field-label">留言（选填）</label><textarea class="textarea" id="joinNote" rows="3" maxlength="100" placeholder="告诉管理员你是谁"></textarea></div>`,
+      foot: `<button class="btn ghost" data-act="close-sheet">取消</button><button class="btn" data-act="send-join-family">提交申请</button>`,
+    });
+  },
+  async 'send-join-family'() {
+    const target = String($('#joinFamilyTarget')?.value || '').trim();
+    const name = String($('#joinName')?.value || '').trim();
+    if (!target) return toast('请输入家庭名称或 ID');
+    if (!name) return toast('请填写你在家庭中的称呼');
+    const h = households().find((x) => x.id === target || x.name === target);
+    const householdId = h ? h.id : target;
+    try {
+      await api('POST', '/api/join-requests', { householdId, name, note: String($('#joinNote')?.value || '').trim() });
+      closeSheet();
+      toast('申请已提交，等待家庭管理员批准', 3200);
+    } catch (e) { toast('提交失败：' + e.message); }
+  },
+
   /* 「你是谁」 */
   'open-me'() {
+    if (accountUser() && !meMember()) {
+      S.view = 'settings';
+      return render();
+    }
     // 已经认领过的人走一步就够了：直接改身份，不用再输一遍密码。
     // 换家庭、换人才需要重新认证 —— 那时才进向导。
     const m = meMember();
@@ -5279,7 +5593,8 @@ const ACTIONS = {
     // 家里人不能直接切进别人家 —— 得管理员批了才算成员。
     // 成员 id 各家一份，所以要比「我在这家认领过没有」，不能只比当前这家的。
     const myId = meMemberId();
-    const isMemberThere = (x) => !!(myId && (x.members || []).some((m) => m.id === myId));
+    const uid = accountUser()?.id || accountUser()?.userId;
+    const isMemberThere = (x) => !!((uid && (x.members || []).some((m) => typeof m !== 'string' && (m.userId === uid || m.id === uid))) || (myId && (x.members || []).some((m) => m.id === myId)));
     if (h && !anyHouseAdmin() && !isMemberThere(h)) {
       return openJoinSheet(id);
     }
@@ -5298,8 +5613,8 @@ const ACTIONS = {
     if (now) toast(`已切到 ${now.emoji} ${now.name}`);
   },
   'new-household'() {
-    // 增删改家庭是管理员的活：家里人说「应用里的东西随便改」就没意义了
-    if (!anyHouseAdmin()) return toast('添加/删除家庭要管理员口令');
+    if (!hasAccount()) return render();
+    if (accountHouseholdCount() >= 5) return toast('一个账号最多加入 5 个家庭，请先退出一个家庭');
     openHouseholdEditor(null);
   },
   /** 申请加入别人家 */
@@ -5408,7 +5723,7 @@ const ACTIONS = {
       localStorage.setItem(LS_HOUSE, saved.id);
       S.memberFilter = '';
       render();
-      toast(`已添加 ${saved.name}（普通家庭，等超级管理员启用）`, 4200);
+      toast(`已添加 ${saved.name}，你现在是家庭管理员`, 3600);
     } else {
       render();
       toast('已保存');
@@ -6311,7 +6626,11 @@ const ACTIONS = {
    */
   async saveAttachment(url, fallbackName) {
     const t = authToken();
-    const res = await fetch(url, t ? { headers: { 'X-Auth-Token': t } } : undefined);
+    const headers = {};
+    if (t) headers['X-Auth-Token'] = t;
+    const at = accountToken();
+    if (at) headers['X-Account-Token'] = at;
+    const res = await fetch(url, Object.keys(headers).length ? { headers } : undefined);
     if (res.status === 401) {
       setAuthToken('');
       S.authed = false;
@@ -6416,6 +6735,7 @@ ACTIONS['check-pin'] = async function () {
     const r = await api('POST', '/api/auth', { pin: v });
     setAuthToken(r.token || '');
     S.authed = true;
+    if (S.account) S.account.superExpiresAt = r.expiresAt || r.fixedExp || r.expires || (Date.now() + 12 * 60 * 60 * 1000);
     closeSheet();
     await loadState(true);
     render();
@@ -6458,6 +6778,13 @@ ACTIONS['danger-pin-ok'] = async function () {
 };
 
 /* 事件绑定 */
+document.addEventListener('submit', (e) => {
+  const form = e.target.closest && e.target.closest('[data-account-form]');
+  if (!form) return;
+  e.preventDefault();
+  accountSubmit(form);
+});
+
 document.addEventListener('click', (e) => {
   // 菜品卡片整块是「打开做法」，互动条是压在上面的。
   // 点互动条里的按钮照常走按钮自己的动作，但点到条上的空白处不能顺手把菜谱也打开。
@@ -6593,7 +6920,36 @@ window.addEventListener(
 );
 
 /* 启动 */
-loadAIStatus(); // 和 loadState 并行，不阻塞首屏
-loadVersion(); // 版本信息同理，拉不到也不影响使用
-loadBackups(); // 自动备份列表同理
-loadState();
+async function bootstrapAccount() {
+  S.accountToken = localStorage.getItem(LS_ACCOUNT) || '';
+  if (!S.accountToken) {
+    S.loading = false;
+    render();
+    return;
+  }
+  try {
+    const me = await api('GET', '/api/account/me');
+    S.account = me && (me.account || me.user ? { ...me, user: me.user || me.account?.user } : me);
+    await loadState(true);
+    await Promise.allSettled([loadAIStatus(), loadVersion(), loadBackups()]);
+    render();
+  } catch (_) {
+    setAccountToken('');
+    S.account = null;
+    S.loading = false;
+    render();
+  }
+}
+bootstrapAccount();
+setInterval(() => {
+  if (!hasAccount() || !S.account || !superExpiry()) return;
+  if (superExpiry() <= Date.now()) {
+    S.authed = false;
+    setAuthToken('');
+    if (S.view === 'settings') render();
+  } else if (S.view === 'settings') {
+    // 设置页的剩余时间按分钟更新，不刷新业务数据。
+    const status = document.querySelector('.super-status');
+    if (status) status.textContent = `🛡️ 超级管理员已授权 · 还剩 ${superRemainingText()}`;
+  }
+}, 60000);

@@ -41,10 +41,23 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.12.0';
+const APP_VERSION = '1.13.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.13.0',
+    date: '2026-10-16',
+    title: '全局账户与多家庭工作区',
+    items: [
+      '新设备先登录或注册，全局登录 ID 支持汉字、字母和数字，初始密码为 123456 并显示风险提示',
+      '一个账号最多加入 5 个有效家庭，家庭之间切换不需要重新认领身份',
+      '创建家庭不需要平台管理员批准，创建者立即成为家庭管理员',
+      '申请加入按账户建立成员关系，管理员批准后才计入家庭名额',
+      '全局管理口令绑定当前账号和设备，超级管理员授权固定有效 12 小时',
+      '菜单固定为第一栏，账户、家庭和平台配置集中到最后的设置栏',
+    ],
+  },
   {
     version: '1.12.0',
     date: '2026-10-16',
@@ -442,10 +455,162 @@ const FILES = {
   // 「申请加入家庭」的待办。单独一个文件是因为它跟菜单数据完全两套生命周期：
   // 菜谱是长期内容，申请是几天内就该处理掉的一次性记录。
   access: 'access.json',
+  // 全局账户身份。账户令牌只在内存中保存，密码摘要和用户资料落盘。
+  users: 'users.json',
 };
 
 const state = {};
 let saveTimer = null;
+
+/* ------------------------------------------------------------------ *
+ * 全局账户
+ *
+ * 家庭成员仍保留原来的 member.id，便于旧菜谱作者、留言和设备令牌平滑
+ * 迁移；userId 是跨家庭不变的身份键。密码只保存 scrypt 摘要。
+ * ------------------------------------------------------------------ */
+
+const DEFAULT_ACCOUNT_PASSWORD = '123456';
+const ACCOUNT_TTL = 30 * 24 * 60 * 60 * 1000;
+const SUPER_GRANT_TTL_MS = Number(process.env.SUPER_GRANT_TTL_MS) > 0
+  ? Number(process.env.SUPER_GRANT_TTL_MS)
+  : 12 * 60 * 60 * 1000;
+const accountSessions = new Map(); // token -> { userId, deviceId, exp }
+
+function hashUserPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const digest = crypto.scryptSync(String(password), salt, 32).toString('hex');
+  return `scrypt$${salt}$${digest}`;
+}
+
+function verifyUserPassword(password, encoded) {
+  if (typeof encoded !== 'string') return false;
+  const m = /^scrypt\$([0-9a-f]{32})\$([0-9a-f]{64})$/i.exec(encoded);
+  if (!m) return false;
+  try {
+    const got = crypto.scryptSync(String(password), m[1], 32);
+    const want = Buffer.from(m[2], 'hex');
+    return got.length === want.length && crypto.timingSafeEqual(got, want);
+  } catch (_) {
+    return false;
+  }
+}
+
+function userById(userId) {
+  return (state.users || []).find((u) => u && u.id === userId) || null;
+}
+
+function userByLoginId(loginId) {
+  const id = normalizeLoginId(loginId, '');
+  return (state.users || []).find((u) => u && u.loginId === id) || null;
+}
+
+function generatedLoginId() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  for (let attempt = 0; attempt < 100; attempt++) {
+    let suffix = '';
+    for (let i = 0; i < 4; i++) suffix += alphabet[crypto.randomInt(alphabet.length)];
+    const id = `用户-${suffix}`;
+    if (!userByLoginId(id)) return id;
+  }
+  return uniqueLoginId(state.users || [], `用户-${Date.now().toString(36).slice(-6)}`);
+}
+
+function normalizeUser(input, prev) {
+  const base = prev || {};
+  const loginId = normalizeLoginId(input.loginId ?? base.loginId, '') || generatedLoginId();
+  return {
+    id: base.id || safeText(input.id, 80) || uid('u_'),
+    loginId,
+    displayName: safeText(input.displayName ?? base.displayName ?? loginId, 40).trim() || loginId,
+    emoji: safeText(input.emoji ?? base.emoji, 4) || '🙋',
+    passwordHash: safeText(input.passwordHash ?? base.passwordHash, 180),
+    legacyDefaultPassword: !!(input.legacyDefaultPassword ?? base.legacyDefaultPassword),
+    createdAt: base.createdAt || input.createdAt || nowISO(),
+    updatedAt: nowISO(),
+  };
+}
+
+function publicUser(user) {
+  if (!user) return null;
+  const { passwordHash, legacyDefaultPassword, ...safe } = user;
+  return { ...safe, passwordRisk: !!legacyDefaultPassword };
+}
+
+function memberForUser(householdId, userId) {
+  if (!householdId || !userId) return null;
+  const h = state.households.find((x) => x.id === householdId);
+  return h && (h.members || []).find((m) => m && m.userId === userId) || null;
+}
+
+function membershipsOf(userId) {
+  if (!userId) return [];
+  return state.households.filter((h) => (h.members || []).some((m) => m && m.userId === userId));
+}
+
+function accountHouseholds(userId) {
+  return membershipsOf(userId).map((h) => {
+    const me = memberForUser(h.id, userId);
+    return { ...publicHousehold(h), role: me && me.role || 'member', memberId: me && me.id || '' };
+  });
+}
+
+function accountSessionOf(req) {
+  const token = req.headers['x-account-token'];
+  if (!token || typeof token !== 'string') return null;
+  const s = accountSessions.get(token);
+  if (!s || !userById(s.userId)) {
+    if (s) accountSessions.delete(token);
+    return null;
+  }
+  if (s.exp <= Date.now()) {
+    accountSessions.delete(token);
+    return null;
+  }
+  s.exp = Date.now() + ACCOUNT_TTL;
+  return { token, scope: s };
+}
+
+function issueAccountToken(userId, req) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const deviceId = safeText(req.headers['x-device-id'], 120) || crypto.randomBytes(12).toString('hex');
+  accountSessions.set(token, { kind: 'account', userId, deviceId, exp: Date.now() + ACCOUNT_TTL });
+  return { token, deviceId };
+}
+
+function revokeAccountSessions(userId) {
+  for (const [token, s] of accountSessions) if (s.userId === userId) accountSessions.delete(token);
+  for (const [token, s] of sessions) {
+    if (s && typeof s === 'object' && s.scope && s.scope.kind === 'super' && s.scope.userId === userId) sessions.delete(token);
+  }
+}
+
+function accountUserId(req) {
+  const a = accountSessionOf(req);
+  return a ? a.scope.userId : '';
+}
+
+function currentMember(req, householdId) {
+  const uidForRequest = accountUserId(req);
+  if (uidForRequest) return memberForUser(householdId, uidForRequest);
+  const d = deviceMember(req);
+  if (!d) return null;
+  const h = state.households.find((x) => x.id === householdId);
+  return h && (h.members || []).find((m) => m.id === d.memberId) || null;
+}
+
+/** 账户模式下，日常数据也只能读写已经加入的家庭；旧设备令牌继续走兼容路径。 */
+function accountCanAccessHousehold(req, householdId) {
+  const account = accountSessionOf(req);
+  if (!account || !householdId) return !account || !householdId;
+  if (sessionOf(req)) return true; // 绑定账户的超级授权可跨家庭
+  return !!memberForUser(householdId, account.scope.userId);
+}
+
+function requireAccountHousehold(req, res, householdId) {
+  if (accountCanAccessHousehold(req, householdId)) return true;
+  sendError(res, 403, '请先加入这个家庭，才能查看或修改它的家庭数据');
+  return false;
+}
 
 function seedDishes() {
   return [
@@ -585,6 +750,7 @@ function seedDishes() {
 
 function defaultState() {
   return {
+    users: [],
     categories: [
       { id: 'c_home', name: '家常菜', order: 1 },
       { id: 'c_staple', name: '主食', order: 2 },
@@ -774,7 +940,10 @@ function normMembers(input, prevById, prevByName) {
     let suffix = 2;
     while (seenLoginId.has(loginId)) loginId = `${requestedLoginId || id}-${suffix++}`;
     seenLoginId.add(loginId);
-    out.push({ id, name, loginId, emoji, role, password });
+    const userId = isObj && typeof m.userId === 'string' && m.userId
+      ? safeText(m.userId, 80)
+      : old && typeof old.userId === 'string' ? old.userId : '';
+    out.push({ id, name, loginId, emoji, role, password, ...(userId ? { userId } : {}) });
   }
   return out;
 }
@@ -1019,6 +1188,59 @@ function loadState() {
     state.households[0].members = legacyMembers;
   }
   delete state.settings.members; // 成员改由各家庭自己持有
+
+  // 全局账户迁移：旧成员继续保留自己的 member.id，新增 userId 作为跨家庭
+  // 身份键。迁移按稳定 member.id 处理，不按显示名合并，重复启动幂等。
+  state.users = Array.isArray(state.users) ? state.users : [];
+  const userIds = new Set();
+  const loginIds = new Set();
+  state.users = state.users
+    .filter((u) => u && typeof u === 'object')
+    .map((u) => {
+      const n = normalizeUser(u, u);
+      if (userIds.has(n.id)) n.id = uid('u_');
+      let requested = n.loginId || generatedLoginId();
+      let suffix = 2;
+      while (loginIds.has(requested)) requested = `${n.loginId}-${suffix++}`;
+      n.loginId = requested;
+      userIds.add(n.id);
+      loginIds.add(n.loginId);
+      return n;
+    });
+  const usersById = new Map(state.users.map((u) => [u.id, u]));
+  let usersChanged = false;
+  let housesChanged = false;
+  for (const h of state.households) {
+    for (const m of h.members || []) {
+      let user = m.userId && usersById.get(m.userId);
+      if (!user) {
+        const password = memberPassword(m);
+        let loginId = normalizeLoginId(m.loginId, m.name) || generatedLoginId();
+        const baseLogin = loginId;
+        let suffix = 2;
+        while (loginIds.has(loginId)) loginId = `${baseLogin}-${suffix++}`;
+        user = normalizeUser({
+          id: uid('u_'),
+          loginId,
+          displayName: m.name,
+          emoji: m.emoji,
+          passwordHash: hashUserPassword(password || DEFAULT_ACCOUNT_PASSWORD),
+          legacyDefaultPassword: !password,
+        });
+        state.users.push(user);
+        usersById.set(user.id, user);
+        userIds.add(user.id);
+        loginIds.add(user.loginId);
+        usersChanged = true;
+      }
+      if (m.userId !== user.id) {
+        m.userId = user.id;
+        housesChanged = true;
+      }
+    }
+  }
+  if (usersChanged) scheduleSave('users');
+  if (housesChanged) scheduleSave('households');
 
   const hhIds = new Set(state.households.map((h) => h.id));
   const fallbackH = state.households[0].id;
@@ -1412,6 +1634,7 @@ function backupPayload() {
     plans: state.plans,
     notes: state.notes,
     access: state.access,
+    users: state.users,
   };
 }
 
@@ -1420,6 +1643,12 @@ function backupPayload() {
  * 上传恢复和备份恢复共用这一段，免得两条路修一个漏一个。
  */
 function applyBackup(src) {
+  if (Array.isArray(src.users)) {
+    const seen = new Set();
+    state.users = src.users
+      .map((u) => (u && typeof u === 'object' ? normalizeUser(u, undefined) : null))
+      .filter((u) => u && u.passwordHash && !seen.has(u.id) && (seen.add(u.id), true));
+  }
   state.categories = Array.isArray(src.categories) ? src.categories : state.categories;
   state.dishes = src.dishes.map((d) => normDish(d, undefined, true)).filter(Boolean);
   if (Array.isArray(src.orders)) {
@@ -1463,6 +1692,7 @@ function applyBackup(src) {
           id: safeText(r.id, 40),
           name: safeText(r.name, 20),
           householdId: safeText(r.householdId, 40),
+          ...(r.applicantUserId ? { applicantUserId: safeText(r.applicantUserId, 80) } : {}),
           note: safeText(r.note, 100),
           at: safeText(r.at, 30) || nowISO(),
           status: r.status === 'ok' ? 'ok' : r.status === 'no' ? 'no' : 'pending',
@@ -1984,7 +2214,15 @@ function pruneSessions() {
 function issueSession(scope) {
   if (sessions.size > 200) pruneSessions();
   const token = crypto.randomBytes(24).toString('hex');
-  sessions.set(token, { exp: Date.now() + SESSION_TTL, scope: scope || { kind: 'anon' } });
+  const actualScope = scope || { kind: 'anon' };
+  const fixedExp = actualScope.kind === 'super'
+    ? Number(actualScope.fixedExp) || Date.now() + SUPER_GRANT_TTL_MS
+    : 0;
+  sessions.set(token, {
+    exp: fixedExp || Date.now() + SESSION_TTL,
+    ...(fixedExp ? { fixedExp } : {}),
+    scope: actualScope,
+  });
   return token;
 }
 
@@ -1993,13 +2231,26 @@ function sessionOf(req) {
   if (!token || typeof token !== 'string') return null;
   const s = sessions.get(token);
   if (!s) return null;
-  const exp = typeof s === 'number' ? s : s && s.exp;
+  const exp = typeof s === 'number' ? s : s && (s.fixedExp || s.exp);
   if (!exp || Date.now() > exp) {
     sessions.delete(token);
     return null;
   }
   const scope = (typeof s === 'object' && s.scope) || { kind: 'super' };
-  sessions.set(token, { exp: Date.now() + SESSION_TTL, scope }); // 滑动续期
+  if (scope.kind === 'super') {
+    const account = accountSessionOf(req);
+    if (!account || scope.userId !== account.scope.userId || scope.accountToken !== account.token) {
+      sessions.delete(token);
+      return null;
+    }
+    // 超级授权是固定 12 小时，不滑动续期；并且绑定签发时的设备标识。
+    if (scope.deviceId && scope.deviceId !== account.scope.deviceId) {
+      sessions.delete(token);
+      return null;
+    }
+    return { token, scope };
+  }
+  sessions.set(token, { exp: Date.now() + SESSION_TTL, scope }); // 家庭会话滑动续期
   return { token, scope };
 }
 
@@ -2012,8 +2263,18 @@ function sessionOf(req) {
  *   3. 什么都没带 —— 匿名，只能用日常功能
  * 家庭口令换来的会话只提升到「家庭管理员」，不改变「我是谁」。
  */
-function whoami(req) {
+function whoami(req, householdId) {
   if (isSuperAdmin(req)) return { kind: 'super', memberId: '', name: '' };
+  const account = accountSessionOf(req);
+  if (account) {
+    const m = currentMember(req, householdId || state.settings.currentHouseholdId);
+    if (m) return { kind: 'member', memberId: m.id, name: m.name, householdId: householdId || m.householdId || '' , userId: account.scope.userId };
+    const first = membershipsOf(account.scope.userId)[0];
+    const firstMember = first && memberForUser(first.id, account.scope.userId);
+    return firstMember
+      ? { kind: 'member', memberId: firstMember.id, name: firstMember.name, householdId: first.id, userId: account.scope.userId }
+      : { kind: 'account', memberId: '', name: userById(account.scope.userId)?.displayName || '', userId: account.scope.userId };
+  }
   const d = deviceMember(req);
   if (!d) return { kind: 'anon', memberId: '', name: '' };
   // 令牌可能已经被撤销（成员被删了、PIN 被重置）——认不得就当匿名
@@ -2029,7 +2290,9 @@ function whoami(req) {
  * 设了口令才启用分工。
  */
 function isSuperAdmin(req) {
-  if (!state.settings.adminPin) return true;
+  // 旧版未设置全局口令时保持开放兼容；新账户仍按自己的家庭关系判权，
+  // 不能因为「没设口令」就在所有家庭间自动变成超级管理员。
+  if (!state.settings.adminPin) return !accountSessionOf(req);
   const s = sessionOf(req);
   return !!s && s.scope.kind === 'super';
 }
@@ -2110,9 +2373,12 @@ function canDoSensitive(req, householdId) {
   const house = state.households.find((h) => h.id === householdId);
   if (!house) return false;
   if (house.pin) return false; // 这个家有口令，没输过就不算数
+  const uidForRequest = accountUserId(req);
   const me = deviceMember(req);
-  if (!me) return false;
-  const member = (house.members || []).find((x) => x.id === me.memberId);
+  if (!me && !uidForRequest) return false;
+  const member = uidForRequest
+    ? (house.members || []).find((x) => x.userId === uidForRequest)
+    : (house.members || []).find((x) => x.id === me.memberId);
   // 还没设密码的 owner：这一家既然一个密码都没有，就没有冒充可谈
   return !!(member && member.role === 'owner' && !memberPassword(member));
 }
@@ -2130,6 +2396,11 @@ function isHouseAdmin(req, householdId) {
   const s = houseSessionOf(req);
   if (s && s.scope.id === householdId) return true;
   if (house.pin) return false; // 这个家设了口令，没输过就不算管理员
+  const uidForRequest = accountUserId(req);
+  if (uidForRequest) {
+    const relation = memberForUser(householdId, uidForRequest);
+    return !!(relation && relation.role === 'owner');
+  }
   const me = deviceMember(req);
   const isOwner = me
     ? (house.members || []).some((m) => m.id === me.memberId && m.role === 'owner')
@@ -2148,7 +2419,7 @@ function isHouseAdmin(req, householdId) {
 function canWrite(req, obj) {
   if (!obj) return false;
   if (!obj.householdId) return canWriteShared(req);
-  const who = whoami(req);
+  const who = whoami(req, obj.householdId);
   if (who.kind === 'super') return true;
   if (isHouseAdmin(req, obj.householdId)) return true;
   // 本家的菜，但作者查不到出处 → 放开
@@ -2158,6 +2429,8 @@ function canWrite(req, obj) {
 
 /** 菜谱或分类的可见性：不再按「私房」锁死，一律可见，只分能不能改 */
 function isMyMember(req, householdId) {
+  const uidForRequest = accountUserId(req);
+  if (uidForRequest) return !!memberForUser(householdId, uidForRequest);
   const me = deviceMember(req);
   if (!me) return false;
   const h = state.households.find((x) => x.id === householdId);
@@ -2180,11 +2453,12 @@ function canWriteShared(req) {
   // 家庭会话走的是 X-House-Token，这里必须用 houseSessionOf，否则读到的是超管那条头
   if (houseSessionOf(req)) return true;
   // 本家没设口令的 owner 也算，免得「没设口令反而什么都干不了」
+  const uidForRequest = accountUserId(req);
   const me = deviceMember(req);
-  if (!me) return false;
+  if (!me && !uidForRequest) return false;
   for (const h of state.households) {
     if (h.pin) continue;
-    if ((h.members || []).some((m) => m.id === me.memberId && m.role === 'owner')) return true;
+    if ((h.members || []).some((m) => (uidForRequest ? m.userId === uidForRequest : m.id === me.memberId) && m.role === 'owner')) return true;
   }
   return false;
 }
@@ -2198,10 +2472,11 @@ function canWriteShared(req) {
 function isAnyHouseAdmin(req) {
   if (isSuperAdmin(req)) return true;
   if (houseSessionOf(req)) return true;
+  const uidForRequest = accountUserId(req);
   const me = deviceMember(req);
-  if (!me) return false;
+  if (!me && !uidForRequest) return false;
   return state.households.some(
-    (h) => !h.pin && (h.members || []).some((m) => m.id === me.memberId && m.role === 'owner')
+    (h) => !h.pin && (h.members || []).some((m) => (uidForRequest ? m.userId === uidForRequest : m.id === me.memberId) && m.role === 'owner')
   );
 }
 
@@ -2311,6 +2586,84 @@ async function handleAPI(req, res, url) {
   const route = seg.slice(1);
   const method = req.method;
 
+  // ---- 全局账户：新设备先登录/注册，账户身份跨家庭复用 ----
+  if (route[0] === 'account') {
+    if (method === 'POST' && route.length === 2 && route[1] === 'register') {
+      const body = await readBody(req);
+      const requested = normalizeLoginId(body.loginId, '');
+      const loginId = requested || generatedLoginId();
+      if (userByLoginId(loginId)) return sendError(res, 409, '这个登录 ID 已经被使用，请换一个');
+      const password = body.password === undefined || body.password === '' ? DEFAULT_ACCOUNT_PASSWORD : String(body.password);
+      if (password.length < 4 || password.length > 64) return sendError(res, 400, '密码要 4 到 64 个字符');
+      const user = normalizeUser({
+        id: uid('u_'),
+        loginId,
+        displayName: safeText(body.displayName, 40).trim() || loginId,
+        emoji: safeText(body.emoji, 4) || '🙋',
+        passwordHash: hashUserPassword(password),
+        legacyDefaultPassword: password === DEFAULT_ACCOUNT_PASSWORD,
+      });
+      state.users.push(user);
+      scheduleSave('users');
+      const issued = issueAccountToken(user.id, req);
+      return sendJSON(res, 200, {
+        ok: true,
+        data: { accountToken: issued.token, deviceId: issued.deviceId, user: publicUser(user), households: accountHouseholds(user.id) },
+      });
+    }
+
+    if (method === 'POST' && route.length === 2 && route[1] === 'login') {
+      const body = await readBody(req);
+      const loginId = normalizeLoginId(body.loginId, '');
+      const user = userByLoginId(loginId);
+      const password = body.password === undefined || body.password === '' ? DEFAULT_ACCOUNT_PASSWORD : String(body.password);
+      if (!user || !verifyUserPassword(password, user.passwordHash)) return sendError(res, 401, '登录 ID 或密码不对');
+      const issued = issueAccountToken(user.id, req);
+      return sendJSON(res, 200, {
+        ok: true,
+        data: { accountToken: issued.token, deviceId: issued.deviceId, user: publicUser(user), households: accountHouseholds(user.id) },
+      });
+    }
+
+    if (method === 'GET' && route.length === 2 && route[1] === 'me') {
+      const account = accountSessionOf(req);
+      if (!account) return sendError(res, 401, '账户登录已过期，请重新登录');
+      const user = userById(account.scope.userId);
+      return sendJSON(res, 200, {
+        ok: true,
+        data: { accountToken: account.token, deviceId: account.scope.deviceId, user: publicUser(user), households: accountHouseholds(user.id) },
+      });
+    }
+
+    if (method === 'POST' && route.length === 2 && route[1] === 'logout') {
+      const account = accountSessionOf(req);
+      if (account) {
+        accountSessions.delete(account.token);
+        for (const [token, s] of sessions) {
+          if (s && s.scope && s.scope.kind === 'super' && s.scope.accountToken === account.token) sessions.delete(token);
+        }
+      }
+      return sendJSON(res, 200, { ok: true, data: { loggedOut: true } });
+    }
+
+    if (method === 'PUT' && route.length === 2 && route[1] === 'password') {
+      const account = accountSessionOf(req);
+      if (!account) return sendError(res, 401, '账户登录已过期，请重新登录');
+      const body = await readBody(req);
+      const password = typeof body.password === 'string' ? body.password : '';
+      if (password.length < 4 || password.length > 64) return sendError(res, 400, '密码要 4 到 64 个字符');
+      const user = userById(account.scope.userId);
+      user.passwordHash = hashUserPassword(password);
+      user.legacyDefaultPassword = password === DEFAULT_ACCOUNT_PASSWORD;
+      user.updatedAt = nowISO();
+      revokeAccountSessions(user.id);
+      const issued = issueAccountToken(user.id, req);
+      scheduleSave('users');
+      return sendJSON(res, 200, { ok: true, data: { accountToken: issued.token, deviceId: issued.deviceId, user: publicUser(user), households: accountHouseholds(user.id) } });
+    }
+    return sendError(res, 404, '账户接口不存在');
+  }
+
   // ---- 登录换会话 token ----
   if (method === 'POST' && route.length === 1 && route[0] === 'auth') {
     const body = await readBody(req);
@@ -2318,7 +2671,18 @@ async function handleAPI(req, res, url) {
     const given = typeof body.pin === 'string' ? body.pin.trim() : '';
     if (!pin) return sendJSON(res, 200, { ok: true, data: { token: '', hasPin: false } });
     if (given !== pin) return sendError(res, 401, '口令不对');
-    return sendJSON(res, 200, { ok: true, data: { token: issueSession({ kind: 'super' }), hasPin: true } });
+    const account = accountSessionOf(req);
+    if (!account) return sendError(res, 401, '输入全局管理口令前，请先登录账户');
+    const fixedExp = Date.now() + SUPER_GRANT_TTL_MS;
+    const token = issueSession({
+      kind: 'super',
+      userId: account.scope.userId,
+      accountToken: account.token,
+      deviceId: account.scope.deviceId,
+      issuedAt: Date.now(),
+      fixedExp,
+    });
+    return sendJSON(res, 200, { ok: true, data: { token, hasPin: true, expiresAt: fixedExp, fixedExp } });
   }
 
   /* ---- 身份认领 ----
@@ -2479,7 +2843,7 @@ async function handleAPI(req, res, url) {
     return sendError(res, 401, '需要管理口令，请先在「管理」页解锁');
   }
   const needsAdmin =
-    route[0] === 'households' ||
+    (route[0] === 'households' && !(method === 'POST' && !route[1] && accountUserId(req))) ||
     route[0] === 'dishes' ||
     route[0] === 'categories' ||
     // 点餐提交谁都能做（人总得能点菜），但改状态、删除是管理员的活
@@ -2627,15 +2991,23 @@ async function handleAPI(req, res, url) {
     // 口令绝不能跟着 state 一起发出去：否则局域网里任何人按 F12
     // 就能在返回的 JSON 里读到明文，管理口令形同虚设。
     const { adminPin, ...pubSettings } = state.settings;
+    const account = accountSessionOf(req);
+    if (adminPin && req.headers['x-auth-token'] && !isSuperAdmin(req)) {
+      return sendError(res, 401, '超级管理员授权已失效，请重新输入全局管理口令');
+    }
+    const accountHouses = account ? membershipsOf(account.scope.userId) : [];
+    const superAccess = account ? !!sessionOf(req) : isAuthed(req);
     const requestedHouseholdId = safeText(url.searchParams.get('householdId'), 40);
     const requestedHousehold = state.households.find((h) => h.id === requestedHouseholdId);
-    const visibleHouseholdId = requestedHousehold
+    const allowedRequested = !account || superAccess || accountHouses.some((h) => h.id === (requestedHousehold && requestedHousehold.id));
+    const fallbackHouse = account && !superAccess ? accountHouses[0] : state.households[0];
+    const visibleHouseholdId = allowedRequested && requestedHousehold
       ? requestedHousehold.id
-      : state.households[0]
-      ? state.households[0].id
+      : fallbackHouse
+      ? fallbackHouse.id
       : '';
     // 没设口令时仍是兼容旧版本的开放模式；设了口令后，只有有效会话能看全量状态。
-    const fullState = !adminPin || isAuthed(req);
+    const fullState = (!account && !adminPin) || superAccess;
     const visibleDishes = fullState
       ? state.dishes
       : state.dishes.filter((d) => !d.householdId || d.householdId === visibleHouseholdId);
@@ -2653,9 +3025,15 @@ async function handleAPI(req, res, url) {
         );
     const visibleAccess = fullState
       ? state.access.requests
-      : state.access.requests.filter(
-          (r) => r.name === safeText(url.searchParams.get('memberName'), 20).trim()
-        );
+      : account
+      ? state.access.requests.filter((r) => r.applicantUserId === account.scope.userId || r.name === safeText(url.searchParams.get('memberName'), 20).trim())
+      : state.access.requests.filter((r) => r.name === safeText(url.searchParams.get('memberName'), 20).trim());
+    const visibleHouseholds = account && !fullState
+      ? accountHouses.map(publicHousehold)
+      : publicHouseholds();
+    const accountInfo = account
+      ? { user: publicUser(userById(account.scope.userId)), households: accountHouseholds(account.scope.userId), deviceId: account.scope.deviceId }
+      : null;
     return sendJSON(res, 200, {
       ok: true,
       data: {
@@ -2666,7 +3044,7 @@ async function handleAPI(req, res, url) {
           : state.orders.filter((o) => o.householdId === visibleHouseholdId),
         settings: { ...pubSettings, hasPin: !!adminPin },
         // 家庭和成员的口令**永远不进这个响应** —— 这个接口局域网里谁都能调
-        households: publicHouseholds(),
+        households: visibleHouseholds,
         pantry: fullState
           ? state.pantry
           : state.pantry.filter((p) => p.householdId === visibleHouseholdId),
@@ -2675,6 +3053,7 @@ async function handleAPI(req, res, url) {
           : state.plans.filter((p) => p.householdId === visibleHouseholdId),
         notes: { notes: visibleNotes, votes: visibleVotes },
         access: { requests: visibleAccess },
+        ...(accountInfo ? { account: accountInfo, superExpiresAt: (() => { const s = sessionOf(req); return s && s.scope && s.scope.kind === 'super' ? s.scope.fixedExp : 0; })() } : {}),
       },
     });
   }
@@ -2707,37 +3086,43 @@ async function handleAPI(req, res, url) {
       // 管理员看全部（超管，或者至少管着一个家的 owner）；
       // 其余人只看得到自己那条，名字从 device token 推，不靠客户端报
       const fullAccess = isAnyHouseAdmin(req);
+      const uidForRequest = accountUserId(req);
       const requests = fullAccess
         ? state.access.requests
+        : uidForRequest
+        ? state.access.requests.filter((r) => r.applicantUserId === uidForRequest || (!r.applicantUserId && r.name === whoami(req).name))
         : state.access.requests.filter((r) => r.name === whoami(req).name);
       return sendJSON(res, 200, { ok: true, data: requests });
     }
 
     if (method === 'POST' && !id) {
-      const name = safeText(body.name, 20).trim();
+      const uidForRequest = accountUserId(req);
+      const accountUser = uidForRequest && userById(uidForRequest);
+      const name = safeText(body.name, 20).trim() || (accountUser && accountUser.displayName) || '';
       const householdId = safeText(body.householdId, 40);
       if (!name) return sendError(res, 400, '写上你是谁，管理员才知道批给谁');
       const house = state.households.find((h) => h.id === householdId);
       if (!house) return sendError(res, 404, '这个家庭不存在');
-      if (house.members.some((m) => m.name === name)) {
+      if (house.members.some((m) => (uidForRequest && m.userId === uidForRequest) || (!uidForRequest && m.name === name))) {
         return sendError(res, 409, `「${name}」已经是${house.name}的成员了`);
       }
       // 同一家的同名申请只留最新的一条，免得刷出一长串等价的待办
-      const dup = state.access.requests.find((r) => r.name === name && r.householdId === householdId);
+      const dup = state.access.requests.find((r) => r.householdId === householdId && (uidForRequest ? r.applicantUserId === uidForRequest : r.name === name));
       if (dup) {
         dup.at = nowISO();
         dup.note = safeText(body.note, 100).trim();
         return sendJSON(res, 200, { ok: true, data: dup, updated: true });
       }
-      const req = {
+      const jrNew = {
         id: uid('j_'),
         name,
         householdId,
+        ...(uidForRequest ? { applicantUserId: uidForRequest } : {}),
         note: safeText(body.note, 100).trim(),
         at: nowISO(),
         status: 'pending',
       };
-      state.access.requests.unshift(req);
+      state.access.requests.unshift(jrNew);
       // 别无限堆：已处理的只留最近 20 条，待处理的全留
       const done = state.access.requests.filter((r) => r.status !== 'pending');
       if (done.length > 20) {
@@ -2745,7 +3130,7 @@ async function handleAPI(req, res, url) {
         state.access.requests = state.access.requests.filter((r) => !drop.has(r.id));
       }
       scheduleSave('access');
-      return sendJSON(res, 200, { ok: true, data: req });
+      return sendJSON(res, 200, { ok: true, data: jrNew });
     }
 
     if (method === 'PUT' && id) {
@@ -2768,11 +3153,17 @@ async function handleAPI(req, res, url) {
       // 被批准的人在成员列表里还是找不到自己，等于没批
       if (status === 'ok') {
         const house = state.households.find((h) => h.id === jr.householdId);
-        if (house && !house.members.some((m) => m.name === jr.name)) {
+        const applicant = jr.applicantUserId && userById(jr.applicantUserId);
+        if (applicant && membershipsOf(jr.applicantUserId).length >= 5) {
+          jr.status = 'pending';
+          return sendError(res, 409, '这个账号已经加入 5 个家庭，需先退出一个家庭');
+        }
+        if (house && !house.members.some((m) => (jr.applicantUserId && m.userId === jr.applicantUserId) || (!jr.applicantUserId && m.name === jr.name))) {
           house.members.push({
             id: uid('m_'),
+            ...(jr.applicantUserId ? { userId: jr.applicantUserId } : {}),
             name: jr.name,
-            loginId: uniqueLoginId(house.members, jr.name, jr.name),
+            loginId: uniqueLoginId(house.members, applicant ? applicant.loginId : jr.name, jr.name),
             emoji: MEMBER_EMOJI[house.members.length % MEMBER_EMOJI.length],
             // 新人一律是普通成员。把他设成管理员等于把家门钥匙寄过去。
             role: 'member',
@@ -2832,7 +3223,7 @@ async function handleAPI(req, res, url) {
         copy.name = src.name;
         copy.isFavorite = false;
         copy.createdAt = nowISO();
-        const who = whoami(req);
+        const who = whoami(req, hhId);
         copy.authorId = who.kind === 'member' ? who.memberId : '';
         copy.authorName = who.kind === 'member' ? who.name : '';
         const bad = categoryProblem(copy);
@@ -2851,7 +3242,7 @@ async function handleAPI(req, res, url) {
         }
         const dish = normDish({ ...(await readBody(req)), householdId: hhId });
         if (!dish || !dish.name) return sendError(res, 400, '菜名不能为空');
-        const who = whoami(req);
+        const who = whoami(req, hhId);
         dish.authorId = who.kind === 'member' ? who.memberId : '';
         dish.authorName = who.kind === 'member' ? who.name : '';
         const bad = categoryProblem(dish);
@@ -2940,6 +3331,7 @@ async function handleAPI(req, res, url) {
       if (state.categories.some((c) => c.name === name)) {
         return sendError(res, 400, '已经有同名的分类了（也可能属于别的家庭）。换个名字吧。');
       }
+      if (!requireAccountHousehold(req, res, hhId)) return;
       const cat = { id: uid('c_'), name, householdId: hhId, order: state.categories.length + 1 };
       state.categories.push(cat);
       scheduleSave('categories');
@@ -2948,6 +3340,7 @@ async function handleAPI(req, res, url) {
     if (method === 'PUT' && id) {
       const cat = state.categories.find((c) => c.id === id);
       if (!cat) return sendError(res, 404, '分类不存在');
+      if (cat.householdId && !requireAccountHousehold(req, res, cat.householdId)) return;
       if (!owns(cat)) return sendError(res, 403, '这是公共分类（或别人家的分类），改不了。');
       const body = await readBody(req);
       const name = safeText(body.name, 24).trim() || cat.name;
@@ -2978,24 +3371,29 @@ async function handleAPI(req, res, url) {
   if (route[0] === 'households') {
     const id = route[1];
     if (method === 'POST' && !id) {
+      const uidForRequest = accountUserId(req);
+      if (uidForRequest && membershipsOf(uidForRequest).length >= 5) {
+        return sendError(res, 409, '一个账号最多加入 5 个有效家庭，请先退出一个家庭');
+      }
       const body = await readBody(req);
       const h = normHousehold({
         ...body,
         emoji: safeText(body.emoji, 4) || HOUSEHOLD_EMOJI[state.households.length % HOUSEHOLD_EMOJI.length],
       });
       if (!h) return sendError(res, 400, '家庭名称不能为空');
-      // 新建的一律是「普通家庭」：能自己用，但共享菜单和拉人进家要超级管理员点头。
-      // status 不接受前端传值 —— 自己给自己发「已认证」就等于这套审核不存在。
-      h.status = 'normal';
+      // 新账户创建的家庭立即可用；保留旧设备创建的 normal 状态以兼容旧版审核流程。
+      h.status = uidForRequest ? 'approved' : 'normal';
       state.households.push(h);
       // 谁建的，他就是这家的第一个管理员
       const me = deviceMember(req);
-      if (me) {
+      if (uidForRequest || me) {
         const target = state.households[state.households.length - 1];
+        const accountUser = uidForRequest && userById(uidForRequest);
         target.members.push({
-          id: me.memberId,
-          name: me.name,
-          loginId: uniqueLoginId(target.members, me.name, me.name),
+          id: me ? me.memberId : uid('m_'),
+          userId: uidForRequest || '',
+          name: accountUser ? accountUser.displayName : me.name,
+          loginId: uniqueLoginId(target.members, accountUser ? accountUser.loginId : me.name, me ? me.name : ''),
           emoji: MEMBER_EMOJI[0],
           role: 'owner',
           password: '',
@@ -3130,6 +3528,7 @@ async function handleAPI(req, res, url) {
     // 加一道菜进某家庭某周的计划
     if (method === 'POST' && route[1] === 'items') {
       const body = await readBody(req);
+      if (!requireAccountHousehold(req, res, resolveHouseholdId(body.householdId))) return;
       const dish = body.dishId ? state.dishes.find((d) => d.id === body.dishId) : null;
       const item = normPlanItem({
         ...body,
@@ -3159,6 +3558,7 @@ async function handleAPI(req, res, url) {
       if (!ids.size) return sendError(res, 400, '没有选中任何一道');
       let removed = 0;
       for (const plan of state.plans) {
+        if (!accountCanAccessHousehold(req, plan.householdId)) continue;
         const keep = plan.items.filter((it) => !ids.has(it.id));
         if (keep.length !== plan.items.length) {
           removed += plan.items.length - keep.length;
@@ -3175,6 +3575,7 @@ async function handleAPI(req, res, url) {
       const target = route[2];
       let hit = null;
       for (const plan of state.plans) {
+        if (!accountCanAccessHousehold(req, plan.householdId)) continue;
         const i = plan.items.findIndex((it) => it.id === target);
         if (i >= 0) {
           hit = plan.items.splice(i, 1)[0];
@@ -3190,6 +3591,7 @@ async function handleAPI(req, res, url) {
     // 查某家庭某周的计划（不传参数就是当前家庭本周）
     if (method === 'GET' && !id) {
       const hid = resolveHouseholdId(url.searchParams.get('householdId'));
+      if (!requireAccountHousehold(req, res, hid)) return;
       const wk = mondayOf(url.searchParams.get('weekOf'));
       return sendJSON(res, 200, { ok: true, data: findPlan(hid, wk, false) });
     }
@@ -3197,6 +3599,7 @@ async function handleAPI(req, res, url) {
     // 清空某家庭某周
     if (method === 'DELETE' && !id) {
       const hid = resolveHouseholdId(url.searchParams.get('householdId'));
+      if (!requireAccountHousehold(req, res, hid)) return;
       const wk = mondayOf(url.searchParams.get('weekOf'));
       const plan = findPlan(hid, wk, false);
       if (!plan) return sendJSON(res, 200, { ok: true, data: { removed: 0 } });
@@ -3214,6 +3617,7 @@ async function handleAPI(req, res, url) {
     if (method === 'POST' && !id) {
       const item = normPantryItem(await readBody(req));
       if (!item) return sendError(res, 400, '食材名不能为空');
+      if (!requireAccountHousehold(req, res, item.householdId)) return;
       state.pantry.unshift(item);
       scheduleSave('pantry');
       return sendJSON(res, 200, { ok: true, data: item });
@@ -3223,6 +3627,7 @@ async function handleAPI(req, res, url) {
       if (idx < 0) return sendError(res, 404, '库存条目不存在');
       const item = normPantryItem(await readBody(req), state.pantry[idx]);
       if (!item) return sendError(res, 400, '食材名不能为空');
+      if (!requireAccountHousehold(req, res, item.householdId)) return;
       state.pantry[idx] = item;
       scheduleSave('pantry');
       return sendJSON(res, 200, { ok: true, data: item });
@@ -3230,6 +3635,7 @@ async function handleAPI(req, res, url) {
     if (method === 'DELETE' && id) {
       const idx = state.pantry.findIndex((p) => p.id === id);
       if (idx < 0) return sendError(res, 404, '库存条目不存在');
+      if (!requireAccountHousehold(req, res, state.pantry[idx].householdId)) return;
       const [gone] = state.pantry.splice(idx, 1);
       scheduleSave('pantry');
       return sendJSON(res, 200, { ok: true, data: gone });
@@ -3245,7 +3651,7 @@ async function handleAPI(req, res, url) {
         if (!ids.size) return sendError(res, 400, '没有选中任何一样');
         const before = state.pantry.length;
         // 一次过滤删完，而不是循环 splice：省掉「边删边比对」的坑
-        state.pantry = state.pantry.filter((p) => !ids.has(p.id));
+        state.pantry = state.pantry.filter((p) => !(ids.has(p.id) && accountCanAccessHousehold(req, p.householdId)));
         scheduleSave('pantry');
         return sendJSON(res, 200, {
           ok: true,
@@ -3253,6 +3659,7 @@ async function handleAPI(req, res, url) {
         });
       }
       const hid = safeText(url.searchParams.get('householdId'), 40);
+      if (!requireAccountHousehold(req, res, hid || resolveHouseholdId(hid))) return;
       const scope = safeText(url.searchParams.get('scope'), 12);
       // 少了 scope 就直接拒：以前这里是 return false（=删），
       // 意味着误调一次接口就能把全家的保质期食材清空
@@ -3284,6 +3691,7 @@ async function handleAPI(req, res, url) {
     if (method === 'POST' && route.length === 1) {
       const note = normNote(await readBody(req));
       if (!note.text) return sendError(res, 400, '写点什么再发吧');
+      if (!requireAccountHousehold(req, res, note.householdId)) return;
       if (note.kind === 'dish' && !state.dishes.some((d) => d.id === note.dishId)) {
         return sendError(res, 400, '这道菜不在菜单里了');
       }
@@ -3297,7 +3705,7 @@ async function handleAPI(req, res, url) {
       const ids = parseIds(url.searchParams.get('ids'));
       if (!ids.size) return sendError(res, 400, '要删哪几条留言？');
       const before = board.notes.length;
-      board.notes = board.notes.filter((n) => !ids.has(n.id));
+      board.notes = board.notes.filter((n) => !(ids.has(n.id) && accountCanAccessHousehold(req, n.householdId)));
       scheduleSave('notes');
       return sendJSON(res, 200, { ok: true, data: { removed: before - board.notes.length } });
     }
@@ -3305,6 +3713,7 @@ async function handleAPI(req, res, url) {
     if (route[1]) {
       const note = findNote(route[1]);
       if (!note) return sendError(res, 404, '留言不存在');
+      if (!requireAccountHousehold(req, res, note.householdId)) return;
 
       if (method === 'PUT' && route.length === 2) {
         const next = normNote({ ...note, ...(await readBody(req)) }, note);
@@ -3392,7 +3801,9 @@ async function handleAPI(req, res, url) {
     const dishId = safeText(body.dishId, 40);
     const who = safeText(body.who, 20).trim();
     const role = body.role === 'cook' ? 'cook' : 'want';
-    if (!state.dishes.some((d) => d.id === dishId)) return sendError(res, 404, '菜品不存在');
+    const voteDish = state.dishes.find((d) => d.id === dishId);
+    if (!voteDish) return sendError(res, 404, '菜品不存在');
+    if (voteDish.householdId && !requireAccountHousehold(req, res, voteDish.householdId)) return;
     if (!who) return sendError(res, 400, '得先告诉我是谁');
     const cur = state.notes.votes[dishId] || { want: [], cook: [] };
     const list = cur[role] || [];
@@ -3428,7 +3839,7 @@ async function handleAPI(req, res, url) {
       if (dish.householdId && !isHouseAdmin(req, dish.householdId) && !isMyMember(req, dish.householdId)) {
         return sendError(res, 403, '只能往自己家加菜');
       }
-      const who = whoami(req);
+      const who = whoami(req, dish.householdId);
       dish.authorId = who.kind === 'member' ? who.memberId : dish.authorId;
       dish.authorName = who.kind === 'member' ? who.name : dish.authorName;
       const bad = categoryProblem(dish);
@@ -3460,10 +3871,12 @@ async function handleAPI(req, res, url) {
     if (method === 'POST' && route[2] === 'duplicate' && id) {
       const src = state.dishes.find((d) => d.id === id);
       if (!src) return sendError(res, 404, '菜品不存在');
+      if (src.householdId && !requireAccountHousehold(req, res, src.householdId)) return;
+      if (!canWrite(req, src)) return sendError(res, 403, writeDenied(src));
       // 副本跟原菜一个归属：复制我家私菜不该把它变成全体共享
       const copy = normDish({ ...src, id: '', name: src.name + '（副本）' });
       copy.isFavorite = false;
-      const who = whoami(req);
+      const who = whoami(req, copy.householdId);
       copy.authorId = who.kind === 'member' ? who.memberId : '';
       copy.authorName = who.kind === 'member' ? who.name : '';
       state.dishes.unshift(copy);
@@ -3537,6 +3950,7 @@ async function handleAPI(req, res, url) {
       // 没传 householdId 就沿用原来的归属，别因为改个名字把私分类改成共享的
       const nextOwner =
         body.householdId === undefined ? cat.householdId || null : normScope(body, cat);
+      if (nextOwner && !requireAccountHousehold(req, res, nextOwner)) return;
       // 分类名全局唯一。菜品是按名字挂到分类上的，同名的两个分类会让一道菜
       // 挂到谁身上变得说不清，所以宁可报错让人换个名字。
       if (state.categories.some((c) => c.id !== id && c.name === nextName)) {
@@ -3554,6 +3968,7 @@ async function handleAPI(req, res, url) {
     if (method === 'DELETE' && id) {
       const idx = state.categories.findIndex((c) => c.id === id);
       if (idx < 0) return sendError(res, 404, '分类不存在');
+      if (state.categories[idx].householdId && !requireAccountHousehold(req, res, state.categories[idx].householdId)) return;
       const [gone] = state.categories.splice(idx, 1);
       // 该分类下菜品改为「其他」，不丢数据。
       // 只动归属相同的菜：删共享分类别去拽别家私菜，删私有分类也别碰别人同名的那份
@@ -3574,6 +3989,7 @@ async function handleAPI(req, res, url) {
     const id = route[1];
     if (method === 'POST' && !id) {
       const order = normOrder(await readBody(req));
+      if (!requireAccountHousehold(req, res, order.householdId)) return;
       state.orders.unshift(order);
       scheduleSave('orders');
       return sendJSON(res, 200, { ok: true, data: order });
@@ -3603,6 +4019,7 @@ async function handleAPI(req, res, url) {
     if (method === 'PATCH' && id) {
       const order = state.orders.find((o) => o.id === id);
       if (!order) return sendError(res, 404, '点餐不存在');
+      if (!requireAccountHousehold(req, res, order.householdId)) return;
       const body = await readBody(req);
       // 逐字段更新：只改请求里明确带上的字段，避免清空备注等未提交的内容
       if (['pending', 'cooking', 'done', 'cancelled'].includes(body.status)) {
@@ -3627,6 +4044,7 @@ async function handleAPI(req, res, url) {
     // 注意要排在「按 id 删点餐」前面，否则 /api/orders/done 会被当成删 id 为 done 的点餐
     if (method === 'DELETE' && route[1] === 'done') {
       const hid = safeText(url.searchParams.get('householdId'), 40);
+      if (!requireAccountHousehold(req, res, resolveHouseholdId(hid))) return;
       const before = state.orders.length;
       state.orders = state.orders.filter(
         (o) => o.status !== 'done' || (hid && o.householdId !== hid)
@@ -3644,13 +4062,14 @@ async function handleAPI(req, res, url) {
       );
       if (!ids.size) return sendError(res, 400, '没有选中任何一条');
       const before = state.orders.length;
-      state.orders = state.orders.filter((o) => !ids.has(o.id));
+      state.orders = state.orders.filter((o) => !(ids.has(o.id) && accountCanAccessHousehold(req, o.householdId)));
       scheduleSave('orders');
       return sendJSON(res, 200, { ok: true, data: { removed: before - state.orders.length } });
     }
     if (method === 'DELETE' && id) {
       const idx = state.orders.findIndex((o) => o.id === id);
       if (idx < 0) return sendError(res, 404, '点餐不存在');
+      if (!requireAccountHousehold(req, res, state.orders[idx].householdId)) return;
       const [gone] = state.orders.splice(idx, 1);
       scheduleSave('orders');
       return sendJSON(res, 200, { ok: true, data: gone });
