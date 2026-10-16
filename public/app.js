@@ -2451,12 +2451,13 @@ function openOrderForm(dish) {
   const picker = scopeDishes()
     .map((x) => {
       const on = d && x.id === d.id;
+      const paused = x.dishStatus === 'paused';
       const t = x.images && x.images[0] ? `<img src="${esc(x.images[0])}" alt="" />` : dishEmoji(x.name);
-      return `<button class="picker-item" data-act="pick-dish" data-id="${esc(x.id)}" aria-pressed="${!!on}">
+      return `<button class="picker-item" ${paused ? 'disabled' : ''} data-act="pick-dish" data-id="${esc(x.id)}" aria-pressed="${!!on}" title="${paused ? '暂停供应' : '正常供应'}">
         <span class="picker-thumb">${t}</span>
         <span style="flex:1;min-width:0">
           <span class="picker-name">${esc(x.name)}</span>
-          ${x.category ? `<span class="tag">${esc(x.category)}</span>` : ''}
+          ${x.category ? `<span class="tag">${esc(x.category)}</span>` : ''} ${paused ? dishStatusTag(x) : ''}
         </span>
       </button>`;
     })
