@@ -485,6 +485,8 @@ a { color: var(--primary-dark); }
 .tab-icon { font-size: 18px; }
 .tab-label { font-size: 10px; }
 .tab[aria-current="page"] { color: var(--primary-dark); font-weight: 600; }
+.tab.disabled,
+.tab:disabled { opacity: .42; cursor: not-allowed; }
 .badge {
   position: absolute; top: 7px; left: calc(50% + 7px);
   min-width: 17px; height: 17px; padding: 0 4px;
@@ -1417,6 +1419,14 @@ a { color: var(--primary-dark); }
 .account-settings-families { display: flex; flex-direction: column; gap: 7px; }
 .account-home-actions { display: flex; gap: 9px; margin-top: 18px; }
 .account-home-actions > * { flex: 1; }
+.account-menu-entry { margin: 0 0 16px; padding: 16px; border: 1px solid #ead8c6; border-radius: var(--radius); background: linear-gradient(145deg, #fffaf4, #fff3e5); box-shadow: var(--shadow-sm); }
+.account-menu-entry-head { display: flex; align-items: flex-start; gap: 10px; }
+.account-menu-entry-icon { flex: 0 0 auto; font-size: 28px; line-height: 1.2; }
+.account-menu-entry .section-title { margin: 0; }
+.account-menu-entry .section-sub { margin: 3px 0 0; }
+.account-menu-entry-text { margin: 12px 0 0; color: var(--text-mid); font-size: 13px; line-height: 1.65; }
+.account-menu-entry-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.account-menu-entry-actions > * { flex: 1 1 130px; }
 .account-hint { margin: 14px 2px; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .account-empty { padding: 34px 18px; text-align: center; color: var(--muted); }
 .account-empty span { display: block; margin-bottom: 8px; font-size: 38px; }

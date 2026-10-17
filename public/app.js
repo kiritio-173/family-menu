@@ -206,7 +206,8 @@ function dishById(id) {
    ========================================================= */
 
 function canSee(ownerId) {
-  return !ownerId || !S.householdId || ownerId === S.householdId;
+  // 未选择家庭时只能浏览共享内容，不能因为“随便看看”而看到任何家庭的私菜。
+  return !ownerId || (!!S.householdId && ownerId === S.householdId);
 }
 
 /** 这道菜 / 这个分类是不是「只有本家看得见」 */
@@ -1126,7 +1127,6 @@ async function loadState(silent) {
     if (S.householdId !== savedHouse) {
       saveSelectedHousehold(S.householdId);
     }
-    if (!S.householdId && S.view === 'menu') S.view = 'home';
     meName();
     S.loading = false;
     // 全局账户已经完成身份识别，不再启动旧的「你是哪家的 / 你是谁」向导。
@@ -1705,11 +1705,12 @@ function dishCard(d, folded) {
 }
 
 function viewMenu() {
+  const noHousehold = !S.householdId;
   const cats = sortedCategories();
   const items = visibleDishItems();
   const counts = dishScopeCounts();
   const hidden = foldedCount(items);
-  const activeCount = pendingOrders().length;
+  const activeCount = noHousehold ? 0 : pendingOrders().length;
   const week = planWeek();
   const planned = planItems(week).length;
   const plannedNames = planItems(week).map((it) => it.name).join('、');
@@ -1724,6 +1725,19 @@ function viewMenu() {
       </span>
       <span class="plan-entry-go">›</span>
     </div>`;
+
+  const accountMenuEntry = `<section class="account-menu-entry" aria-label="共享菜单导航">
+      <div class="account-menu-entry-head"><span class="account-menu-entry-icon">🌐</span><div>
+        <h2 class="section-title">共享菜单</h2>
+        <p class="section-sub">当前没有选择家庭，以下内容只读浏览。</p>
+      </div></div>
+      <p class="account-menu-entry-text">创建或加入家庭后，就能点菜、排计划并管理自己的私菜。账户身份会保留，不需要重新注册。</p>
+      <div class="account-menu-entry-actions">
+        <button class="btn" data-act="new-household">＋ 创建家庭</button>
+        <button class="btn soft" data-act="open-join-family">申请加入家庭</button>
+        <button class="btn ghost" data-act="open-account-home">返回账户首页</button>
+      </div>
+    </section>`;
 
   const all = scopeDishes();
   const chips = [{ name: '全部', count: all.length }]
@@ -1776,7 +1790,7 @@ function viewMenu() {
   }
 
   return `
-    ${planCard}
+    ${noHousehold ? accountMenuEntry : planCard}
     <div class="chip-row">${scopes}</div>
     <div class="chip-row">${chips}</div>
     ${
@@ -4562,7 +4576,32 @@ function render() {
 
   // 登录后默认停在账户首页；只有用户主动选择家庭才进入家庭工作区。
   if (!S.householdId) {
-    document.querySelectorAll('.topbar, .tabbar, #searchbar').forEach((el) => { el.hidden = true; });
+    document.querySelectorAll('.topbar, #searchbar').forEach((el) => { el.hidden = true; });
+    document.querySelectorAll('.tabbar').forEach((el) => { el.hidden = false; });
+    document.querySelectorAll('.tabbar .tab').forEach((tab) => {
+      const allowed = ['menu', 'settings'].includes(tab.dataset.view);
+      tab.disabled = !allowed;
+      tab.classList.toggle('disabled', !allowed);
+      tab.title = allowed
+        ? (tab.dataset.view === 'menu' ? '浏览共享菜单' : '账户设置与家庭管理')
+        : '请先创建或加入家庭';
+    });
+    const menuTab = document.querySelector('.tab[data-view="menu"]');
+    if (menuTab) {
+      const icon = menuTab.querySelector('.tab-icon');
+      const label = menuTab.querySelector('.tab-label');
+      if (icon) icon.textContent = '🌐';
+      if (label) label.textContent = '共享';
+    }
+    const settingsTab = document.querySelector('.tab[data-view="settings"]');
+    if (settingsTab) {
+      const label = settingsTab.querySelector('.tab-label');
+      if (label) label.textContent = '账户';
+    }
+    document.querySelectorAll('.tab').forEach((t) => {
+      const on = (t.dataset.view === 'settings' && (S.view === 'settings' || S.view === 'manage')) || t.dataset.view === S.view;
+      t.setAttribute('aria-current', on ? 'page' : 'false');
+    });
     const home = $('#view');
     if (home) {
       if (S.view === 'settings' || S.view === 'manage') home.innerHTML = viewManage();
@@ -4573,6 +4612,11 @@ function render() {
     return;
   }
   document.querySelectorAll('.topbar, .tabbar').forEach((el) => { el.hidden = false; });
+  document.querySelectorAll('.tabbar .tab').forEach((tab) => {
+    tab.disabled = false;
+    tab.classList.remove('disabled');
+    tab.title = '';
+  });
 
   const manageTab = document.querySelector('.tab[data-view="settings"]');
   if (manageTab) {
@@ -4582,6 +4626,13 @@ function render() {
     if (icon) icon.textContent = admin ? '🧺' : '🥣';
     if (label) label.textContent = '设置';
     manageTab.title = admin ? '账户、家庭、平台配置' : '账户与家庭设置';
+  }
+  const menuTab = document.querySelector('.tab[data-view="menu"]');
+  if (menuTab) {
+    const icon = menuTab.querySelector('.tab-icon');
+    const label = menuTab.querySelector('.tab-label');
+    if (icon) icon.textContent = '🍽️';
+    if (label) label.textContent = '菜单';
   }
 
   document.querySelectorAll('.tab').forEach((t) => {
@@ -4946,6 +4997,9 @@ const ACTIONS = {
   /* 导航 */
   async nav(el) {
     const v = el.dataset.view;
+    if (!S.householdId && !['menu', 'settings'].includes(v)) {
+      return toast('请先创建或加入一个家庭，才能使用这个栏目');
+    }
     S.view = v;
     closeSheet();
     window.scrollTo({ top: 0, behavior: 'smooth' });
