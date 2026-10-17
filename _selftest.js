@@ -2096,6 +2096,14 @@ async function main() {
   eq('退出后账户仍可登录', ctxBAfterLeave.status, 200);
   eq('退出后关系被删除', (ctxBAfterLeave.body.data.households || []).some((h) => h.id === ctxAId), false);
   eq('最后一名管理员不能退出', (await req('DELETE', `/api/households/${ctxAId}/members/me`, undefined, undefined, undefined, undefined, undefined, ctxA.token)).status, 409);
+  const pendingBeforeDissolve = await req('POST', '/api/join-requests', { householdId: ctxBId }, undefined, undefined, undefined, undefined, ctxB.token);
+  eq('解散前可以存在待处理申请', pendingBeforeDissolve.status, 200);
+  eq('删除非最后家庭成功', (await req('DELETE', `/api/households/${ctxBId}`, undefined, undefined, undefined, undefined, undefined, ctxA.token)).status, 200);
+  const ctxAfterDeleteB = await req('GET', '/api/state', undefined, undefined, undefined, undefined, undefined, ctxA.token);
+  ok('解散家庭清理待处理申请', !(ctxAfterDeleteB.body.data.access?.requests || []).some((r) => r.householdId === ctxBId), ctxAfterDeleteB.body.data.access);
+  eq('解散最后家庭成功', (await req('DELETE', `/api/households/${ctxAId}`, undefined, undefined, undefined, undefined, undefined, ctxA.token)).status, 200);
+  const ctxAfterDissolve = await req('GET', '/api/account/me', undefined, undefined, undefined, undefined, undefined, ctxA.token);
+  eq('解散后账户没有家庭关系', (ctxAfterDissolve.body.data.households || []).length, 0);
   await stop(contextInst);
 
   /* ---------- 收尾 ---------- */

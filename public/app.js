@@ -4717,6 +4717,10 @@ function accountSettingsHtml() {
   const u = accountUser() || {};
   const expiry = superRemainingText();
   const current = currentHousehold();
+  const currentRelation = current ? memberForHouse(current) : null;
+  const ownerCount = current ? (current.members || []).filter((m) => m && m.role === 'owner').length : 0;
+  const soleOwner = !!currentRelation && currentRelation.role === 'owner' && ownerCount <= 1;
+  const onlyMember = !!current && (current.members || []).filter(Boolean).length <= 1;
   const familyRows = accountFamilies().map((h) => {
     const rel = memberForHouse(h);
     const r = rel && rel.role === 'owner' ? '管理员' : '成员';
@@ -4733,7 +4737,11 @@ function accountSettingsHtml() {
     <button class="btn ${expiry ? 'soft' : ''} block" data-act="unlock">${expiry ? '重新输入全局管理令牌' : '输入全局管理令牌'}</button>
     <div class="section-head" style="margin-top:18px"><h2 class="section-title">我的家庭</h2><span class="section-sub">${accountHouseholdCount()}/5</span></div>
     <div class="account-settings-families">${familyRows || '<p class="section-sub">还没有加入家庭。</p>'}</div>
-    ${current ? `<button class="btn ghost block" style="margin-top:10px" data-act="leave-household">退出「${esc(current.name)}」</button>` : ''}
+    ${current ? onlyMember && soleOwner
+      ? `<button class="btn danger block" style="margin-top:10px" data-act="dissolve-household">解散「${esc(current.name)}」</button><p class="section-sub" style="margin-top:8px">这是这个家庭最后一名成员。解散后家庭菜单、私菜、点餐、库存和计划都会删除，但你的账户不会受影响。</p>`
+      : soleOwner
+      ? `<button class="btn ghost block" style="margin-top:10px" data-act="open-members">先指定其他家庭管理员</button><p class="section-sub" style="margin-top:8px">你是当前唯一管理员，至少指定一名成员为管理员后才能退出家庭。</p>`
+      : `<button class="btn ghost block" style="margin-top:10px" data-act="leave-household">退出「${esc(current.name)}」</button>` : ''}
     <div class="row-2" style="margin-top:10px"><button class="btn soft" data-act="new-household">＋ 创建家庭</button><button class="btn ghost" data-act="open-join-family">申请加入</button></div>
   </div>`;
 }
@@ -5285,6 +5293,11 @@ const ACTIONS = {
       render();
       toast(`已退出「${h.name}」`);
     } catch (e) { toast('退出失败：' + e.message); }
+  },
+  'dissolve-household'() {
+    const h = currentHousehold();
+    if (!h) return;
+    return ACTIONS['del-household']({ dataset: { id: h.id, dissolve: '1' } });
   },
   'open-join-family'(el) {
     const user = accountUser() || {};
@@ -6240,7 +6253,7 @@ const ACTIONS = {
   async 'del-household'(el) {
     const h = households().find((x) => x.id === el.dataset.id);
     if (!h) return;
-    if (households().length <= 1) return toast('至少要保留一个家庭');
+    const dissolving = el.dataset.dissolve === '1' || households().length <= 1;
     const nOrder = householdOrders(h.id).length;
     const nFood = householdPantry(h.id).length;
     const nDish = (S.data.dishes || []).filter((d) => d.householdId === h.id).length;
@@ -6251,7 +6264,7 @@ const ACTIONS = {
     if (nOrder || nFood) mine.push(`${nOrder} 条点餐、${nFood} 样库存`);
     // 共享菜不在其中：它们是全体家庭的，换一家照样看得到
     const extra = mine.length ? `\n只有「${h.name}」能看到的 ${mine.join('、')}会一起删掉，` : '';
-    if (!confirm(`删除家庭「${h.name}」？${extra}删了找不回来。`)) return;
+    if (!confirm(`${dissolving ? '解散' : '删除'}家庭「${h.name}」？${extra}删了找不回来。`)) return;
     // 删家庭是这套权限里最危险的一步 —— 没有比「抹掉一整家人的数据」更大的事了
     await withDangerPin(meMember(), '删除家庭', async () => {
       try {
@@ -6268,7 +6281,7 @@ const ACTIONS = {
       }
       await loadState(true);
       render();
-      toast('已删除');
+      toast(dissolving ? `已解散「${h.name}」` : '已删除');
     });
   },
 

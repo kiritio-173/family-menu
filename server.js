@@ -41,10 +41,21 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.20.0';
+const APP_VERSION = '1.21.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.21.0',
+    date: '2026-10-17',
+    title: '家庭解散与成员生命周期修复',
+    items: [
+      '家庭最后一名成员可以使用“解散家庭”，解散后账户保留且默认不选择家庭',
+      '最后一名管理员仍需先指定其他管理员才能退出多人家庭',
+      '解散家庭会清理待处理加入申请、设备令牌和旧家庭会话',
+      '家庭成员关系不允许保存为“有成员但无管理员”的无效状态',
+    ],
+  },
   {
     version: '1.20.0',
     date: '2026-10-17',
@@ -3001,7 +3012,7 @@ async function handleAPI(req, res, url) {
   }
 
   // 账户退出家庭：只删除当前账户在该家庭的成员关系，不删除全局账户或家庭数据。
-  // 家庭最后一名 owner 不能直接退出，必须先由管理员把另一名成员提升为 owner。
+  // 家庭最后一名 owner 不能直接退出；如果他也是最后一名成员，应走「解散家庭」。
   if (method === 'DELETE' && route.length === 4 && route[0] === 'households' && route[2] === 'members' && route[3] === 'me') {
     const account = accountSessionOf(req);
     if (!account) return sendError(res, 401, '退出家庭需要先登录账户');
@@ -3011,6 +3022,10 @@ async function handleAPI(req, res, url) {
     const idx = (house.members || []).findIndex((m) => m && m.userId === account.scope.userId);
     if (idx < 0) return sendError(res, 404, '你还不是这个家庭的成员');
     const member = house.members[idx];
+    const memberCount = (house.members || []).filter(Boolean).length;
+    if (memberCount <= 1) {
+      return sendError(res, 409, '你是这个家庭最后一名成员，请使用「解散家庭」');
+    }
     if (member.role === 'owner' && house.members.filter((m) => m && m.role === 'owner').length <= 1) {
       return sendError(res, 409, '你是最后一名家庭管理员，请先指定另一名管理员再退出');
     }
@@ -3689,9 +3704,8 @@ async function handleAPI(req, res, url) {
       }
       const next = normHousehold(body, state.households[idx]);
       if (!next) return sendError(res, 400, '家庭名称不能为空');
-      const hadOwner = (state.households[idx].members || []).some((m) => m.role === 'owner');
       const nextOwners = (next.members || []).filter((m) => m.role === 'owner');
-      if (hadOwner && nextOwners.length === 0) {
+      if ((next.members || []).length && nextOwners.length === 0) {
         return sendError(res, 400, '家庭至少要保留一名管理员');
       }
       // 成员被删了 → 那些设备令牌一并作废。
@@ -3708,7 +3722,9 @@ async function handleAPI(req, res, url) {
       return sendJSON(res, 200, { ok: true, data: publicHousehold(next) });
     }
     if (method === 'DELETE' && id) {
-      if (state.households.length <= 1) {
+      // 新账户允许解散自己的最后一个家庭，回到账户首页后默认没有家庭。
+      // 没有关联账户的旧版设备数据仍保留至少一户的兼容保护。
+      if (state.households.length <= 1 && !accountUserId(req)) {
         return sendError(res, 400, '至少要保留一个家庭');
       }
       const idx = state.households.findIndex((h) => h.id === id);
@@ -3716,6 +3732,16 @@ async function handleAPI(req, res, url) {
       // 删家庭 = 把一整家人的数据抹掉，没有比这更危险的了
       if (!canDoSensitive(req, id)) return sendError(res, 403, SENSITIVE_HINT);
       const [gone] = state.households.splice(idx, 1);
+      // 家庭被解散后，成员设备令牌、待处理申请和旧家庭会话都必须失效，
+      // 否则其他设备还会暂时带着一把指向已删除家庭的钥匙。
+      for (const m of gone.members || []) {
+        if (m && m.id) revokeDeviceTokens(m.id);
+      }
+      state.access.requests = state.access.requests.filter((r) => r.householdId !== id);
+      for (const [token, session] of sessions) {
+        const scope = session && session.scope;
+        if (scope && scope.kind === 'house' && scope.id === id) sessions.delete(token);
+      }
       // 家庭没了，它名下的点餐和库存也一并清掉，免得数据无处安放
       const removedOrders = state.orders.filter((o) => o.householdId === id).length;
       const removedPantry = state.pantry.filter((p) => p.householdId === id).length;
@@ -3756,6 +3782,7 @@ async function handleAPI(req, res, url) {
       scheduleSave('dishes');
       scheduleSave('categories');
       scheduleSave('settings');
+      scheduleSave('access');
       return sendJSON(res, 200, {
         ok: true,
         data: {
