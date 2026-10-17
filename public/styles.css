@@ -1451,13 +1451,25 @@ a { color: var(--primary-dark); }
 .manage-group:not([open]) .manage-group-caret { transform: rotate(-90deg); }
 .manage-group-body { padding: 2px 14px 14px; }
 .manage-group-body > .section-head:first-child { margin-top: 8px; }
+.dish-tools { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
 .join-request-row { align-items: flex-start; }
 .join-request-actions { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
 .random-filter-grid { display: grid; gap: 4px; }
 .check-row { display: flex; align-items: center; gap: 8px; margin: 8px 0 2px; color: var(--text-mid); font-size: 13px; }
 .check-row input { width: 18px; height: 18px; accent-color: var(--primary); }
+.batch-recipe-list { display: flex; flex-direction: column; gap: 8px; max-height: 58vh; overflow: auto; }
+.batch-recipe-row { display: flex; align-items: center; gap: 9px; padding: 9px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); }
+.batch-recipe-row input[type="checkbox"] { flex: 0 0 auto; width: 18px; height: 18px; accent-color: var(--primary); }
+.batch-recipe-check { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.batch-recipe-thumb { width: 56px; height: 56px; flex: 0 0 56px; display: grid; place-items: center; overflow: hidden; border-radius: 8px; background: var(--primary-soft); font-size: 25px; }
+.batch-recipe-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.batch-recipe-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 5px; }
+.batch-recipe-main .input, .batch-recipe-main .select { width: 100%; min-width: 0; padding: 6px 8px; font-size: 13px; }
+.batch-recipe-main b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-progress { padding: 30px 10px; text-align: center; color: var(--muted); line-height: 1.7; }
 
 @media (max-width: 560px) {
   .join-request-row { flex-wrap: wrap; }
   .join-request-actions { width: 100%; padding-left: 40px; justify-content: flex-start; }
+  .dish-tools .btn { padding-left: 7px; padding-right: 7px; }
 }

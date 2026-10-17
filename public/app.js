@@ -55,6 +55,8 @@ const S = {
   manageKeyword: '',
   manageGroups: { family: true, menu: true, system: true },
   randomFilters: null,
+  batchImport: [], // 图片批量识别后等待用户审核的菜谱草稿
+  batchExportSel: new Set(), // 批量导出图片时选中的菜品
 };
 
 /** 老的 households.json 还没建时，历史数据都落在 h_home 上 */
@@ -3337,7 +3339,7 @@ function viewManageMember() {
 
     <div class="section-head">
       <h2 class="section-title">${admin ? '我家私菜' : '我写的菜'}</h2>
-      <button class="btn soft sm" style="margin-left:auto" data-act="new-dish">＋ 记一道</button>
+      <div class="dish-tools"><button class="btn ghost sm" data-act="batch-export-open">🖼 批量导出</button><button class="btn soft sm" data-act="new-dish">＋ 记一道</button></div>
     </div>
     ${
       mine.length
@@ -3542,7 +3544,7 @@ function viewManage() {
       ${
         picking('dishes')
           ? ''
-          : `<button class="btn soft sm" style="margin-left:auto" data-act="new-dish">＋ ${admin ? '新增' : '记我家私菜'}</button>`
+          : `<div class="dish-tools"><button class="btn ghost sm" data-act="batch-import-open">🖼 批量导入</button><button class="btn ghost sm" data-act="batch-export-open">🖼 批量导出</button><button class="btn soft sm" data-act="new-dish">＋ ${admin ? '新增' : '记我家私菜'}</button></div>`
       }
     </div>
     ${
@@ -3935,6 +3937,186 @@ async function recognizeDishFromImage(file) {
 
   applyAIResult(r);
   toast('AI 填好了，认错了直接改，然后点保存', 3200);
+}
+
+/* ---------------- 菜谱图片批量导入 / 导出 ---------------- */
+
+function batchDishFromAI(result, imageUrl) {
+  const r = result || {};
+  const cats = sortedCategories();
+  const wantedCat = String(r.category || '').trim();
+  const category = cats.some((c) => c.name === wantedCat) ? wantedCat : '其他';
+  const toText = (v, max) => String(v == null ? '' : v).trim().slice(0, max);
+  const tags = Array.isArray(r.tags)
+    ? r.tags.map((x) => toText(x, 24)).filter(Boolean).slice(0, 12)
+    : toText(r.tags, 160).split(/[,，、]/).map((x) => x.trim()).filter(Boolean).slice(0, 12);
+  const seasonings = Array.isArray(r.seasonings)
+    ? r.seasonings.map((s) => ({ name: toText(s && s.name, 40), amount: toText(s && s.amount, 40) })).filter((s) => s.name)
+    : [];
+  const methods = Array.isArray(r.methods)
+    ? r.methods.map((m, i) => ({
+        name: toText(m && m.name, 40) || `做法 ${i + 1}`,
+        seasonings: Array.isArray(m && m.seasonings)
+          ? m.seasonings.map((s) => ({ name: toText(s && s.name, 40), amount: toText(s && s.amount, 40) })).filter((s) => s.name)
+          : [],
+        steps: Array.isArray(m && m.steps) ? m.steps.map((x) => toText(x, 240)).filter(Boolean).slice(0, 30) : [],
+      })).filter((m) => m.steps.length || m.seasonings.length)
+    : [];
+  return {
+    id: null,
+    name: toText(r.name, 80),
+    category,
+    description: toText(r.description, 240),
+    images: imageUrl ? [imageUrl] : [],
+    servings: toText(r.servings, 40),
+    duration: Number.isFinite(Number(r.duration)) ? Math.max(0, Math.round(Number(r.duration))) : '',
+    difficulty: ['简单', '中等', '有点难'].includes(r.difficulty) ? r.difficulty : '简单',
+    tags,
+    seasonings,
+    methods,
+    notes: toText(r.notes, 500),
+    isFavorite: false,
+    householdId: canWriteShared() ? null : S.householdId,
+    _selected: true,
+  };
+}
+
+function batchImportRowsHtml() {
+  return S.batchImport.map((d, i) => `<div class="batch-recipe-row">
+    <label class="batch-recipe-check"><input type="checkbox" data-batch-act="batch-import-toggle" data-i="${i}" ${d._selected ? 'checked' : ''} />
+      <span class="batch-recipe-thumb">${d.images && d.images[0] ? `<img src="${esc(d.images[0])}" alt="" />` : '🍳'}</span></label>
+    <div class="batch-recipe-main">
+      <input class="input batch-recipe-name" data-batch-act="batch-import-name" data-i="${i}" value="${esc(d.name || '')}" placeholder="菜名" />
+      <select class="select batch-recipe-cat" data-batch-act="batch-import-category" data-i="${i}">
+        ${sortedCategories().map((c) => `<option value="${esc(c.name)}" ${d.category === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+        <option value="其他" ${d.category === '其他' ? 'selected' : ''}>其他</option>
+      </select>
+      <span class="section-sub">${d.methods.length ? `${d.methods.length} 种做法` : '未识别到做法'}${d.duration ? ` · ${d.duration} 分钟` : ''}</span>
+    </div>
+    <button class="icon-mini" data-act="batch-import-remove" data-i="${i}" title="移除">✕</button>
+  </div>`).join('');
+}
+
+function batchExportRowsHtml() {
+  const list = manageDishRows();
+  return list.length ? list.map((d) => `<label class="batch-recipe-row batch-export-row">
+    <input type="checkbox" data-batch-act="batch-export-toggle" data-id="${esc(d.id)}" ${S.batchExportSel.has(d.id) ? 'checked' : ''} />
+    <span class="batch-recipe-thumb">${d.images && d.images[0] ? `<img src="${esc(d.images[0])}" alt="" />` : dishEmoji(d.name)}</span>
+    <span class="batch-recipe-main"><b>${esc(d.name)}</b><span class="section-sub">${esc(d.category || '其他')} · ${d.householdId ? '我家私菜' : '共享菜'}</span></span>
+  </label>`).join('') : '<p class="section-sub">当前没有可导出的菜谱。</p>';
+}
+
+function openBatchImportReview() {
+  openSheet({
+    title: '审核批量导入菜谱',
+    body: `<p class="section-sub">已识别 ${S.batchImport.length} 道。勾选要保存的菜，菜名和分类可以直接修改；做法、调料和原图会一起保存。</p>
+      <div id="batchImportRows" class="batch-recipe-list">${batchImportRowsHtml()}</div>`,
+    foot: `<button class="btn ghost" data-act="close-sheet">取消</button><button class="btn" data-act="batch-import-save">保存勾选菜谱</button>`,
+  });
+}
+
+async function importBatchRecipeImages(files) {
+  if (!S.householdId) return toast('请先创建或加入一个家庭');
+  if (!isSuper()) return toast('批量图片识别需要超级管理员权限');
+  if (!aiReady()) return toast('还没配置 AI（data/ai.json 里填 API Key）');
+  S.batchImport = [];
+  openSheet({
+    title: '批量识别菜谱图片',
+    body: '<div id="batchImportProgress" class="batch-progress">准备识别图片…</div>',
+    foot: '<button class="btn ghost" data-act="close-sheet">取消</button>',
+  });
+  aiBusy('批量识别中', `共 ${files.length} 张，正在逐张读取`);
+  let failed = 0;
+  try {
+    for (let i = 0; i < files.length; i += 1) {
+      if ($('#modalRoot')?.hidden) break;
+      const progress = $('#batchImportProgress');
+      if (progress) progress.textContent = `正在识别第 ${i + 1} / ${files.length} 张：${files[i].name}`;
+      try {
+        const dataUrl = await compressImage(files[i], 1024, 0.82);
+        const result = await askAI('recipe-from-image', '这是要批量收录的一道菜谱图片。请识别菜名、分类、调料用量、做法步骤、份量和耗时。', dataUrl);
+        if (!result) { failed += 1; continue; }
+        let imageUrl = '';
+        try { imageUrl = (await api('POST', '/api/upload', { dataUrl })).url || ''; } catch (_) { /* 原图上传失败不影响文字审核 */ }
+        S.batchImport.push(batchDishFromAI(result, imageUrl));
+      } catch (_) { failed += 1; }
+    }
+  } finally {
+    aiBusyDone();
+  }
+  if ($('#modalRoot')?.hidden) {
+    S.batchImport = [];
+    return;
+  }
+  if (!S.batchImport.length) {
+    closeSheet();
+    return toast('没有识别出可保存的菜谱，请换清晰一点的图片');
+  }
+  openBatchImportReview();
+  if (failed) toast(`已识别 ${S.batchImport.length} 道，${failed} 张失败`, 3600);
+}
+
+function openBatchExportSheet() {
+  if (!S.householdId) return toast('请先创建或加入一个家庭');
+  const list = manageDishRows();
+  S.batchExportSel = new Set(list.map((d) => d.id));
+  openSheet({
+    title: '导出菜谱图片',
+    body: `<p class="section-sub">选择要导出的菜谱，将生成一张张适合分享的图片卡片。</p><div id="batchExportRows" class="batch-recipe-list">${batchExportRowsHtml()}</div><p class="section-sub">已选 <b id="batchExportCount">${S.batchExportSel.size}</b> 道</p>`,
+    foot: `<button class="btn ghost" data-act="batch-export-all">全选/全不选</button><button class="btn" data-act="batch-export-selected">下载选中图片</button>`,
+  });
+}
+
+function wrapCanvasText(ctx, text, x, y, maxWidth, lineHeight, maxLines) {
+  const chars = String(text || '').split('');
+  let line = '';
+  let lines = [];
+  for (const ch of chars) {
+    const next = line + ch;
+    if (ctx.measureText(next).width > maxWidth && line) { lines.push(line); line = ch; } else line = next;
+  }
+  if (line) lines.push(line);
+  if (maxLines && lines.length > maxLines) { lines = lines.slice(0, maxLines); lines[maxLines - 1] = lines[maxLines - 1].slice(0, -1) + '…'; }
+  lines.forEach((l, i) => ctx.fillText(l, x, y + i * lineHeight));
+  return y + lines.length * lineHeight;
+}
+
+async function dishShareCard(d) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1200; canvas.height = 1600;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fffaf4'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#e0763a'; ctx.fillRect(0, 0, canvas.width, 18);
+  ctx.fillStyle = '#3a2a20'; ctx.font = '700 54px system-ui, sans-serif';
+  let y = 100;
+  y = wrapCanvasText(ctx, d.name || '未命名菜谱', 80, y, 1040, 68, 2) + 28;
+  ctx.fillStyle = '#92745e'; ctx.font = '26px system-ui, sans-serif';
+  ctx.fillText(`${d.category || '其他'}${d.servings ? ` · ${d.servings}` : ''}${d.duration ? ` · ${d.duration} 分钟` : ''}`, 80, y); y += 62;
+  ctx.fillStyle = '#5e4b3d'; ctx.font = '28px system-ui, sans-serif';
+  y = wrapCanvasText(ctx, d.description || '家常菜谱', 80, y, 1040, 40, 3) + 35;
+  ctx.strokeStyle = '#ead8c6'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(80, y); ctx.lineTo(1120, y); ctx.stroke(); y += 50;
+  ctx.fillStyle = '#3a2a20'; ctx.font = '700 30px system-ui, sans-serif'; ctx.fillText('调料', 80, y); y += 42;
+  ctx.fillStyle = '#5e4b3d'; ctx.font = '25px system-ui, sans-serif';
+  const seasons = (d.seasonings || []).map((s) => `${s.name}${s.amount ? ` ${s.amount}` : ''}`).join('、') || '按口味准备';
+  y = wrapCanvasText(ctx, seasons, 80, y, 1040, 36, 4) + 35;
+  for (const m of (d.methods || []).slice(0, 3)) {
+    ctx.fillStyle = '#3a2a20'; ctx.font = '700 30px system-ui, sans-serif'; ctx.fillText(m.name || '做法', 80, y); y += 40;
+    ctx.fillStyle = '#5e4b3d'; ctx.font = '24px system-ui, sans-serif';
+    for (let i = 0; i < (m.steps || []).slice(0, 8).length; i += 1) {
+      y = wrapCanvasText(ctx, `${i + 1}. ${(m.steps || [])[i]}`, 90, y, 1030, 34, 2) + 8;
+      if (y > 1450) break;
+    }
+    if (y > 1450) break;
+    y += 18;
+  }
+  ctx.fillStyle = '#b18a6d'; ctx.font = '22px system-ui, sans-serif'; ctx.fillText('家庭菜单 · 菜谱分享卡', 80, 1530);
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+}
+
+function downloadBlob(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
 }
 
 /**
@@ -5359,6 +5541,86 @@ const ACTIONS = {
   /* 菜品编辑 */
   'new-dish'() {
     openDishEditor(null);
+  },
+  'batch-import-open'() {
+    if (!S.householdId) return toast('请先创建或加入一个家庭');
+    if (!isSuper()) return toast('批量图片识别需要超级管理员权限');
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = 'image/*'; input.multiple = true;
+    input.onchange = () => {
+      const files = [...(input.files || [])];
+      if (files.length) importBatchRecipeImages(files);
+    };
+    input.click();
+  },
+  'batch-import-toggle'(el) {
+    const d = S.batchImport[Number(el.dataset.i)];
+    if (d) d._selected = !!el.checked;
+  },
+  'batch-import-name'(el) {
+    const d = S.batchImport[Number(el.dataset.i)];
+    if (d) d.name = el.value;
+  },
+  'batch-import-category'(el) {
+    const d = S.batchImport[Number(el.dataset.i)];
+    if (d) d.category = el.value;
+  },
+  'batch-import-remove'(el) {
+    S.batchImport.splice(Number(el.dataset.i), 1);
+    if (!S.batchImport.length) return closeSheet();
+    const rows = $('#batchImportRows');
+    if (rows) rows.innerHTML = batchImportRowsHtml();
+  },
+  async 'batch-import-save'() {
+    const list = S.batchImport.filter((d) => d._selected && String(d.name || '').trim());
+    if (!list.length) return toast('至少勾选一道并填写菜名');
+    const mine = !canWriteShared();
+    const q = `?householdId=${encodeURIComponent(S.householdId)}`;
+    let saved = 0; let failed = 0;
+    for (const d of list) {
+      try {
+        const body = { ...d, name: String(d.name).trim() };
+        delete body._selected;
+        if (mine) await api('POST', `/api/my-dishes${q}`, body);
+        else await api('POST', '/api/dishes', body);
+        saved += 1;
+      } catch (_) { failed += 1; }
+    }
+    closeSheet();
+    S.batchImport = [];
+    await loadState(true);
+    render();
+    toast(`已保存 ${saved} 道菜谱${failed ? `，${failed} 道失败` : ''}`, 3600);
+  },
+  'batch-export-open'() {
+    openBatchExportSheet();
+  },
+  'batch-export-toggle'(el) {
+    if (el.checked) S.batchExportSel.add(el.dataset.id);
+    else S.batchExportSel.delete(el.dataset.id);
+    const count = $('#batchExportCount');
+    if (count) count.textContent = S.batchExportSel.size;
+  },
+  'batch-export-all'() {
+    const list = manageDishRows();
+    const all = list.length && list.every((d) => S.batchExportSel.has(d.id));
+    S.batchExportSel = all ? new Set() : new Set(list.map((d) => d.id));
+    const rows = $('#batchExportRows');
+    if (rows) rows.innerHTML = batchExportRowsHtml();
+    const count = $('#batchExportCount');
+    if (count) count.textContent = S.batchExportSel.size;
+  },
+  async 'batch-export-selected'() {
+    const list = manageDishRows().filter((d) => S.batchExportSel.has(d.id));
+    if (!list.length) return toast('至少选择一道菜谱');
+    closeSheet();
+    toast(`正在生成 ${list.length} 张菜谱图片…`, 5000);
+    for (const d of list) {
+      const blob = await dishShareCard(d);
+      if (blob) downloadBlob(blob, `${String(d.name || '菜谱').replace(/[\\/:*?"<>|]/g, '_').slice(0, 50)}.png`);
+      await new Promise((resolve) => setTimeout(resolve, 180));
+    }
+    toast(`已下载 ${list.length} 张菜谱图片`, 3200);
   },
   'edit-dish'(el) {
     const d = dishById(el.dataset.id);
@@ -7020,6 +7282,11 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('input', (e) => {
   const el = e.target;
   const act = el.dataset && el.dataset.act;
+  if (el.dataset && el.dataset.batchAct === 'batch-import-name') {
+    const d = S.batchImport[Number(el.dataset.i)];
+    if (d) d.name = el.value;
+    return;
+  }
   if (!act || !S.draft) return;
   const i = Number(el.dataset.i);
   const j = Number(el.dataset.j);
@@ -7063,6 +7330,20 @@ document.addEventListener('toggle', (e) => {
 /* 改分类时，常见食材快选跟着换 */
 document.addEventListener('change', (e) => {
   if (e.target.id === 'fFoodCat') renderPresetGrid();
+  if (e.target.dataset && e.target.dataset.batchAct === 'batch-import-toggle') {
+    const d = S.batchImport[Number(e.target.dataset.i)];
+    if (d) d._selected = !!e.target.checked;
+  }
+  if (e.target.dataset && e.target.dataset.batchAct === 'batch-export-toggle') {
+    if (e.target.checked) S.batchExportSel.add(e.target.dataset.id);
+    else S.batchExportSel.delete(e.target.dataset.id);
+    const count = $('#batchExportCount');
+    if (count) count.textContent = S.batchExportSel.size;
+  }
+  if (e.target.dataset && e.target.dataset.batchAct === 'batch-import-category') {
+    const d = S.batchImport[Number(e.target.dataset.i)];
+    if (d) d.category = e.target.value;
+  }
 });
 
 /* 图片选择 */
