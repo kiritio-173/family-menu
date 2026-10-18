@@ -41,10 +41,21 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.21.0';
+const APP_VERSION = '1.22.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.22.0',
+    date: '2026-10-18',
+    title: '家庭中心与采购权限统一',
+    items: [
+      '采购清单改为当前家庭状态，普通成员勾选已买和入库不再需要管理口令',
+      '家庭栏目增加家庭广场，可浏览公开共享菜并收进当前家庭',
+      '菜谱编辑权按作者账户绑定，家庭管理员不再自动编辑别人的私房菜',
+      '账户按用户恢复上次家庭、页面、筛选和管理折叠状态',
+    ],
+  },
   {
     version: '1.21.0',
     date: '2026-10-17',
@@ -535,6 +546,9 @@ const FILES = {
   households: 'households.json',
   pantry: 'pantry.json',
   plans: 'plans.json',
+  // 当前家庭采购清单的“已买”状态。库存属于 pantry，采购状态单独保存，
+  // 这样普通成员勾选清单不需要触碰全局 settings。
+  shoppingStatus: 'shopping.json',
   // 留言板 + 菜品互动（想吃 / 我来做）。合成一个文件：这两样都是
   // 「家里人随手写的短内容」，拆成两个文件只会让备份/恢复多一条分支。
   notes: 'notes.json',
@@ -921,6 +935,7 @@ function defaultState() {
     ],
     pantry: [],
     plans: [],
+    shoppingStatus: {},
     // 留言板留言 + 每道菜的「想吃 / 我来做」投票
     notes: { notes: [], votes: {} },
     // 申请加入别的家庭。普通用户不能直接把自己塞进别人家，得管理员点头。
@@ -1263,6 +1278,23 @@ function loadState() {
   }
   // 分类去重修正（菜品按分类名归属）
   state.categories = state.categories.filter((c) => c && c.name);
+  // 采购状态按家庭隔离，旧版本没有这个文件时从空对象开始。
+  state.shoppingStatus = state.shoppingStatus && typeof state.shoppingStatus === 'object'
+    ? state.shoppingStatus
+    : {};
+  for (const [hid, bucket] of Object.entries(state.shoppingStatus)) {
+    if (!bucket || typeof bucket !== 'object') {
+      delete state.shoppingStatus[hid];
+      continue;
+    }
+    const items = bucket.items && typeof bucket.items === 'object' ? bucket.items : {};
+    bucket.items = Object.fromEntries(
+      Object.entries(items)
+        .map(([name, item]) => [safeText(name, 80).trim(), item])
+        .filter(([name, item]) => name && item && item.state === 'completed')
+        .map(([name, item]) => [name, { state: 'completed', updatedAt: safeText(item.updatedAt, 40) || nowISO() }])
+    );
+  }
   state.dishes = state.dishes.filter((d) => d && d.name);
   // 菜和分类分家是从 1.9 才有的。老数据没有 householdId 字段，
   // 一律补成 null（= 共享）：升级之后你原来录的菜还是人人可见，
@@ -1785,6 +1817,7 @@ function backupPayload() {
     households: state.households,
     pantry: state.pantry,
     plans: state.plans,
+    shoppingStatus: state.shoppingStatus,
     notes: state.notes,
     access: state.access,
     users: state.users,
@@ -1829,6 +1862,21 @@ function applyBackup(src) {
       .map((pl) => normPlan(pl, undefined))
       .filter(Boolean)
       .filter((pl) => (seen.has(pl.id) ? false : (seen.add(pl.id), true)));
+  }
+  if (src.shoppingStatus && typeof src.shoppingStatus === 'object') {
+    state.shoppingStatus = {};
+    for (const [hid, bucket] of Object.entries(src.shoppingStatus)) {
+      if (!bucket || typeof bucket !== 'object') continue;
+      const items = bucket.items && typeof bucket.items === 'object' ? bucket.items : {};
+      state.shoppingStatus[safeText(hid, 40)] = {
+        items: Object.fromEntries(
+          Object.entries(items)
+            .map(([name, item]) => [safeText(name, 80).trim(), item])
+            .filter(([name, item]) => name && item && item.state === 'completed')
+            .map(([name, item]) => [name, { state: 'completed', updatedAt: safeText(item.updatedAt, 40) || nowISO() }])
+        ),
+      };
+    }
   }
   // 家庭要先恢复，留言的 householdId 才有地方挂 —— 上一段已经恢复了
   if (src.notes && typeof src.notes === 'object') {
@@ -2569,20 +2617,22 @@ function isHouseAdmin(req, householdId) {
 /**
  * 这条能不能改这个对象 —— 三层权限里最常问的一句。
  *
- * 共享菜（householdId 为空）：超级管理员，或者任何一个家庭管理员。
- * 本家菜：管理员随便改；普通成员只能改 authorId 是自己的那些。
- * 查不到出处的（老数据没 authorId）一律放开：宁可让人改一条菜，
- * 也不要把主人锁在自己家门外。
+ * 共享菜和私房菜都按作者授权；超级管理员可以处理历史数据。
+ * 家庭管理员仍负责成员、家庭设置和做饭状态，不自动获得别人菜谱编辑权。
  */
 function canWrite(req, obj) {
   if (!obj) return false;
-  if (!obj.householdId) return canWriteShared(req);
-  const who = whoami(req, obj.householdId);
-  if (who.kind === 'super') return true;
-  if (isHouseAdmin(req, obj.householdId)) return true;
-  // 本家的菜，但作者查不到出处 → 放开
-  if (!obj.authorId) return who.kind === 'member' && isMyMember(req, obj.householdId);
-  return who.kind === 'member' && obj.authorId === who.memberId;
+  if (!obj.householdId) return canWriteShared(req, obj);
+  // 旧安装在没有全局口令时可能存在没有作者字段的历史菜，
+  // 允许本地开放模式继续维护；新账户/成员创建的菜都会写入作者 ID。
+  if (!state.settings.adminPin && !obj.authorId && !obj.authorUserId) return true;
+  const explicitSuper = sessionOf(req);
+  if (explicitSuper && explicitSuper.scope && explicitSuper.scope.kind === 'super') return true;
+  const uidForRequest = accountUserId(req);
+  if (obj.authorUserId && uidForRequest) return obj.authorUserId === uidForRequest;
+  const me = deviceMember(req);
+  if (obj.authorId && me) return obj.authorId === me.memberId;
+  return false;
 }
 
 /** 菜谱或分类的可见性：不再按「私房」锁死，一律可见，只分能不能改 */
@@ -2600,14 +2650,25 @@ function isMyMember(req, householdId) {
  * 说清楚是哪一条、归谁、谁能改。
  */
 function writeDenied(obj) {
-  if (!obj.householdId) return '共享菜谱由管理员维护，改不了。';
+  if (!obj.householdId) return '这道共享菜谱由作者维护。想改成自己的做法，请先「收进我家」复制一份。';
   const who = obj.authorName || '别人';
-  return `这道菜是「${who}」加的，你改不了自己的以外那些。\n自己加的随便改；想动别人的，找家庭管理员。`;
+  return `这道菜是「${who}」加的，只有作者或超级管理员可以修改。\n想改成自己的做法，请先复制到我家。`;
 }
 
-/** 共享菜谁都能管：任何一家的管理员，或者超级管理员 */
-function canWriteShared(req) {
-  if (isSuperAdmin(req)) return true;
+/** 新增共享菜需要家庭管理员；已有共享菜只能由作者或超级管理员维护。 */
+function canWriteShared(req, obj) {
+  if (!obj && isSuperAdmin(req)) return true;
+  if (obj) {
+    // 未初始化全局口令时保持旧版开放安装体验；一旦设置口令，
+    // 已有共享菜只允许作者或明确的超级授权修改。
+    if (!state.settings.adminPin) return true;
+    const explicitSuper = sessionOf(req);
+    if (explicitSuper && explicitSuper.scope && explicitSuper.scope.kind === 'super') return true;
+    const uidForRequest = accountUserId(req);
+    if (obj.authorUserId && uidForRequest) return obj.authorUserId === uidForRequest;
+    const me = deviceMember(req);
+    return !!(obj.authorId && me && obj.authorId === me.memberId);
+  }
   const uidForRequest = accountUserId(req);
   const me = deviceMember(req);
   if (!me && !uidForRequest) return false;
@@ -3245,6 +3306,12 @@ async function handleAPI(req, res, url) {
       : account
       ? state.access.requests.filter((r) => r.applicantUserId === account.scope.userId || r.name === safeText(url.searchParams.get('memberName'), 20).trim())
       : state.access.requests.filter((r) => r.name === safeText(url.searchParams.get('memberName'), 20).trim());
+    const visibleShoppingStatus = visibleHouseholdId && !readOnlyExternal
+      ? {
+          householdId: visibleHouseholdId,
+          items: (state.shoppingStatus[visibleHouseholdId] && state.shoppingStatus[visibleHouseholdId].items) || {},
+        }
+      : { householdId: '', items: {} };
     // 账户首页需要公开家庭目录；成员关系单独放在 account.households，不能把公开目录误当成“我的家庭”。
     const visibleHouseholds = publicHouseholds();
     const accountInfo = account
@@ -3274,6 +3341,7 @@ async function handleAPI(req, res, url) {
           : readOnlyExternal || !visibleHouseholdId
           ? []
           : state.plans.filter((p) => p.householdId === visibleHouseholdId),
+        shoppingStatus: visibleShoppingStatus,
         notes: { notes: visibleNotes, votes: readOnlyExternal ? {} : visibleVotes },
         access: { requests: visibleAccess.map(publicJoinRequest) },
         ...(accountInfo ? { account: accountInfo, superExpiresAt: (() => { const s = sessionOf(req); return s && s.scope && s.scope.kind === 'super' ? s.scope.fixedExp : 0; })() } : {}),
@@ -3749,6 +3817,7 @@ async function handleAPI(req, res, url) {
       state.orders = state.orders.filter((o) => o.householdId !== id);
       state.pantry = state.pantry.filter((p) => p.householdId !== id);
       state.plans = state.plans.filter((p) => p.householdId !== id);
+      delete state.shoppingStatus[id];
       state.notes.notes = state.notes.notes.filter((n) => n.householdId !== id);
       // 这个家的私菜和私有分类跟着走；共享的留给别的家继续用
       const removedDishes = state.dishes.filter((d) => d.householdId === id).length;
@@ -3778,6 +3847,7 @@ async function handleAPI(req, res, url) {
       scheduleSave('orders');
       scheduleSave('pantry');
       scheduleSave('plans');
+      scheduleSave('shoppingStatus');
       scheduleSave('notes');
       scheduleSave('dishes');
       scheduleSave('categories');
@@ -3954,6 +4024,65 @@ async function handleAPI(req, res, url) {
       state.pantry = state.pantry.filter(keep);
       scheduleSave('pantry');
       return sendJSON(res, 200, { ok: true, data: { removed: before - state.pantry.length } });
+    }
+  }
+
+  // ---- 当前家庭买菜状态 ----
+  // 这是家庭日常数据，不属于全局 settings；普通成员可以标记已买，
+  // 只有库存数量由 pantry 实时决定“已有”。
+  if (route[0] === 'shopping-status') {
+    const bucketFor = (hid, create) => {
+      if (!state.shoppingStatus[hid] && create) state.shoppingStatus[hid] = { items: {} };
+      if (state.shoppingStatus[hid] && (!state.shoppingStatus[hid].items || typeof state.shoppingStatus[hid].items !== 'object')) {
+        state.shoppingStatus[hid].items = {};
+      }
+      return state.shoppingStatus[hid] || null;
+    };
+    const hid = safeText(url.searchParams.get('householdId'), 40);
+    if (method === 'GET') {
+      if (!hid) return sendError(res, 400, '缺少家庭 ID');
+      if (!requireAccountHousehold(req, res, hid)) return;
+      const bucket = bucketFor(hid, false) || { items: {} };
+      return sendJSON(res, 200, { ok: true, data: { householdId: hid, items: bucket.items } });
+    }
+    if (method === 'PUT') {
+      const body = await readBody(req);
+      const target = safeText(body.householdId || hid, 40);
+      if (!target) return sendError(res, 400, '缺少家庭 ID');
+      if (!requireAccountHousehold(req, res, target)) return;
+      const bucket = bucketFor(target, true);
+      const updates = Array.isArray(body.items)
+        ? body.items
+        : [{ name: body.name, state: body.state }];
+      let changed = 0;
+      for (const raw of updates) {
+        const name = safeText(raw && raw.name, 80).trim();
+        if (!name) continue;
+        if (raw.state === 'completed') {
+          bucket.items[name] = { state: 'completed', updatedAt: nowISO() };
+        } else if (raw.state === 'needed' || raw.state === 'available' || raw.state === '' || raw.state == null) {
+          delete bucket.items[name];
+        } else {
+          return sendError(res, 400, '采购状态只能是 needed 或 completed');
+        }
+        changed++;
+      }
+      scheduleSave('shoppingStatus');
+      return sendJSON(res, 200, { ok: true, data: { householdId: target, items: bucket.items, changed } });
+    }
+    if (method === 'DELETE') {
+      const target = hid;
+      if (!target) return sendError(res, 400, '缺少家庭 ID');
+      if (!requireAccountHousehold(req, res, target)) return;
+      const bucket = bucketFor(target, false);
+      if (!bucket) return sendJSON(res, 200, { ok: true, data: { householdId: target, removed: 0 } });
+      const names = String(url.searchParams.get('names') || '').split(',').map((x) => safeText(x, 80).trim()).filter(Boolean);
+      const removed = names.length
+        ? names.reduce((n, name) => n + (delete bucket.items[name] ? 1 : 0), 0)
+        : Object.keys(bucket.items).length;
+      if (!names.length) delete state.shoppingStatus[target];
+      scheduleSave('shoppingStatus');
+      return sendJSON(res, 200, { ok: true, data: { householdId: target, removed } });
     }
   }
 

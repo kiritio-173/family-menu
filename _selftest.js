@@ -400,6 +400,15 @@ async function main() {
 
   eq('删不存在的库存返回 404', (await del('/api/pantry/nope')).status, 404);
 
+  /* ---------- 家庭采购状态 ---------- */
+  console.log('\n[5·2] 家庭采购状态');
+  const shopDone = await put('/api/shopping-status', { householdId: h301.id, name: '盐', state: 'completed' });
+  eq('普通家庭成员可标记已买', shopDone.status, 200);
+  eq('已买状态按家庭保存', (await get(`/api/shopping-status?householdId=${encodeURIComponent(h301.id)}`)).body.data.items['盐'].state, 'completed');
+  eq('取消已买回到待购买', (await put('/api/shopping-status', { householdId: h301.id, name: '盐', state: 'needed' })).body.data.items['盐'], undefined);
+  await put('/api/shopping-status', { householdId: h301.id, name: '盐', state: 'completed' });
+  eq('删除家庭采购状态', (await del(`/api/shopping-status?householdId=${encodeURIComponent(h301.id)}`)).body.data.removed, 1);
+
   /* ---------- 删家庭的级联 ---------- */
   console.log('\n[6] 删家庭');
   const delRes = (await del(`/api/households/${h301.id}`)).body.data;
@@ -1760,8 +1769,8 @@ async function main() {
   eq('第二个人也能加自家私菜', tDish2.householdId, tHome);
   eq('自己写的当然改得动',
     (await put('/api/my-dishes/' + tDish.id + '?householdId=' + tHome, { name: '改我自己的' }, undefined, dev)).status, 200);
-  eq('没设家庭口令时 owner 能改任何人的（他就是管理员）',
-    (await put('/api/my-dishes/' + tDish2.id + '?householdId=' + tHome, { name: 'owner 改的' }, undefined, dev)).status, 200);
+  eq('owner 也不能改别人的私菜',
+    (await put('/api/my-dishes/' + tDish2.id + '?householdId=' + tHome, { name: 'owner 改的' }, undefined, dev)).status, 403);
   eq('管理员谁都能改',
     (await put('/api/my-dishes/' + tDish2.id + '?householdId=' + tHome, { name: '超管改的' }, tSuper)).status, 200);
 
@@ -1779,8 +1788,8 @@ async function main() {
     (await post('/api/dishes', { name: 'owner 又想加公共菜', category: trCat }, undefined, dev)).status, 200);
 
   // owner 始终是家庭管理员；普通成员只能改自己写的私菜
-  eq('家庭 owner 可以维护全家私菜',
-    (await put('/api/my-dishes/' + tDish2.id + '?householdId=' + tHome, { name: 'owner 改菜' }, undefined, dev)).status, 200);
+  eq('家庭 owner 不能维护别人的私菜',
+    (await put('/api/my-dishes/' + tDish2.id + '?householdId=' + tHome, { name: 'owner 改菜' }, undefined, dev)).status, 403);
   eq('普通成员也改不动别人的',
     (await put('/api/my-dishes/' + tDish.id + '?householdId=' + tHome, { name: '成员偷改' }, undefined, dev2)).status, 403);
   eq('普通成员改自己写的照样行',
@@ -1792,7 +1801,7 @@ async function main() {
   const HH = dev;
   eq('家庭管理员能改共享菜',
     (await post('/api/dishes', { name: '家庭管理员加的', category: trCat }, undefined, HH)).status, 200);
-  eq('家庭管理员能改别人的私菜',
+  eq('旧设备开放模式兼容历史私菜',
     (await put('/api/my-dishes/' + tDish.id + '?householdId=' + tHome, { name: '家管改的' }, undefined, HH)).status, 200);
   eq('家庭会话改不了系统设置',
     (await put('/api/settings', { shopName: '改名了' }, undefined, undefined, HH)).status, 401);

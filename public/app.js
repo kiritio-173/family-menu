@@ -39,7 +39,7 @@ const S = {
   noteReplyTo: '', // 正在回复哪条留言的 id（空 = 只是新建一条）
   data: {
     categories: [], dishes: [], orders: [], settings: {},
-    households: [], pantry: [], plans: [],
+    households: [], pantry: [], plans: [], shoppingStatus: { householdId: '', items: {} },
     notes: { notes: [], votes: {} },
   },
   presets: null, // 食材预设，按需从 /api/ingredient-presets 拉一次
@@ -62,6 +62,7 @@ const S = {
 /** 老的 households.json 还没建时，历史数据都落在 h_home 上 */
 const FALLBACK_HOUSE = 'h_home';
 const LS_HOUSE = 'familyMenu.householdId';
+const LS_CONTEXT = 'familyMenu.context';
 const LS_ACCOUNT = 'familyMenu.accountToken';
 const LS_CLIENT_DEVICE = 'familyMenu.clientDeviceId';
 const LS_MEMBER = 'familyMenu.memberIds';
@@ -93,6 +94,41 @@ function saveSelectedHousehold(id) {
   const key = householdStorageKey();
   if (id) localStorage.setItem(key, id);
   else localStorage.removeItem(key);
+}
+
+function contextStorageKey() {
+  const u = accountUser();
+  const uid = u && (u.id || u.userId);
+  return uid ? `${LS_CONTEXT}.${uid}` : '';
+}
+
+function loadAccountContext() {
+  const key = contextStorageKey();
+  if (!key) return {};
+  try {
+    const raw = JSON.parse(localStorage.getItem(key) || '{}');
+    return raw && typeof raw === 'object' ? raw : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveAccountContext() {
+  const key = contextStorageKey();
+  if (!key) return;
+  const ctx = {
+    householdId: S.householdId || '',
+    view: S.view || 'home',
+    dishScope: S.dishScope || 'all',
+    category: S.category || '全部',
+    keyword: S.keyword || '',
+    planWeek: S.planWeek || '',
+    pantryFilter: S.pantryFilter || 'all',
+    pantryCat: S.pantryCat || '全部',
+    manageKeyword: S.manageKeyword || '',
+    manageGroups: S.manageGroups || { family: true, menu: true, system: true },
+  };
+  localStorage.setItem(key, JSON.stringify(ctx));
 }
 
 function clientDeviceId() {
@@ -380,12 +416,17 @@ function canWriteShared() {
  */
 function canEdit(o) {
   if (!o) return false;
-  if (!o.householdId) return canWriteShared();
+  if (!o.householdId) {
+    if (isSuper()) return true;
+    const uid = accountUser() && (accountUser().id || accountUser().userId);
+    return !!(uid && o.authorUserId && o.authorUserId === uid);
+  }
   const me = memberOf(o.householdId);
-  if (isHouseAdmin(o.householdId, me)) return true;
   if (!me || o.householdId !== S.householdId) return false;
-  if (!o.authorId) return true; // 查不到出处的，放开
-  return o.authorId === me.id;
+  if (isSuper()) return true;
+  const uid = accountUser() && (accountUser().id || accountUser().userId);
+  if (o.authorUserId && uid) return o.authorUserId === uid;
+  return !!(o.authorId && o.authorId === me.id);
 }
 
 /** 这个人的身份在界面上叫什么 —— 顶栏、菜品作者、报错提示都用它 */
@@ -1118,7 +1159,11 @@ async function loadState(silent) {
     if (S.account && (data.superExpiresAt || data.superExp || data.authExpiresAt)) {
       S.account.superExpiresAt = data.superExpiresAt || data.superExp || data.authExpiresAt;
     }
-    S.shoppingChecked = new Set(data.settings.shoppingChecked || []);
+    const shoppingItems = data.shoppingStatus && data.shoppingStatus.items && typeof data.shoppingStatus.items === 'object'
+      ? data.shoppingStatus.items
+      : {};
+    S.data.shoppingStatus = data.shoppingStatus || { householdId: '', items: {} };
+    S.shoppingChecked = new Set(Object.entries(shoppingItems).filter(([, item]) => item && item.state === 'completed').map(([name]) => name));
     S.access = data.access && Array.isArray(data.access.requests) ? data.access.requests : [];
     // 没设全局口令 → 开放超级管理员模式；设了 → 看本机有没有有效会话
     if (!data.settings.hasPin) S.authed = true;
@@ -1129,6 +1174,7 @@ async function loadState(silent) {
     if (S.householdId !== savedHouse) {
       saveSelectedHousehold(S.householdId);
     }
+    saveAccountContext();
     meName();
     S.loading = false;
     // 全局账户已经完成身份识别，不再启动旧的「你是哪家的 / 你是谁」向导。
@@ -1438,8 +1484,20 @@ function shopCheckedItems() {
 
 /** 「已买」的勾要存到服务端，刷新页面才不会丢 */
 async function saveShoppingChecked() {
-  await api('PUT', '/api/settings', { shoppingChecked: [...S.shoppingChecked] });
-  S.data.settings.shoppingChecked = [...S.shoppingChecked];
+  if (!S.householdId) return;
+  const items = (S.shopList || []).map((it) => ({
+    name: it.name,
+    state: S.shoppingChecked.has(it.name) ? 'completed' : 'needed',
+  }));
+  const data = await api('PUT', '/api/shopping-status', { householdId: S.householdId, items });
+  S.data.shoppingStatus = data;
+}
+
+async function setShoppingStatus(name, state) {
+  if (!S.householdId) throw new Error('请先选择家庭');
+  const data = await api('PUT', '/api/shopping-status', { householdId: S.householdId, name, state });
+  S.data.shoppingStatus = data;
+  S.shoppingChecked = new Set(Object.entries(data.items || {}).filter(([, item]) => item && item.state === 'completed').map(([n]) => n));
 }
 
 /**
@@ -1462,6 +1520,10 @@ async function stockOne(name, parts) {
     expireAt: '',
     note: '从买菜清单入库',
   });
+  if (S.householdId) {
+    await api('PUT', '/api/shopping-status', { householdId: S.householdId, name, state: 'needed' });
+    S.shoppingChecked.delete(name);
+  }
   return { name, quantity, unit };
 }
 
@@ -2266,6 +2328,7 @@ function shopListHtml(list, opts) {
     ${list
       .map((it) => {
         const done = S.shoppingChecked.has(it.name);
+        const stateLabel = it.stock.length ? '已有' : done ? '已完成' : '待购买';
         const stockHtml = it.stock.length
           ? `<span class="shop-stock" title="家里已经有 ${esc(
               it.stock.map((p) => p.name + ' ' + p.quantity + p.unit).join('、')
@@ -2279,7 +2342,7 @@ function shopListHtml(list, opts) {
           <div class="shop-check" role="checkbox" tabindex="0" aria-checked="${done}"
             aria-label="${esc(it.name)} 是否已买" data-act="toggle-shop" data-name="${esc(it.name)}">✓</div>
           <div class="shop-main">
-            <div class="shop-name">${esc(it.name)}</div>
+            <div class="shop-name">${esc(it.name)} <span class="tag ${it.stock.length ? 'own' : done ? 'done' : ''}">${stateLabel}</span></div>
             <div class="shop-from">${esc(it.parts.join(' · '))}</div>
           </div>
           <div class="shop-side">${stockHtml}${restockHtml}</div>
@@ -3209,7 +3272,7 @@ function backupsHtml() {
  * 不是超级管理员时看到的「管理」页。
  *
  * 分两种人，差别很大：
- *   家庭管理员 —— 能管共享菜单、这家所有私菜、成员和家庭口令
+ *   家庭管理员 —— 能管成员、家庭设置、做饭状态和自己创建的菜
  *   普通成员   —— 只能动自己写的那几道；别人的和共享的都是只读，
  *                 想改成自己的做法就按「👇 收进我家」抄一份
  */
@@ -3298,7 +3361,7 @@ function viewManageMember() {
   const publicCats = sortedCategories().filter((c) => !canEdit(c));
 
   const roleLine = admin
-    ? `你是「${house ? house.name : ''}」的家庭管理员：共享菜单、这家所有私菜、成员和家庭设置都能改。`
+    ? `你是「${house ? house.name : ''}」的家庭管理员：可以审批成员、修改家庭设置和做饭状态；菜谱仍由作者本人维护。`
     : `这里是 <b>你自己写的</b>那几道菜。共享菜单和别人的私菜只能查看；需要自己的版本请在本家私菜中手动新建。`;
 
   return `
@@ -3309,6 +3372,7 @@ function viewManageMember() {
       </div>
       <p class="admin-warn-text" style="color:var(--text-mid)">${esc(roleLine)}</p>
     </div>
+    ${familySquareHtml()}
 
     ${
       house && house.status !== 'approved'
@@ -3406,13 +3470,13 @@ function viewManageMember() {
            </span><button class="btn ghost sm" data-act="edit-household" data-id="${esc(S.householdId)}">编辑</button></div>
            <div class="list-row"><span class="icon-mini">👨‍👩‍👧</span><span class="list-row-main">
              <span class="list-row-title">家庭成员</span>
-             <span class="list-row-sub">${memberList().length} 位 · 每人一个密码，改成员要先确认身份</span>
+             <span class="list-row-sub">${memberList().length} 位 · 通过成员关系设置家庭管理员权限</span>
            </span><button class="btn ghost sm" data-act="open-members">管理</button></div>
            ${joinRequestRows(ownWaiting)}`
         : `<div class="section-head"><h2 class="section-title">管理员入口</h2></div>
            <div class="list-row"><span class="icon-mini">🔐</span><span class="list-row-main">
              <span class="list-row-title">超级管理员设置</span>
-             <span class="list-row-sub">全局口令、共享菜单、做饭状态和系统设置由管理员维护</span>
+             <span class="list-row-sub">成员关系、家庭设置和做饭状态由家庭管理员维护</span>
            </span><button class="btn ghost sm" data-act="unlock">输入管理口令</button></div>`
     }
     </details>`;
@@ -3504,7 +3568,7 @@ function viewManage() {
     )
     .join('');
 
-  return accountSettingsHtml() + manageSearchHtml() + `
+  return accountSettingsHtml() + familySquareHtml() + manageSearchHtml() + `
     <details class="manage-group${manageGroupHidden('家庭 家庭名称 图标 成员 管理员 权限 申请 加入 口令') }" data-manage-group="family" data-manage-search="家庭 家庭名称 图标 成员 管理员 权限 申请 加入 口令" ${S.manageGroups.family === false ? '' : 'open'}>
       <summary><span><b>家庭与成员</b><small>家庭列表、改名、成员权限、加入申请</small></span><span class="manage-group-caret">⌄</span></summary>
       <div class="manage-group-body">
@@ -4660,6 +4724,15 @@ function viewHouseholdHome() {
     <div class="account-public-list">${publicRows}</div></div>`;
 }
 
+function familySquareHtml() {
+  const joined = new Set(accountFamilies().map((h) => h.id));
+  const directory = households().filter((h) => !joined.has(h.id));
+  const rows = directory.length
+    ? directory.map((h) => `<div class="account-public-house"><span class="house-pick-emoji">${esc(h.emoji || '🏠')}</span><span class="house-pick-main"><b>${esc(h.name)}</b><span class="house-pick-sub">${esc(h.note || '公开家庭')} · ${(h.members || []).length} 位成员</span></span><button class="btn ghost sm" data-act="browse-public-house" data-id="${esc(h.id)}">浏览共享菜</button><button class="btn soft sm" data-act="open-join-family" data-id="${esc(h.id)}">申请加入</button></div>`).join('')
+    : '<p class="section-sub">暂时没有其他公开家庭。</p>';
+  return `<div class="family-square" style="margin-top:18px"><div class="section-head"><h2 class="section-title">家庭广场</h2><span class="section-sub">只读浏览其他家庭的公开共享菜</span></div><div class="account-public-list">${rows}</div><p class="section-sub" style="margin-top:8px">浏览其他家庭时不能点菜、排计划、查看库存或留言；感兴趣的共享菜可以收进当前家庭。</p></div>`;
+}
+
 function memberForHouse(h) {
   const u = accountUser();
   if (!h || !u) return null;
@@ -4687,11 +4760,21 @@ async function accountSubmit(form) {
     S.account = r.account || r.user ? { ...(r.account || {}), user: r.user || r.account?.user, households: r.households || r.families || r.account?.households } : null;
     if (S.account && (register && !password || password === '123456')) S.account.usingDefaultPassword = true;
     if (!accountToken()) throw new Error('服务器没有返回账户令牌');
-    // 每次登录都是新的账户会话，不能沿用上一账户或上次页面的家庭上下文。
-    S.householdId = '';
-    saveSelectedHousehold('');
+    // 账户身份已经由服务端确认；恢复这个账户在本设备上次关闭时的工作区。
+    const context = loadAccountContext();
+    S.householdId = typeof context.householdId === 'string' ? context.householdId : '';
+    S.view = typeof context.view === 'string' ? context.view : 'home';
+    S.dishScope = context.dishScope || 'all';
+    S.category = context.category || '全部';
+    S.keyword = context.keyword || '';
+    S.planWeek = context.planWeek || '';
+    S.pantryFilter = context.pantryFilter || 'all';
+    S.pantryCat = context.pantryCat || '全部';
+    S.manageKeyword = context.manageKeyword || '';
+    if (context.manageGroups && typeof context.manageGroups === 'object') S.manageGroups = { ...S.manageGroups, ...context.manageGroups };
+    saveSelectedHousehold(S.householdId);
     S.accountView = 'login';
-    S.view = 'home';
+    if (!S.view) S.view = 'home';
     S.loading = true;
     await loadState(true);
     await Promise.allSettled([loadAIStatus(), loadVersion(), loadBackups()]);
@@ -4786,7 +4869,7 @@ function render() {
     const settingsTab = document.querySelector('.tab[data-view="settings"]');
     if (settingsTab) {
       const label = settingsTab.querySelector('.tab-label');
-      if (label) label.textContent = '账户';
+      if (label) label.textContent = '家庭';
     }
     document.querySelectorAll('.tab').forEach((t) => {
       const on = (t.dataset.view === 'settings' && (S.view === 'settings' || S.view === 'manage')) || t.dataset.view === S.view;
@@ -4813,9 +4896,9 @@ function render() {
     const admin = isSuper();
     const icon = manageTab.querySelector('.tab-icon');
     const label = manageTab.querySelector('.tab-label');
-    if (icon) icon.textContent = admin ? '🧺' : '🥣';
-    if (label) label.textContent = '设置';
-    manageTab.title = admin ? '账户、家庭、平台配置' : '账户与家庭设置';
+    if (icon) icon.textContent = '🏠';
+    if (label) label.textContent = '家庭';
+    manageTab.title = admin ? '成员、家庭广场与家庭配置' : '家庭成员、申请与家庭广场';
   }
   const menuTab = document.querySelector('.tab[data-view="menu"]');
   if (menuTab) {
@@ -5191,6 +5274,7 @@ const ACTIONS = {
       return toast('请先创建或加入一个家庭，才能使用这个栏目');
     }
     S.view = v;
+    saveAccountContext();
     closeSheet();
     window.scrollTo({ top: 0, behavior: 'smooth' });
     // 顺手重新拉一次。这是个多人一起用的页面：妈刚在另一台手机上点了菜，
@@ -5233,7 +5317,7 @@ const ACTIONS = {
     const dishes = (S.data.dishes || []).filter((d) => !d.householdId).slice(0, 12);
     openSheet({
       title: `${h.emoji || '🏠'} ${h.name} · 共享菜单`,
-      body: `<p class="section-sub">${esc(h.note || '这是公开家庭，可先查看共享菜单。')}</p><div class="dup-list">${dishes.length ? dishes.map((d) => `<button class="dup-row" data-act="open-dish" data-id="${esc(d.id)}"><span class="dup-row-main"><span class="dup-row-name">${esc(d.name)}</span><span class="dup-row-sub">${esc(d.category || '家常菜')}</span></span><span class="dup-row-go">›</span></button>`).join('') : '<p class="section-sub">暂时没有共享菜。</p>'}</div>`,
+      body: `<p class="section-sub">${esc(h.note || '这是公开家庭，只能浏览共享菜单。')}</p><div class="dup-list">${dishes.length ? dishes.map((d) => `<div class="dup-row"><button class="dup-row-main" data-act="open-dish" data-id="${esc(d.id)}"><span class="dup-row-name">${esc(d.name)}</span><span class="dup-row-sub">${esc(d.category || '家常菜')} · 作者：${esc(dishAuthor(d))}</span></button>${S.householdId ? `<button class="btn soft sm" data-act="adopt-dish" data-id="${esc(d.id)}">收进我家</button>` : ''}</div>`).join('') : '<p class="section-sub">暂时没有共享菜。</p>'}</div><p class="section-sub" style="margin-top:10px">这里只能看公开共享菜，不能查看该家庭私菜、点菜、计划、库存或留言。</p>`,
       foot: `<button class="btn ghost" data-act="close-sheet">关闭</button><button class="btn" data-act="open-join-family" data-id="${esc(h.id)}">申请加入这个家庭</button>`,
     });
   },
@@ -5903,11 +5987,12 @@ const ACTIONS = {
   },
   async 'toggle-shop'(el) {
     const name = el.dataset.name;
-    if (S.shoppingChecked.has(name)) S.shoppingChecked.delete(name);
-    else S.shoppingChecked.add(name);
-    await api('PUT', '/api/settings', { shoppingChecked: [...S.shoppingChecked] });
-    S.data.settings.shoppingChecked = [...S.shoppingChecked];
-    render();
+    try {
+      await setShoppingStatus(name, S.shoppingChecked.has(name) ? 'needed' : 'completed');
+      render();
+    } catch (err) {
+      toast(err.message || '采购状态保存失败');
+    }
   },
   async 'copy-shopping'() {
     const text = buildShoppingList()
@@ -6115,6 +6200,7 @@ const ACTIONS = {
     S.householdId = id;
     saveSelectedHousehold(id);
     S.view = 'menu';
+    saveAccountContext();
     // 换家庭后原来的筛选多半没意义了，清掉免得看着空。
     // 分类筛选也得清：当前选中的分类可能正是「只有刚离开那家看得见」的私有分类
     S.memberFilter = '';
@@ -7445,7 +7531,6 @@ window.addEventListener(
 /* 启动 */
 async function bootstrapAccount() {
   S.accountToken = localStorage.getItem(LS_ACCOUNT) || '';
-  // 刷新页面只恢复账户登录，不恢复上次家庭选择；用户必须主动选择家庭。
   S.householdId = '';
   S.view = 'home';
   if (!S.accountToken) {
@@ -7456,6 +7541,17 @@ async function bootstrapAccount() {
   try {
     const me = await api('GET', '/api/account/me');
     S.account = me && (me.account || me.user ? { ...me, user: me.user || me.account?.user } : me);
+    const context = loadAccountContext();
+    S.householdId = typeof context.householdId === 'string' ? context.householdId : '';
+    S.view = typeof context.view === 'string' ? context.view : 'home';
+    S.dishScope = context.dishScope || 'all';
+    S.category = context.category || '全部';
+    S.keyword = context.keyword || '';
+    S.planWeek = context.planWeek || '';
+    S.pantryFilter = context.pantryFilter || 'all';
+    S.pantryCat = context.pantryCat || '全部';
+    S.manageKeyword = context.manageKeyword || '';
+    if (context.manageGroups && typeof context.manageGroups === 'object') S.manageGroups = { ...S.manageGroups, ...context.manageGroups };
     await loadState(true);
     await Promise.allSettled([loadAIStatus(), loadVersion(), loadBackups()]);
     render();
@@ -7468,6 +7564,7 @@ async function bootstrapAccount() {
     render();
   }
 }
+window.addEventListener('beforeunload', saveAccountContext);
 bootstrapAccount();
 setInterval(() => {
   if (!hasAccount() || !S.account || !superExpiry()) return;
