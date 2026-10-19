@@ -2187,14 +2187,34 @@ function orderItem(o) {
   </div>`;
 }
 
+/** 把常见的中英文单位统一，避免「克」和「g」被当成两种单位。 */
+function normalizeAmountUnit(unit) {
+  const u = String(unit || '').trim().toLowerCase();
+  const aliases = {
+    克: 'g', 公克: 'g', 千克: 'kg', 公斤: 'kg',
+    毫升: 'ml', 升: 'l', '毫克': 'mg',
+    个: '个', 只: '只', 条: '条', 盒: '盒', 包: '包',
+    瓶: '瓶', 袋: '袋', 勺: '勺', 小勺: '小勺', 大勺: '大勺',
+    片: '片', 瓣: '瓣', 根: '根', 把: '把', 颗: '颗', 块: '块',
+    丝: '丝', 份: '份', 斤: '斤', 两: '两',
+  };
+  return aliases[u] || u;
+}
+
+/** 从「2 个」「20g」「番茄炒蛋 2 个」中提取数量和单位。 */
+function parseAmountText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return { quantity: null, unit: '' };
+  const m = /(\d+(?:\.\d+)?)\s*([a-zA-Z]+|[\u4e00-\u9fff]{1,4})/.exec(raw);
+  if (!m || Number(m[1]) <= 0) return { quantity: null, unit: '' };
+  return { quantity: Number(m[1]), unit: normalizeAmountUnit(m[2]) || '份' };
+}
+
 /** 从「番茄炒蛋 2 个」这类用量里猜出数量和单位，用来一键入库 */
 function guessAmount(parts) {
   for (const p of parts) {
-    const m = /([0-9]+(?:\.[0-9]+)?)\s*(.*)/.exec(p);
-    if (m && Number(m[1]) > 0) {
-      const unit = m[2].trim();
-      return { quantity: Number(m[1]), unit: unit && unit.length <= 4 ? unit : '份' };
-    }
+    const amount = parseAmountText(p);
+    if (amount.quantity != null) return amount;
   }
   return { quantity: 1, unit: '份' };
 }
@@ -2231,16 +2251,39 @@ function mergeSeasonings(rows) {
   const map = new Map();
   rows.forEach((r) => {
     if (!r.name) return;
-    if (!map.has(r.name)) map.set(r.name, []);
-    const parts = map.get(r.name);
+    if (!map.has(r.name)) {
+      map.set(r.name, {
+        name: r.name,
+        parts: [],
+        requiredQty: null,
+        requiredUnit: '',
+        requiredComparable: true,
+      });
+    }
+    const item = map.get(r.name);
+    const parts = item.parts;
     const tag = r.method ? `${r.dish}（${r.method}） ${r.amount}` : `${r.dish} ${r.amount}`;
     if (!parts.includes(tag)) parts.push(tag);
+    const amount = parseAmountText(r.amount);
+    if (amount.quantity == null) {
+      item.requiredComparable = false;
+      return;
+    }
+    if (!item.requiredUnit) {
+      item.requiredUnit = amount.unit;
+      item.requiredQty = amount.quantity;
+      return;
+    }
+    if (item.requiredComparable && item.requiredUnit === amount.unit) {
+      item.requiredQty += amount.quantity;
+      return;
+    }
+    item.requiredComparable = false;
   });
-  return [...map.entries()].map(([name, parts]) => {
-    const stock = findStock(name);
+  return [...map.values()].map((item) => {
+    const stock = findStock(item.name);
     return {
-      name,
-      parts,
+      ...item,
       stock,
       stockQty: stock.reduce((s, p) => s + (p.quantity || 0), 0),
       // 多条同名但单位不同的时候就不显示数字，免得误导
@@ -2250,6 +2293,32 @@ function mergeSeasonings(rows) {
           : stock.map((p) => p.unit).filter((v, i, a) => a.indexOf(v) === i).join('/'),
     };
   });
+}
+
+/** 根据需求量和当前家庭库存，判断采购条目的真实状态。 */
+function stockAssessment(item) {
+  const stock = Array.isArray(item.stock) ? item.stock : [];
+  const positive = stock.filter((p) => Number(p.quantity) > 0);
+  if (!positive.length) return { key: 'needed', stockQty: 0, shortageQty: null };
+
+  const requiredUnit = normalizeAmountUnit(item.requiredUnit);
+  if (!item.requiredComparable || item.requiredQty == null || !requiredUnit) {
+    return { key: 'uncertain', stockQty: item.stockQty, shortageQty: null };
+  }
+
+  const units = [...new Set(positive.map((p) => normalizeAmountUnit(p.unit)))];
+  if (units.length !== 1 || units[0] !== requiredUnit) {
+    return { key: 'uncertain', stockQty: item.stockQty, shortageQty: null };
+  }
+  const stockQty = positive.reduce((sum, p) => sum + Number(p.quantity || 0), 0);
+  if (stockQty >= item.requiredQty) {
+    return { key: 'enough', stockQty, shortageQty: 0 };
+  }
+  return {
+    key: 'shortage',
+    stockQty,
+    shortageQty: Math.max(0, Math.round((item.requiredQty - stockQty) * 1000) / 1000),
+  };
 }
 
 /** 采购清单：把一批菜品的调料合并，并标出家里已经有的 */
@@ -2287,11 +2356,11 @@ function shopBatchBar(list) {
   const checked = list.filter((it) => S.shoppingChecked.has(it.name));
   if (!checked.length) return '';
   const allOn = checked.length === list.length;
-  const noStock = checked.some((it) => !it.stock.length);
+  const canStock = checked.some((it) => stockAssessment(it).key !== 'enough');
   return `<div class="pick-bar">
     <button class="btn ghost sm" data-act="shop-all" data-on="${allOn ? '0' : '1'}">${allOn ? '☑ 全不勾' : '☐ 全勾'}</button>
     <span class="pick-count">已勾 ${checked.length} / ${list.length}</span>
-    <button class="btn soft sm" data-act="shop-stock" ${noStock ? '' : 'disabled'}>🧊 全部入库</button>
+    <button class="btn soft sm" data-act="shop-stock" ${canStock ? '' : 'disabled'}>🧊 全部入库</button>
     <button class="btn ghost sm" data-act="shop-copy">复制勾中的</button>
     <button class="btn ghost sm" data-act="shop-uncheck">取消勾选</button>
   </div>`;
@@ -2328,21 +2397,34 @@ function shopListHtml(list, opts) {
     ${list
       .map((it) => {
         const done = S.shoppingChecked.has(it.name);
-        const stateLabel = it.stock.length ? '已有' : done ? '已完成' : '待购买';
+        const assessment = stockAssessment(it);
+        const stateKey = assessment.key === 'needed' && done ? 'completed' : assessment.key;
+        const stateLabel = {
+          enough: '已有',
+          shortage: '库存不足',
+          uncertain: '需确认',
+          completed: '已完成',
+          needed: '待购买',
+        }[stateKey];
         const stockHtml = it.stock.length
           ? `<span class="shop-stock" title="家里已经有 ${esc(
               it.stock.map((p) => p.name + ' ' + p.quantity + p.unit).join('、')
-            )}">🏠 家里有 ${esc(String(it.stockQty))}${esc(it.stockUnit)}</span>`
+            )}">
+              ${stateKey === 'needed' ? '⚠️ 库存已用完' : `${stateKey === 'shortage' ? '⚠️' : '🏠'} 家里有 ${esc(String(assessment.stockQty))}${esc(it.stockUnit)}`}
+              ${stateKey === 'shortage' ? `，还需 ${esc(String(assessment.shortageQty))}${esc(it.requiredUnit)}` : ''}
+              ${stateKey === 'uncertain' ? ' · 请确认余量' : ''}
+            </span>`
           : '';
-        const restockHtml = it.stock.length
+        const restockHtml = stateKey === 'enough'
           ? ''
           : `<button class="btn soft sm" data-act="stock-it" data-name="${esc(it.name)}"
                data-parts="${esc(it.parts.join('|'))}">入库</button>`;
-        return `<div class="shop-item ${done ? 'done' : ''}">
+        const rowDone = done && stateKey === 'completed';
+        return `<div class="shop-item ${rowDone ? 'done' : ''} shop-state-${stateKey}">
           <div class="shop-check" role="checkbox" tabindex="0" aria-checked="${done}"
             aria-label="${esc(it.name)} 是否已买" data-act="toggle-shop" data-name="${esc(it.name)}">✓</div>
           <div class="shop-main">
-            <div class="shop-name">${esc(it.name)} <span class="tag ${it.stock.length ? 'own' : done ? 'done' : ''}">${stateLabel}</span></div>
+            <div class="shop-name">${esc(it.name)} <span class="tag ${stateKey === 'enough' ? 'own' : stateKey === 'completed' ? 'done' : stateKey}">${stateLabel}</span></div>
             <div class="shop-from">${esc(it.parts.join(' · '))}</div>
           </div>
           <div class="shop-side">${stockHtml}${restockHtml}</div>
@@ -2668,7 +2750,7 @@ function viewPlan() {
   // 只有能查到调料的菜才进采购汇总（自己随手写的那道不算）
   const dishIds = items.map((it) => it.dishId).filter(Boolean);
   const shop = shoppingFromDishIds(dishIds);
-  const missing = shop.filter((it) => !it.stock.length);
+  const missing = shop.filter((it) => ['needed', 'shortage'].includes(stockAssessment(it).key));
 
   const weekNav = `<div class="week-nav">
       <button class="week-btn" data-act="week-shift" data-n="-1" aria-label="上一周">‹</button>
@@ -2717,7 +2799,7 @@ function viewPlan() {
         <h2 class="section-title">一次买齐</h2>
         <span class="section-sub">${
           shop.length
-            ? `${shop.length} 样待买${missing.length ? ` · ${missing.length} 样家里没有` : ' · 家里都有'}`
+            ? `${shop.length} 样调料${missing.length ? ` · ${missing.length} 样需要补购` : ' · 库存可覆盖'}`
             : '计划里的菜没写调料用量'
         }</span>
         ${shop.length ? `<button class="btn soft sm" style="margin-left:auto" data-act="copy-plan-shopping">复制清单</button>` : ''}
@@ -2812,17 +2894,18 @@ function fmtQty(n) {
 
 /** 加减步长：称重的按大份走，论个的按 1 走 */
 function qtyStep(unit) {
-  const u = String(unit || '').trim();
+  const u = String(unit || '').trim().toLowerCase();
   if (u === 'g') return 50;
   if (u === 'ml') return 100;
-  if (u === 'kg' || u === 'L' || u === '斤') return 0.5;
+  if (u === 'kg' || u === 'l' || u === '斤') return 0.5;
   return 1;
 }
 
 function foodRow(p) {
   const st = shelfStatus(p);
-  const flagText =
-    st.key === 'none' ? (p.expireAt || '未填保质期') : st.label;
+  const flagText = Number(p.quantity) <= 0
+    ? '用完，待补'
+    : st.key === 'none' ? (p.expireAt || '未填保质期') : st.label;
 
   // 多选模式：整行变成一个勾选框，数量加减暂时让位（批量操作不需要先调数量）
   if (picking('pantry')) {
@@ -7129,7 +7212,7 @@ const ACTIONS = {
   },
   /** 勾上的几样一起入库，入完把勾选清掉 —— 免得明天还带着今天的勾 */
   async 'shop-stock'() {
-    const items = shopCheckedItems().filter((it) => !it.stock.length);
+    const items = shopCheckedItems().filter((it) => stockAssessment(it).key !== 'enough');
     if (!items.length) return toast('勾上的这几样家里都有了，不用入库');
     const preview = pickPreview(items.map((i) => i.name), '样');
     if (!confirm(`把 ${preview} 记进「${currentHousehold() ? currentHousehold().name : ''}」的库存？`))

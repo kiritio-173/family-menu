@@ -407,6 +407,8 @@ a { color: var(--primary-dark); }
 }
 .tag.hot { background: var(--primary-soft); color: var(--primary-dark); }
 .tag.own { background: #fdf0e3; color: #a1620d; }
+.tag.shortage { background: #fff0e8; color: #c2410c; }
+.tag.uncertain { background: #fff8dc; color: #9a6700; }
 
 /* ---------- 通用 ---------- */
 
@@ -901,6 +903,8 @@ a { color: var(--primary-dark); }
   padding: 2px 8px; border-radius: 999px;
   background: var(--green-soft); color: var(--green);
 }
+.shop-state-shortage .shop-stock { background: #fff0e8; color: #c2410c; }
+.shop-state-uncertain .shop-stock { background: #fff8dc; color: #9a6700; }
 
 /* 点餐表单顶部：这一单记到哪个家庭 */
 .order-house {
