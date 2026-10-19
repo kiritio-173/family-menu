@@ -906,6 +906,28 @@ a { color: var(--primary-dark); }
 .shop-state-shortage .shop-stock { background: #fff0e8; color: #c2410c; }
 .shop-state-uncertain .shop-stock { background: #fff8dc; color: #9a6700; }
 
+/* 采购与库存分类组：标题固定在组顶，组内操作不会影响其他分类。 */
+.category-group { margin: 10px 0 14px; }
+.category-group-head {
+  display: flex; align-items: center; gap: 7px; min-height: 40px;
+  padding: 4px 7px 4px 4px; border: 1px solid var(--line);
+  border-radius: var(--radius-sm); background: var(--surface);
+}
+.category-group-toggle {
+  display: flex; align-items: center; gap: 7px; flex: 1; min-width: 0;
+  padding: 6px 5px; border: 0; background: transparent; color: var(--text);
+  text-align: left; cursor: pointer;
+}
+.category-group-caret { width: 15px; color: var(--muted); font-size: 18px; line-height: 1; text-align: center; }
+.category-group-title { font-weight: 700; font-size: 14px; white-space: nowrap; }
+.category-group-count { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.category-group-select { flex: 0 0 auto; padding: 6px 7px; border: 0; background: transparent; color: var(--primary-dark); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.category-group-stock { flex: 0 0 auto; }
+.category-group-body { padding-top: 7px; }
+.category-group-body .shop-item:last-child { margin-bottom: 0; }
+.pantry-category-group .food-row:last-child { margin-bottom: 0; }
+.category-group.is-closed .category-group-head { background: var(--bg-soft); }
+
 /* 点餐表单顶部：这一单记到哪个家庭 */
 .order-house {
   display: flex; align-items: center; gap: 10px;

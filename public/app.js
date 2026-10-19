@@ -16,6 +16,8 @@ const S = {
   memberFilter: '',
   pantryCat: '全部',
   pantryFilter: 'all', // all | soon | expired
+  shoppingGroups: {}, // 采购分类折叠状态：{ 调料: false }
+  pantryGroups: {}, // 库存分类折叠状态：{ 蔬菜: false }
   pick: '', // 正在多选哪个区域：'' | pantry | orders | plan | dishes | notes
   sel: {}, // 各区域勾中的 id：{ [区域]: Set }
   noteSticker: '', // 写留言时挑的贴纸
@@ -125,6 +127,8 @@ function saveAccountContext() {
     planWeek: S.planWeek || '',
     pantryFilter: S.pantryFilter || 'all',
     pantryCat: S.pantryCat || '全部',
+    shoppingGroups: S.shoppingGroups || {},
+    pantryGroups: S.pantryGroups || {},
     manageKeyword: S.manageKeyword || '',
     manageGroups: S.manageGroups || { family: true, menu: true, system: true },
   };
@@ -1416,6 +1420,33 @@ function pantryCategories() {
   return PANTRY_ORDER.concat(extra);
 }
 
+/** 采购条目的分类：先看当前家庭库存，再看食材预设，最后归到其他。 */
+function ingredientCategory(name, stock) {
+  const rows = Array.isArray(stock) ? stock : findStock(name);
+  const own = rows.find((p) => p && p.category && p.category !== '其他');
+  if (own) return own.category;
+  const preset = S.presets && Array.isArray(S.presets.presets)
+    ? S.presets.presets.find((p) => p && p.name === name)
+    : null;
+  return (preset && preset.category) || (rows[0] && rows[0].category) || '其他';
+}
+
+/** 采购和库存共用的分类顺序；未知分类放到最后。 */
+function categoryRank(name) {
+  const i = PANTRY_ORDER.indexOf(name);
+  return i < 0 ? PANTRY_ORDER.length : i;
+}
+
+function groupedByCategory(list, categoryFn) {
+  const groups = new Map();
+  (list || []).forEach((item) => {
+    const category = categoryFn(item) || '其他';
+    if (!groups.has(category)) groups.set(category, []);
+    groups.get(category).push(item);
+  });
+  return [...groups.entries()].sort((a, b) => categoryRank(a[0]) - categoryRank(b[0]) || a[0].localeCompare(b[0], 'zh'));
+}
+
 /** 进入多选的入口按钮 */
 function pickOnBtn(key, label) {
   return `<button class="btn ghost sm" data-act="pick-on" data-k="${esc(key)}">${esc(label || '☑ 批量操作')}</button>`;
@@ -2366,6 +2397,60 @@ function shopBatchBar(list) {
   </div>`;
 }
 
+function shoppingGroupOpen(category) {
+  return S.shoppingGroups[category] !== false;
+}
+
+function shopItemHtml(it) {
+  const done = S.shoppingChecked.has(it.name);
+  const assessment = stockAssessment(it);
+  const stateKey = assessment.key === 'needed' && done ? 'completed' : assessment.key;
+  const stateLabel = {
+    enough: '已有', shortage: '库存不足', uncertain: '需确认', completed: '已完成', needed: '待购买',
+  }[stateKey];
+  const stockHtml = it.stock.length
+    ? `<span class="shop-stock" title="家里已经有 ${esc(it.stock.map((p) => p.name + ' ' + p.quantity + p.unit).join('、'))}">
+        ${stateKey === 'needed' ? '⚠️ 库存已用完' : `${stateKey === 'shortage' ? '⚠️' : '🏠'} 家里有 ${esc(String(assessment.stockQty))}${esc(it.stockUnit)}`}
+        ${stateKey === 'shortage' ? `，还需 ${esc(String(assessment.shortageQty))}${esc(it.requiredUnit)}` : ''}
+        ${stateKey === 'uncertain' ? ' · 请确认余量' : ''}
+      </span>`
+    : '';
+  const restockHtml = stateKey === 'enough'
+    ? ''
+    : `<button class="btn soft sm" data-act="stock-it" data-name="${esc(it.name)}"
+         data-parts="${esc(it.parts.join('|'))}">入库</button>`;
+  const rowDone = done && stateKey === 'completed';
+  return `<div class="shop-item ${rowDone ? 'done' : ''} shop-state-${stateKey}">
+    <div class="shop-check" role="checkbox" tabindex="0" aria-checked="${done}"
+      aria-label="${esc(it.name)} 是否已买" data-act="toggle-shop" data-name="${esc(it.name)}">✓</div>
+    <div class="shop-main">
+      <div class="shop-name">${esc(it.name)} <span class="tag ${stateKey === 'enough' ? 'own' : stateKey === 'completed' ? 'done' : stateKey}">${stateLabel}</span></div>
+      <div class="shop-from">${esc(it.parts.join(' · '))}</div>
+    </div>
+    <div class="shop-side">${stockHtml}${restockHtml}</div>
+  </div>`;
+}
+
+function shopGroupHtml(category, items) {
+  const open = shoppingGroupOpen(category);
+  const ids = items.map((it) => it.name);
+  const selected = ids.filter((name) => S.shoppingChecked.has(name));
+  const allOn = ids.length > 0 && selected.length === ids.length;
+  const need = items.filter((it) => ['needed', 'shortage'].includes(stockAssessment(it).key)).length;
+  return `<section class="category-group shop-category-group ${open ? 'is-open' : 'is-closed'}">
+    <div class="category-group-head">
+      <button class="category-group-toggle" data-act="toggle-shopping-group" data-cat="${esc(category)}" aria-expanded="${open}">
+        <span class="category-group-caret">${open ? '⌄' : '›'}</span>
+        <span class="category-group-title">${catEmoji(category)} ${esc(category)}</span>
+        <span class="category-group-count">${items.length} 样${need ? ` · ${need} 待补` : ''}</span>
+      </button>
+      <button class="category-group-select" data-act="select-shopping-group" data-cat="${esc(category)}" data-on="${allOn ? '0' : '1'}" role="checkbox" aria-checked="${allOn}">${allOn ? '☑' : '☐'} 全选</button>
+      <button class="btn soft sm category-group-stock" data-act="stock-shopping-group" data-cat="${esc(category)}" ${need ? '' : 'disabled'}>本组入库</button>
+    </div>
+    ${open ? `<div class="category-group-body">${items.map(shopItemHtml).join('')}</div>` : ''}
+  </section>`;
+}
+
 /**
  * 采购清单的通用渲染：点餐页和计划页共用
  * opts: { title, sub, hint, bare（不画标题行，直接接在别的小标题下面） }
@@ -2373,7 +2458,6 @@ function shopBatchBar(list) {
 function shopListHtml(list, opts) {
   const o = opts || {};
   // 记住当前这张单子：批量入库、复制勾中的都得按它来。
-  // 点餐页和计划页汇总出来的是两张不同的单子，不能混着做。
   S.shopList = list;
   if (!list.length) {
     return o.bare
@@ -2381,9 +2465,7 @@ function shopListHtml(list, opts) {
       : `<div class="section-head">
         <h2 class="section-title">${esc(o.title || '买菜清单')}</h2>
       </div>
-      <div class="empty" style="padding:30px 20px">
-        <p class="empty-text">${esc(o.empty || '暂时没有需要买菜的东西')}</p>
-      </div>`;
+      <div class="empty" style="padding:30px 20px"><p class="empty-text">${esc(o.empty || '暂时没有需要买菜的东西')}</p></div>`;
   }
   const head = o.bare
     ? ''
@@ -2392,45 +2474,8 @@ function shopListHtml(list, opts) {
       <span class="section-sub">${esc(o.sub || `${list.length} 样待买`)}</span>
       <button class="btn ghost sm" style="margin-left:auto" data-act="copy-shopping" data-scope="${esc(o.scope || '')}">复制</button>
     </div>`;
-  return `${head}
-    ${shopBatchBar(list)}
-    ${list
-      .map((it) => {
-        const done = S.shoppingChecked.has(it.name);
-        const assessment = stockAssessment(it);
-        const stateKey = assessment.key === 'needed' && done ? 'completed' : assessment.key;
-        const stateLabel = {
-          enough: '已有',
-          shortage: '库存不足',
-          uncertain: '需确认',
-          completed: '已完成',
-          needed: '待购买',
-        }[stateKey];
-        const stockHtml = it.stock.length
-          ? `<span class="shop-stock" title="家里已经有 ${esc(
-              it.stock.map((p) => p.name + ' ' + p.quantity + p.unit).join('、')
-            )}">
-              ${stateKey === 'needed' ? '⚠️ 库存已用完' : `${stateKey === 'shortage' ? '⚠️' : '🏠'} 家里有 ${esc(String(assessment.stockQty))}${esc(it.stockUnit)}`}
-              ${stateKey === 'shortage' ? `，还需 ${esc(String(assessment.shortageQty))}${esc(it.requiredUnit)}` : ''}
-              ${stateKey === 'uncertain' ? ' · 请确认余量' : ''}
-            </span>`
-          : '';
-        const restockHtml = stateKey === 'enough'
-          ? ''
-          : `<button class="btn soft sm" data-act="stock-it" data-name="${esc(it.name)}"
-               data-parts="${esc(it.parts.join('|'))}">入库</button>`;
-        const rowDone = done && stateKey === 'completed';
-        return `<div class="shop-item ${rowDone ? 'done' : ''} shop-state-${stateKey}">
-          <div class="shop-check" role="checkbox" tabindex="0" aria-checked="${done}"
-            aria-label="${esc(it.name)} 是否已买" data-act="toggle-shop" data-name="${esc(it.name)}">✓</div>
-          <div class="shop-main">
-            <div class="shop-name">${esc(it.name)} <span class="tag ${stateKey === 'enough' ? 'own' : stateKey === 'completed' ? 'done' : stateKey}">${stateLabel}</span></div>
-            <div class="shop-from">${esc(it.parts.join(' · '))}</div>
-          </div>
-          <div class="shop-side">${stockHtml}${restockHtml}</div>
-        </div>`;
-      })
-      .join('')}
+  const groups = groupedByCategory(list, (it) => ingredientCategory(it.name, it.stock));
+  return `${head}${shopBatchBar(list)}${groups.map(([category, items]) => shopGroupHtml(category, items)).join('')}
     ${o.hint ? `<p class="section-sub" style="margin-top:6px">${esc(o.hint)}</p>` : ''}`;
 }
 
@@ -2973,6 +3018,32 @@ function pantryVisible() {
 
 const visiblePantryIds = () => pantryVisible().map((p) => p.id);
 
+function pantryGroupOpen(category) {
+  return S.pantryGroups[category] !== false;
+}
+
+function pantryGroupHtml(category, items) {
+  const open = pantryGroupOpen(category);
+  const ids = items.map((p) => p.id);
+  const selected = ids.filter((id) => pickHas('pantry', id));
+  const allOn = ids.length > 0 && selected.length === ids.length;
+  const emptyCount = items.filter((p) => Number(p.quantity) <= 0).length;
+  const select = picking('pantry')
+    ? `<button class="category-group-select" data-act="select-pantry-group" data-cat="${esc(category)}" data-on="${allOn ? '0' : '1'}" role="checkbox" aria-checked="${allOn}">${allOn ? '☑' : '☐'} 全选</button>`
+    : '';
+  return `<section class="category-group pantry-category-group ${open ? 'is-open' : 'is-closed'}">
+    <div class="category-group-head">
+      <button class="category-group-toggle" data-act="toggle-pantry-group" data-cat="${esc(category)}" aria-expanded="${open}">
+        <span class="category-group-caret">${open ? '⌄' : '›'}</span>
+        <span class="category-group-title">${catEmoji(category)} ${esc(category)}</span>
+        <span class="category-group-count">${items.length} 样${emptyCount ? ` · ${emptyCount} 用完` : ''}</span>
+      </button>
+      ${select}
+    </div>
+    ${open ? `<div class="category-group-body">${items.map(foodRow).join('')}</div>` : ''}
+  </section>`;
+}
+
 const pantryNames = (ids) => {
   const set = new Set(ids);
   return householdPantry()
@@ -3109,32 +3180,14 @@ function viewPantry() {
       <p class="empty-text">点右下角「记一样食材」，把家里现有的东西录进来</p>
     </div>`;
   } else {
-    // 按分类分组，分类按固定顺序（肉类→蛋类→奶制品→蔬菜…），同分类内快过期的排前面
-    const groups = new Map();
-    list.forEach((p) => {
-      if (!groups.has(p.category)) groups.set(p.category, []);
-      groups.get(p.category).push(p);
-    });
     const rank = { expired: 0, today: 1, soon: 2, ok: 3, none: 4 };
-    const catRank = (c) => {
-      const i = PANTRY_ORDER.indexOf(c);
-      return i < 0 ? PANTRY_ORDER.length : i;
-    };
-    body = [...groups.entries()]
-      .sort((a, b) => catRank(a[0]) - catRank(b[0]))
-      .map(([cat, items]) => {
-        items.sort(
-          (a, b) =>
-            rank[shelfStatus(a).key] - rank[shelfStatus(b).key] ||
-            a.name.localeCompare(b.name, 'zh')
-        );
-        return `<div class="section-head">
-            <h2 class="section-title">${catEmoji(cat)} ${esc(cat)}</h2>
-            <span class="section-sub">${items.length} 样</span>
-          </div>
-          ${items.map(foodRow).join('')}`;
-      })
-      .join('');
+    const groups = groupedByCategory(list, (p) => p.category).map(([cat, items]) => {
+      items.sort(
+        (a, b) => rank[shelfStatus(a).key] - rank[shelfStatus(b).key] || a.name.localeCompare(b.name, 'zh')
+      );
+      return [cat, items];
+    });
+    body = groups.map(([cat, items]) => pantryGroupHtml(cat, items)).join('');
   }
 
   // 多选模式的工具条：全选、已选几样、批量改、删掉
@@ -4853,6 +4906,8 @@ async function accountSubmit(form) {
     S.planWeek = context.planWeek || '';
     S.pantryFilter = context.pantryFilter || 'all';
     S.pantryCat = context.pantryCat || '全部';
+    S.shoppingGroups = context.shoppingGroups && typeof context.shoppingGroups === 'object' ? { ...context.shoppingGroups } : {};
+    S.pantryGroups = context.pantryGroups && typeof context.pantryGroups === 'object' ? { ...context.pantryGroups } : {};
     S.manageKeyword = context.manageKeyword || '';
     if (context.manageGroups && typeof context.manageGroups === 'object') S.manageGroups = { ...S.manageGroups, ...context.manageGroups };
     saveSelectedHousehold(S.householdId);
@@ -4860,6 +4915,7 @@ async function accountSubmit(form) {
     if (!S.view) S.view = 'home';
     S.loading = true;
     await loadState(true);
+    if (['plan', 'order'].includes(S.view) && !S.presets) await ensurePresets();
     await Promise.allSettled([loadAIStatus(), loadVersion(), loadBackups()]);
     render();
     toast(register ? '账号已创建' : '登录成功');
@@ -5364,6 +5420,7 @@ const ACTIONS = {
     // 爸这边不重拉就还看着进页面那一刻的旧数据，只能靠手动刷新网页才发现。
     // 顺带把「切家庭之后忘了刷新」的那类脏显示一起治好。
     await loadState(true);
+    if (['plan', 'order'].includes(v) && !S.presets) await ensurePresets();
     render();
   },
   reload() {
@@ -6561,6 +6618,22 @@ const ACTIONS = {
     S.pantryCat = el.dataset.cat || '全部';
     render();
   },
+  'toggle-pantry-group'(el) {
+    const cat = el.dataset.cat || '其他';
+    S.pantryGroups[cat] = !pantryGroupOpen(cat);
+    saveAccountContext();
+    render();
+  },
+  'select-pantry-group'(el) {
+    const cat = el.dataset.cat || '其他';
+    const on = el.dataset.on === '1';
+    const selected = pickSel('pantry');
+    pantryVisible().filter((p) => p.category === cat).forEach((p) => {
+      if (on) selected.add(p.id);
+      else selected.delete(p.id);
+    });
+    render();
+  },
   'pick-preset'(el) {
     const { name, cat, unit, exp } = el.dataset;
     $('#fFoodName').value = name;
@@ -7224,6 +7297,35 @@ const ACTIONS = {
     render();
     toast(`${items.length} 样已入库`);
   },
+  'toggle-shopping-group'(el) {
+    const cat = el.dataset.cat || '其他';
+    S.shoppingGroups[cat] = !shoppingGroupOpen(cat);
+    saveAccountContext();
+    render();
+  },
+  async 'select-shopping-group'(el) {
+    const cat = el.dataset.cat || '其他';
+    const on = el.dataset.on === '1';
+    const items = (S.shopList || []).filter((it) => ingredientCategory(it.name, it.stock) === cat);
+    items.forEach((it) => on ? S.shoppingChecked.add(it.name) : S.shoppingChecked.delete(it.name));
+    await saveShoppingChecked();
+    render();
+  },
+  async 'stock-shopping-group'(el) {
+    const cat = el.dataset.cat || '其他';
+    const items = (S.shopList || []).filter(
+      (it) => ingredientCategory(it.name, it.stock) === cat && stockAssessment(it).key !== 'enough'
+    );
+    if (!items.length) return toast('本组没有需要入库的东西');
+    const preview = pickPreview(items.map((i) => i.name), '样');
+    if (!confirm(`把 ${preview} 记进「${currentHousehold() ? currentHousehold().name : ''}」的库存？`)) return;
+    for (const it of items) await stockOne(it.name, it.parts);
+    items.forEach((it) => S.shoppingChecked.delete(it.name));
+    await saveShoppingChecked();
+    await loadState(true);
+    render();
+    toast(`${items.length} 样已入库`);
+  },
   async 'shop-copy'() {
     const items = shopCheckedItems();
     if (!items.length) return toast('还没勾任何一样');
@@ -7633,9 +7735,12 @@ async function bootstrapAccount() {
     S.planWeek = context.planWeek || '';
     S.pantryFilter = context.pantryFilter || 'all';
     S.pantryCat = context.pantryCat || '全部';
+    S.shoppingGroups = context.shoppingGroups && typeof context.shoppingGroups === 'object' ? { ...context.shoppingGroups } : {};
+    S.pantryGroups = context.pantryGroups && typeof context.pantryGroups === 'object' ? { ...context.pantryGroups } : {};
     S.manageKeyword = context.manageKeyword || '';
     if (context.manageGroups && typeof context.manageGroups === 'object') S.manageGroups = { ...S.manageGroups, ...context.manageGroups };
     await loadState(true);
+    if (['plan', 'order'].includes(S.view) && !S.presets) await ensurePresets();
     await Promise.allSettled([loadAIStatus(), loadVersion(), loadBackups()]);
     render();
   } catch (_) {
