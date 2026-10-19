@@ -41,10 +41,22 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.24.0';
+const APP_VERSION = '1.25.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.25.0',
+    date: '2026-10-19',
+    title: '计划购买量入库与常备调料',
+    items: [
+      '计划采购与常备调料分开显示，「调味干货」默认按常备调料处理',
+      '菜谱编辑器可逐项切换自动判断、常备调料或需要采购',
+      '入库前填写实际购买数量和单位，数量会累加到同家庭已有的同名同单位库存',
+      '同一周计划的同一食材只允许入库一次，避免重复点击造成库存重复增加',
+      '采购入库支持常见调料别名合并，例如生抽酱油与生抽',
+    ],
+  },
   {
     version: '1.24.0',
     date: '2026-10-19',
@@ -1194,6 +1206,48 @@ function normPantryItem(input, prev, keepInputId) {
   };
 }
 
+/** 采购合并用的食材键：处理空格、标点和常见同义写法。 */
+function pantryIngredientKey(name) {
+  let key = safeText(name, 24).toLowerCase()
+    .replace(/[\s\u3000、，。；：:（）()【】\[\]\/\\·'"“”‘’\-_.]/g, '');
+  const aliases = {
+    生抽酱油: '生抽',
+    酱油: '生抽',
+    老抽酱油: '老抽',
+    食用盐: '盐',
+    精盐: '盐',
+    白砂糖: '糖',
+    白糖: '糖',
+    味精: '味精',
+    鸡粉: '鸡精',
+  };
+  return aliases[key] || key;
+}
+
+/** 采购累加只在同家庭、同食材、同包装单位的库存条目上进行。 */
+function pantryUnitKey(unit) {
+  const key = safeText(unit, 8).trim().toLowerCase();
+  return ({ 公克: 'g', 克: 'g', 千克: 'kg', 公斤: 'kg', 毫升: 'ml', 升: 'l' })[key] || key;
+}
+
+function addPantryQuantity(item) {
+  const hit = state.pantry.find(
+    (p) => p.householdId === item.householdId &&
+      pantryIngredientKey(p.name) === pantryIngredientKey(item.name) &&
+      pantryUnitKey(p.unit) === pantryUnitKey(item.unit)
+  );
+  if (!hit) {
+    state.pantry.unshift(item);
+    return item;
+  }
+  hit.quantity = Math.min(99999, Math.round((Number(hit.quantity || 0) + Number(item.quantity || 0)) * 1000) / 1000);
+  if (!hit.expireAt && item.expireAt) hit.expireAt = item.expireAt;
+  if ((!hit.category || hit.category === '其他') && item.category && item.category !== '其他') hit.category = item.category;
+  if (!hit.note && item.note) hit.note = item.note;
+  hit.updatedAt = nowISO();
+  return hit;
+}
+
 /** 今天往前推 n 天，返回 YYYY-MM-DD */
 function daysFromNow(n) {
   const d = new Date();
@@ -1245,6 +1299,9 @@ function normPlan(input, prev) {
     householdId: resolveHouseholdId(input.householdId ?? base.householdId),
     weekOf,
     items: items.filter((it) => (seen.has(it.name) ? false : (seen.add(it.name), true))),
+    received: input.received && typeof input.received === 'object'
+      ? input.received
+      : (base.received && typeof base.received === 'object' ? base.received : {}),
     createdAt: base.createdAt || input.createdAt || nowISO(),
     updatedAt: nowISO(),
   };
@@ -1256,7 +1313,7 @@ function findPlan(householdId, weekOf, create) {
   const wk = mondayOf(weekOf);
   let plan = state.plans.find((p) => p.householdId === hid && p.weekOf === wk);
   if (!plan && create) {
-    plan = { id: uid('pl_'), householdId: hid, weekOf: wk, items: [], createdAt: nowISO(), updatedAt: nowISO() };
+    plan = { id: uid('pl_'), householdId: hid, weekOf: wk, items: [], received: {}, createdAt: nowISO(), updatedAt: nowISO() };
     state.plans.push(plan);
   }
   return plan || null;
@@ -2152,10 +2209,14 @@ function normDish(input, prev, keepInputId) {
       .filter(Boolean)
       .slice(0, 8),
     seasonings: safeList(input.seasonings)
-      .map((s) => ({
-        name: safeText(s && s.name, 30).trim(),
-        amount: safeText(s && s.amount, 30).trim(),
-      }))
+      .map((s) => {
+        const purchaseType = ['staple', 'purchase'].includes(s && s.purchaseType) ? s.purchaseType : '';
+        return {
+          name: safeText(s && s.name, 30).trim(),
+          amount: safeText(s && s.amount, 30).trim(),
+          ...(purchaseType ? { purchaseType } : {}),
+        };
+      })
       .filter((s) => s.name)
       .slice(0, 40),
     methods: safeList(input.methods)
@@ -2167,10 +2228,14 @@ function normDish(input, prev, keepInputId) {
         // 菜品级的 seasonings 现在的语义是「通用调料」，两种都不冲突。
         // 老数据没有这个字段，解析出来就是空数组 —— 不用迁移，菜谱不会少东西。
         seasonings: safeList(m && m.seasonings)
-          .map((s) => ({
-            name: safeText(s && s.name, 30).trim(),
-            amount: safeText(s && s.amount, 30).trim(),
-          }))
+          .map((s) => {
+            const purchaseType = ['staple', 'purchase'].includes(s && s.purchaseType) ? s.purchaseType : '';
+            return {
+              name: safeText(s && s.name, 30).trim(),
+              amount: safeText(s && s.amount, 30).trim(),
+              ...(purchaseType ? { purchaseType } : {}),
+            };
+          })
           .filter((s) => s.name)
           .slice(0, 40),
         steps: (Array.isArray(m && m.steps)
@@ -3891,6 +3956,40 @@ async function handleAPI(req, res, url) {
   if (route[0] === 'plans') {
     const id = route[1];
 
+    // 计划里购买完成后入库：同一周同一食材只处理一次，并累加到已有库存。
+    if (method === 'POST' && route[1] === 'receive') {
+      const body = await readBody(req);
+      const hid = resolveHouseholdId(body.householdId);
+      if (!requireAccountHousehold(req, res, hid)) return;
+      const name = safeText(body.name, 24).trim();
+      if (!name) return sendError(res, 400, '食材名不能为空');
+      const rawQty = Number(body.quantity);
+      if (!Number.isFinite(rawQty) || rawQty <= 0) return sendError(res, 400, '购买数量必须大于 0');
+      const unit = safeText(body.unit, 8).trim() || '份';
+      const wk = mondayOf(body.weekOf);
+      const plan = findPlan(hid, wk, false);
+      if (!plan) return sendError(res, 404, '这一周还没有计划');
+      if (!plan.received || typeof plan.received !== 'object') plan.received = {};
+      // 计划里同一食材无论实际购买时选了哪种包装单位，都只允许处理一次。
+      const receivedKey = pantryIngredientKey(name);
+      if (plan.received[receivedKey]) return sendError(res, 409, '本计划这项已经入库，不能重复添加');
+      const item = normPantryItem({
+        householdId: hid,
+        name,
+        category: body.category,
+        quantity: rawQty,
+        unit,
+        expireAt: body.expireAt,
+        note: body.note || '从计划采购入库',
+      });
+      const stored = addPantryQuantity(item);
+      plan.received[receivedKey] = nowISO();
+      plan.updatedAt = nowISO();
+      scheduleSave('pantry');
+      scheduleSave('plans');
+      return sendJSON(res, 200, { ok: true, data: { item: stored, receivedKey } });
+    }
+
     // 加一道菜进某家庭某周的计划
     if (method === 'POST' && route[1] === 'items') {
       const body = await readBody(req);
@@ -3981,12 +4080,18 @@ async function handleAPI(req, res, url) {
   if (route[0] === 'pantry') {
     const id = route[1];
     if (method === 'POST' && !id) {
-      const item = normPantryItem(await readBody(req));
+      const body = await readBody(req);
+      const item = normPantryItem(body);
       if (!item) return sendError(res, 400, '食材名不能为空');
       if (!requireAccountHousehold(req, res, item.householdId)) return;
-      state.pantry.unshift(item);
+      if (body.addToExisting) addPantryQuantity(item);
+      else state.pantry.unshift(item);
       scheduleSave('pantry');
-      return sendJSON(res, 200, { ok: true, data: item });
+      const stored = body.addToExisting
+        ? state.pantry.find((p) => p.id === item.id ||
+            (p.householdId === item.householdId && pantryIngredientKey(p.name) === pantryIngredientKey(item.name) && pantryUnitKey(p.unit) === pantryUnitKey(item.unit))) || item
+        : item;
+      return sendJSON(res, 200, { ok: true, data: stored });
     }
     if (method === 'PUT' && id) {
       const idx = state.pantry.findIndex((p) => p.id === id);

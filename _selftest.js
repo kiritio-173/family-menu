@@ -391,6 +391,32 @@ async function main() {
   eq('数量改成 8', updated.quantity, 8);
   eq('数量改 8 不丢其它字段', [updated.name, updated.category, updated.expireAt], ['鸡蛋', '蛋类', dayOffset(5)]);
 
+  // 采购入库应累加已有同名同单位库存，而不是再建一条重复记录。
+  const merged = (await post('/api/pantry', {
+    householdId: h301.id, name: '鸡蛋', category: '蛋类', quantity: 2, unit: '个',
+    addToExisting: true, note: '计划采购入库',
+  })).body.data;
+  eq('采购入库累加已有库存', [merged.id, merged.quantity], [f1.id, 10]);
+  eq('累加后同名同单位只有一条',
+    (await get(`/api/state?householdId=${encodeURIComponent(h301.id)}`)).body.data.pantry
+      .filter((p) => p.name === '鸡蛋' && p.unit === '个').length, 1);
+
+  // 同一计划同一食材只允许入库一次，避免重复点击把库存加两遍。
+  const receiveWeek = monday;
+  await post('/api/plans/items', { householdId: h301.id, weekOf: receiveWeek, name: '采购入库测试菜' });
+  const received = await post('/api/plans/receive', {
+    householdId: h301.id, weekOf: receiveWeek, name: '鸡蛋', quantity: 3, unit: '个', category: '蛋类',
+  });
+  eq('计划购买量入库返回 200', received.status, 200);
+  eq('计划入库继续累加', received.body.data.item.quantity, 13);
+  eq('同一计划同一食材不能重复入库',
+    (await post('/api/plans/receive', {
+      householdId: h301.id, weekOf: receiveWeek, name: '鸡蛋', quantity: 4, unit: '个', category: '蛋类',
+    })).status, 409);
+  eq('重复入库没有再次累加',
+    (await get(`/api/state?householdId=${encodeURIComponent(h301.id)}`)).body.data.pantry
+      .find((p) => p.id === f1.id).quantity, 13);
+
   await put(`/api/pantry/${f1.id}`, { expireAt: dayOffset(-2) });
   await put(`/api/pantry/${f2.id}`, { expireAt: dayOffset(1) });
   const purge = (await del(`/api/pantry?householdId=${encodeURIComponent(h301.id)}&scope=expired`)).body.data;

@@ -22,6 +22,7 @@ const S = {
   sel: {}, // 各区域勾中的 id：{ [区域]: Set }
   noteSticker: '', // 写留言时挑的贴纸
   shopList: [], // 当前页面渲染出来的那张买菜清单，批量入库时要用
+  shopContext: null, // 当前清单来源：计划入库需要带周次，点餐页则为空
   orderPickSel: new Set(), // 点餐弹层里勾中的几道菜
   planPickSel: new Set(), // 计划弹层里勾中的几道菜
   planPickWeek: '', // 计划弹层是给哪一周开的
@@ -582,6 +583,12 @@ function planItems(weekOf, id) {
   const wk = mondayOf(weekOf);
   const plan = (S.data.plans || []).find((p) => p.householdId === hid && p.weekOf === wk);
   return plan ? plan.items : [];
+}
+
+function planRecord(weekOf, id) {
+  const hid = id || S.householdId;
+  const wk = mondayOf(weekOf);
+  return (S.data.plans || []).find((p) => p.householdId === hid && p.weekOf === wk) || null;
 }
 
 function planCount(weekOf) {
@@ -1222,10 +1229,10 @@ function snapshotSheetInputs() {
   if (!root) return out;
   root
     .querySelectorAll(
-      'input[id], textarea[id], select[id], input[data-act="season-name"], input[data-act="season-amt"], input[data-act="method-name"], textarea[data-act="method-steps"]'
+      'input[id], textarea[id], select[id], input[data-act="season-name"], input[data-act="season-amt"], select[data-act="season-type"], input[data-act="method-name"], textarea[data-act="method-steps"], input[data-act="mseason-name"], input[data-act="mseason-amt"], select[data-act="mseason-type"]'
     )
     .forEach((el) => {
-      const k = el.id || `${el.dataset.act}:${el.dataset.i || ''}`;
+      const k = el.id || `${el.dataset.act}:${el.dataset.i || ''}:${el.dataset.j || ''}`;
       out[k] = el.type === 'checkbox' ? el.checked : el.value;
     });
   return out;
@@ -1242,10 +1249,10 @@ function applySheetInputs(snap) {
   if (!root || !snap) return;
   root
     .querySelectorAll(
-      'input[id], textarea[id], select[id], input[data-act="season-name"], input[data-act="season-amt"], input[data-act="method-name"], textarea[data-act="method-steps"]'
+      'input[id], textarea[id], select[id], input[data-act="season-name"], input[data-act="season-amt"], select[data-act="season-type"], input[data-act="method-name"], textarea[data-act="method-steps"], input[data-act="mseason-name"], input[data-act="mseason-amt"], select[data-act="mseason-type"]'
     )
     .forEach((el) => {
-      const k = el.id || `${el.dataset.act}:${el.dataset.i || ''}`;
+      const k = el.id || `${el.dataset.act}:${el.dataset.i || ''}:${el.dataset.j || ''}`;
       if (!(k in snap)) return;
       if (el.type === 'checkbox') el.checked = !!snap[k];
       // 文件框的 value 只能置空，赋别的值浏览器会抛异常并中断后面的恢复
@@ -1535,22 +1542,53 @@ async function setShoppingStatus(name, state) {
  * 把一样买菜清单上的东西记进当前家庭的库存。
  * 单条「入库」和批量「全部入库」共用这一份，免得两处逻辑走偏。
  */
-async function stockOne(name, parts) {
-  const { quantity, unit } = guessAmount(parts || []);
+async function stockOne(name, parts, options) {
+  const opts = options || {};
+  const item = opts.item || (S.shopList || []).find((x) => x.name === name) || null;
+  const guessed = guessAmount(parts || []);
+  const assessment = item ? stockAssessment(item) : null;
+  const defaultQty = assessment && assessment.shortageQty != null
+    ? assessment.shortageQty
+    : (item && item.requiredQty != null ? item.requiredQty : guessed.quantity);
+  const defaultUnit = (item && item.requiredUnit) || guessed.unit || '份';
+  const enteredQty = window.prompt(`实际购买了多少「${name}」？`, String(defaultQty));
+  if (enteredQty === null) return null;
+  const quantity = Number(String(enteredQty).trim());
+  if (!Number.isFinite(quantity) || quantity <= 0) {
+    toast('购买数量必须大于 0');
+    return null;
+  }
+  const enteredUnit = window.prompt(`「${name}」的单位是什么？`, defaultUnit);
+  if (enteredUnit === null) return null;
+  const unit = normalizeAmountUnit(enteredUnit) || defaultUnit;
   let category = '其他';
   if (S.presets && S.presets.presets) {
     const hit = S.presets.presets.find((p) => p.name === name);
     if (hit) category = hit.category;
   }
-  await api('POST', '/api/pantry', {
-    householdId: S.householdId,
-    name,
-    category,
-    quantity,
-    unit,
-    expireAt: '',
-    note: '从买菜清单入库',
-  });
+  const context = S.shopContext;
+  if (context && context.kind === 'plan' && context.weekOf) {
+    await api('POST', '/api/plans/receive', {
+      householdId: S.householdId,
+      weekOf: context.weekOf,
+      name,
+      category,
+      quantity,
+      unit,
+      note: '从计划采购入库',
+    });
+  } else {
+    await api('POST', '/api/pantry', {
+      householdId: S.householdId,
+      name,
+      category,
+      quantity,
+      unit,
+      expireAt: '',
+      note: '从买菜清单入库',
+      addToExisting: true,
+    });
+  }
   if (S.householdId) {
     await api('PUT', '/api/shopping-status', { householdId: S.householdId, name, state: 'needed' });
     S.shoppingChecked.delete(name);
@@ -2267,11 +2305,11 @@ function findStock(name) {
 function collectDishSeasonings(d) {
   const out = [];
   (d.seasonings || []).forEach((s) => {
-    if (s.name) out.push({ name: s.name, amount: s.amount, method: '' });
+    if (s.name) out.push({ name: s.name, amount: s.amount, purchaseType: s.purchaseType || '', method: '' });
   });
   (d.methods || []).forEach((m) => {
     (m.seasonings || []).forEach((s) => {
-      if (s.name) out.push({ name: s.name, amount: s.amount, method: m.name || '' });
+      if (s.name) out.push({ name: s.name, amount: s.amount, purchaseType: s.purchaseType || '', method: m.name || '' });
     });
   });
   return out;
@@ -2282,16 +2320,22 @@ function mergeSeasonings(rows) {
   const map = new Map();
   rows.forEach((r) => {
     if (!r.name) return;
-    if (!map.has(r.name)) {
-      map.set(r.name, {
+    const key = String(r.name).toLowerCase().replace(/[\s\u3000、，。；：:（）()【】\[\]\/\\·'"“”‘’\-_.]/g, '');
+    const aliases = { 生抽酱油: '生抽', 酱油: '生抽', 老抽酱油: '老抽', 食用盐: '盐', 精盐: '盐', 白砂糖: '糖', 白糖: '糖' };
+    const mergeKey = aliases[key] || key;
+    if (!map.has(mergeKey)) {
+      map.set(mergeKey, {
         name: r.name,
         parts: [],
         requiredQty: null,
         requiredUnit: '',
         requiredComparable: true,
+        purchaseType: r.purchaseType || '',
       });
     }
-    const item = map.get(r.name);
+    const item = map.get(mergeKey);
+    // 同一调料有明确“需要采购”的一条时，采购优先；否则保留明确的常备设置。
+    if (r.purchaseType === 'purchase' || (r.purchaseType === 'staple' && !item.purchaseType)) item.purchaseType = r.purchaseType;
     const parts = item.parts;
     const tag = r.method ? `${r.dish}（${r.method}） ${r.amount}` : `${r.dish} ${r.amount}`;
     if (!parts.includes(tag)) parts.push(tag);
@@ -2313,8 +2357,11 @@ function mergeSeasonings(rows) {
   });
   return [...map.values()].map((item) => {
     const stock = findStock(item.name);
+    const category = ingredientCategory(item.name, stock);
     return {
       ...item,
+      category,
+      isStaple: item.purchaseType === 'staple' || (item.purchaseType !== 'purchase' && category === '调味干货'),
       stock,
       stockQty: stock.reduce((s, p) => s + (p.quantity || 0), 0),
       // 多条同名但单位不同的时候就不显示数字，免得误导
@@ -2326,11 +2373,18 @@ function mergeSeasonings(rows) {
   });
 }
 
+function shoppingIngredientKey(name, unit) {
+  const raw = String(name || '').toLowerCase().replace(/[\s\u3000、，。；：:（）()【】\[\]\/\\·'"“”‘’\-_.]/g, '');
+  const aliases = { 生抽酱油: '生抽', 酱油: '生抽', 老抽酱油: '老抽', 食用盐: '盐', 精盐: '盐', 白砂糖: '糖', 白糖: '糖' };
+  const key = aliases[raw] || raw;
+  return unit ? `${key}|${normalizeAmountUnit(unit)}` : key;
+}
+
 /** 根据需求量和当前家庭库存，判断采购条目的真实状态。 */
 function stockAssessment(item) {
   const stock = Array.isArray(item.stock) ? item.stock : [];
   const positive = stock.filter((p) => Number(p.quantity) > 0);
-  if (!positive.length) return { key: 'needed', stockQty: 0, shortageQty: null };
+  if (!positive.length) return { key: item.isStaple ? 'staple' : 'needed', stockQty: 0, shortageQty: null };
 
   const requiredUnit = normalizeAmountUnit(item.requiredUnit);
   if (!item.requiredComparable || item.requiredQty == null || !requiredUnit) {
@@ -2404,9 +2458,9 @@ function shoppingGroupOpen(category) {
 function shopItemHtml(it) {
   const done = S.shoppingChecked.has(it.name);
   const assessment = stockAssessment(it);
-  const stateKey = assessment.key === 'needed' && done ? 'completed' : assessment.key;
+  const stateKey = it.received ? 'received' : assessment.key === 'needed' && done ? 'completed' : assessment.key;
   const stateLabel = {
-    enough: '已有', shortage: '库存不足', uncertain: '需确认', completed: '已完成', needed: '待购买',
+    enough: '已有', shortage: '库存不足', uncertain: '需确认', staple: '请确认', completed: '已完成', received: '已入库', needed: '待购买',
   }[stateKey];
   const stockHtml = it.stock.length
     ? `<span class="shop-stock" title="家里已经有 ${esc(it.stock.map((p) => p.name + ' ' + p.quantity + p.unit).join('、'))}">
@@ -2415,11 +2469,11 @@ function shopItemHtml(it) {
         ${stateKey === 'uncertain' ? ' · 请确认余量' : ''}
       </span>`
     : '';
-  const restockHtml = stateKey === 'enough'
+  const restockHtml = ['enough', 'received'].includes(stateKey)
     ? ''
     : `<button class="btn soft sm" data-act="stock-it" data-name="${esc(it.name)}"
          data-parts="${esc(it.parts.join('|'))}">入库</button>`;
-  const rowDone = done && stateKey === 'completed';
+  const rowDone = done && stateKey === 'completed' || stateKey === 'received';
   return `<div class="shop-item ${rowDone ? 'done' : ''} shop-state-${stateKey}">
     <div class="shop-check" role="checkbox" tabindex="0" aria-checked="${done}"
       aria-label="${esc(it.name)} 是否已买" data-act="toggle-shop" data-name="${esc(it.name)}">✓</div>
@@ -2458,7 +2512,13 @@ function shopGroupHtml(category, items) {
 function shopListHtml(list, opts) {
   const o = opts || {};
   // 记住当前这张单子：批量入库、复制勾中的都得按它来。
-  S.shopList = list;
+  if (o.remember !== false) {
+    S.shopList = list;
+    S.shopContext = o.context || null;
+  } else {
+    // 计划页会把“需要采购”和“常备调料”分成两个视觉区域，事件处理仍共用一张完整清单。
+    S.shopList = [...(S.shopList || []), ...list];
+  }
   if (!list.length) {
     return o.bare
       ? ''
@@ -2787,6 +2847,8 @@ function planRow(it) {
 
 function viewPlan() {
   const week = planWeek();
+  S.shopList = [];
+  S.shopContext = { kind: 'plan', weekOf: week };
   const offset = planWeekOffset(week);
   const house = currentHousehold();
   const items = planItems(week);
@@ -2795,7 +2857,13 @@ function viewPlan() {
   // 只有能查到调料的菜才进采购汇总（自己随手写的那道不算）
   const dishIds = items.map((it) => it.dishId).filter(Boolean);
   const shop = shoppingFromDishIds(dishIds);
-  const missing = shop.filter((it) => ['needed', 'shortage'].includes(stockAssessment(it).key));
+  const received = (planRecord(week) || {}).received || {};
+  shop.forEach((it) => {
+    it.received = Boolean(received[shoppingIngredientKey(it.name)]);
+  });
+  const purchaseShop = shop.filter((it) => !it.isStaple);
+  const stapleShop = shop.filter((it) => it.isStaple);
+  const missing = purchaseShop.filter((it) => ['needed', 'shortage'].includes(stockAssessment(it).key));
 
   const weekNav = `<div class="week-nav">
       <button class="week-btn" data-act="week-shift" data-n="-1" aria-label="上一周">‹</button>
@@ -2840,23 +2908,27 @@ function viewPlan() {
   }
 
   const shopSection = items.length
-    ? `<div class="section-head">
+    ? `${purchaseShop.length || stapleShop.length ? `<div class="section-head">
         <h2 class="section-title">一次买齐</h2>
-        <span class="section-sub">${
-          shop.length
-            ? `${shop.length} 样调料${missing.length ? ` · ${missing.length} 样需要补购` : ' · 库存可覆盖'}`
-            : '计划里的菜没写调料用量'
-        }</span>
+        <span class="section-sub">${purchaseShop.length ? `${purchaseShop.length} 样需要采购${missing.length ? ` · ${missing.length} 样待补` : ' · 库存可覆盖'}` : '没有需要采购的食材'}</span>
         ${shop.length ? `<button class="btn soft sm" style="margin-left:auto" data-act="copy-plan-shopping">复制清单</button>` : ''}
-      </div>
-      ${
-        shop.length
-          ? shopListHtml(shop, {
-              bare: true,
-              hint: '照着这张单子一次买回来，买完点「入库」记进库存。',
-            })
-          : '<p class="section-sub">给计划里的菜补上「调料用量」，这里就会自动汇总成采购清单。</p>'
-      }`
+      </div>` : ''}
+      ${purchaseShop.length
+        ? shopListHtml(purchaseShop, {
+            bare: true,
+            context: { kind: 'plan', weekOf: week },
+            hint: '填写实际购买数量后入库；同一计划同一食材不会重复入库。',
+          })
+        : ''}
+      ${stapleShop.length ? `<div class="section-head" style="margin-top:18px">
+        <h3 class="section-title" style="font-size:1.05rem">常备调料确认</h3>
+        <span class="section-sub">${stapleShop.length} 样 · 默认“调味干货”</span>
+      </div>${shopListHtml(stapleShop, {
+        bare: true,
+        remember: false,
+        hint: '常备调料只提示确认家中是否有；没有时可填写实际购买数量后手动入库。',
+      })}` : ''}
+      ${!shop.length ? '<p class="section-sub">给计划里的菜补上「调料用量」，这里就会自动汇总成采购清单。</p>' : ''}`
     : '';
 
   return `
@@ -3909,6 +3981,15 @@ function openHouseholdEditor(house) {
    菜品编辑
    ========================================================= */
 
+function seasoningTypeSelect(type, attrs) {
+  const v = ['staple', 'purchase'].includes(type) ? type : '';
+  return `<select class="mini-input" ${attrs || ''} aria-label="调料采购类型">
+    <option value="" ${v === '' ? 'selected' : ''}>自动判断</option>
+    <option value="staple" ${v === 'staple' ? 'selected' : ''}>常备调料</option>
+    <option value="purchase" ${v === 'purchase' ? 'selected' : ''}>需要采购</option>
+  </select>`;
+}
+
 function openDishEditor(dish) {
   const cats = sortedCategories();
   // 家里人记的菜一律是自家私菜：往公共菜谱里加东西是管理员的活儿
@@ -4060,13 +4141,14 @@ function openDishEditor(dish) {
       </div>
 
       <div class="field">
-        <label class="field-label">通用调料<span class="field-hint">每种做法都要用的主料和基础调料</span></label>
+        <label class="field-label">通用调料<span class="field-hint">“自动判断”会把「调味干货」当常备；可逐项切换为常备或需要采购</span></label>
         <div id="fSeasons">
           ${d.seasonings
             .map(
-              (s, i) => `<div class="row-2" style="margin-bottom:8px">
+              (s, i) => `<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 112px auto;gap:6px;margin-bottom:8px">
                 <input class="mini-input" data-act="season-name" data-i="${i}" value="${esc(s.name)}" placeholder="调料名" />
                 <input class="mini-input" data-act="season-amt" data-i="${i}" value="${esc(s.amount)}" placeholder="用量" />
+                ${seasoningTypeSelect(s.purchaseType, `data-act="season-type" data-i="${i}"`)}
                 <button class="del-btn" data-act="rm-season" data-i="${i}">✕</button>
               </div>`
             )
@@ -4151,13 +4233,13 @@ function batchDishFromAI(result, imageUrl) {
     ? r.tags.map((x) => toText(x, 24)).filter(Boolean).slice(0, 12)
     : toText(r.tags, 160).split(/[,，、]/).map((x) => x.trim()).filter(Boolean).slice(0, 12);
   const seasonings = Array.isArray(r.seasonings)
-    ? r.seasonings.map((s) => ({ name: toText(s && s.name, 40), amount: toText(s && s.amount, 40) })).filter((s) => s.name)
+    ? r.seasonings.map((s) => ({ name: toText(s && s.name, 40), amount: toText(s && s.amount, 40), purchaseType: s && ['staple', 'purchase'].includes(s.purchaseType) ? s.purchaseType : '' })).filter((s) => s.name)
     : [];
   const methods = Array.isArray(r.methods)
     ? r.methods.map((m, i) => ({
         name: toText(m && m.name, 40) || `做法 ${i + 1}`,
         seasonings: Array.isArray(m && m.seasonings)
-          ? m.seasonings.map((s) => ({ name: toText(s && s.name, 40), amount: toText(s && s.amount, 40) })).filter((s) => s.name)
+          ? m.seasonings.map((s) => ({ name: toText(s && s.name, 40), amount: toText(s && s.amount, 40), purchaseType: s && ['staple', 'purchase'].includes(s.purchaseType) ? s.purchaseType : '' })).filter((s) => s.name)
           : [],
         steps: Array.isArray(m && m.steps) ? m.steps.map((x) => toText(x, 240)).filter(Boolean).slice(0, 30) : [],
       })).filter((m) => m.steps.length || m.seasonings.length)
@@ -4430,9 +4512,10 @@ function collectDish() {
 function redrawSeasons() {
   $('#fSeasons').innerHTML = S.draft.dish.seasonings
     .map(
-      (s, i) => `<div class="row-2" style="margin-bottom:8px">
+      (s, i) => `<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 112px auto;gap:6px;margin-bottom:8px">
         <input class="mini-input" data-act="season-name" data-i="${i}" value="${esc(s.name)}" placeholder="调料名" />
         <input class="mini-input" data-act="season-amt" data-i="${i}" value="${esc(s.amount)}" placeholder="用量" />
+        ${seasoningTypeSelect(s.purchaseType, `data-act="season-type" data-i="${i}"`)}
         <button class="del-btn" data-act="rm-season" data-i="${i}">✕</button>
       </div>`
     )
@@ -4457,9 +4540,10 @@ function methodCardHtml(m, i) {
       <div class="mseason-label">这个做法独有的调料<span class="field-hint">上面的通用调料它也能用，这里只写它额外要的</span></div>
       ${seasons
         .map(
-          (s, j) => `<div class="row-2" style="margin-bottom:6px">
+          (s, j) => `<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 112px auto;gap:6px;margin-bottom:6px">
         <input class="mini-input" data-act="mseason-name" data-i="${i}" data-j="${j}" value="${esc(s.name)}" placeholder="调料名" />
         <input class="mini-input" data-act="mseason-amt" data-i="${i}" data-j="${j}" value="${esc(s.amount)}" placeholder="用量" />
+        ${seasoningTypeSelect(s.purchaseType, `data-act="mseason-type" data-i="${i}" data-j="${j}"`)}
         <button class="del-btn" data-act="rm-mseason" data-i="${i}" data-j="${j}">✕</button>
       </div>`
         )
@@ -5975,7 +6059,7 @@ const ACTIONS = {
   },
   'add-season'() {
     collectDish();
-    S.draft.dish.seasonings.push({ name: '', amount: '' });
+    S.draft.dish.seasonings.push({ name: '', amount: '', purchaseType: '' });
     redrawSeasons();
   },
   'rm-season'(el) {
@@ -6002,7 +6086,7 @@ const ACTIONS = {
     const m = S.draft.dish.methods[Number(el.dataset.i)];
     if (!m) return;
     m.seasonings = m.seasonings || [];
-    m.seasonings.push({ name: '', amount: '' });
+    m.seasonings.push({ name: '', amount: '', purchaseType: '' });
     redrawMethods();
   },
   'rm-mseason'(el) {
@@ -7263,7 +7347,8 @@ const ACTIONS = {
   async 'stock-it'(el) {
     const name = el.dataset.name;
     const parts = (el.dataset.parts || '').split('|').filter(Boolean);
-    await stockOne(name, parts);
+    const item = (S.shopList || []).find((x) => x.name === name);
+    if (!await stockOne(name, parts, { item })) return;
     await loadState(true);
     render();
   },
@@ -7290,12 +7375,15 @@ const ACTIONS = {
     const preview = pickPreview(items.map((i) => i.name), '样');
     if (!confirm(`把 ${preview} 记进「${currentHousehold() ? currentHousehold().name : ''}」的库存？`))
       return;
-    for (const it of items) await stockOne(it.name, it.parts);
-    items.forEach((it) => S.shoppingChecked.delete(it.name));
+    const stocked = [];
+    for (const it of items) {
+      if (await stockOne(it.name, it.parts, { item: it })) stocked.push(it);
+    }
+    stocked.forEach((it) => S.shoppingChecked.delete(it.name));
     await saveShoppingChecked();
     await loadState(true);
     render();
-    toast(`${items.length} 样已入库`);
+    toast(stocked.length ? `${stocked.length} 样已入库` : '没有入库任何东西');
   },
   'toggle-shopping-group'(el) {
     const cat = el.dataset.cat || '其他';
@@ -7319,12 +7407,15 @@ const ACTIONS = {
     if (!items.length) return toast('本组没有需要入库的东西');
     const preview = pickPreview(items.map((i) => i.name), '样');
     if (!confirm(`把 ${preview} 记进「${currentHousehold() ? currentHousehold().name : ''}」的库存？`)) return;
-    for (const it of items) await stockOne(it.name, it.parts);
-    items.forEach((it) => S.shoppingChecked.delete(it.name));
+    const stocked = [];
+    for (const it of items) {
+      if (await stockOne(it.name, it.parts, { item: it })) stocked.push(it);
+    }
+    stocked.forEach((it) => S.shoppingChecked.delete(it.name));
     await saveShoppingChecked();
     await loadState(true);
     render();
-    toast(`${items.length} 样已入库`);
+    toast(stocked.length ? `${stocked.length} 样已入库` : '没有入库任何东西');
   },
   async 'shop-copy'() {
     const items = shopCheckedItems();
@@ -7581,6 +7672,17 @@ document.addEventListener('input', (e) => {
   else if (act === 'method-steps' && m) m.steps = el.value.split('\n').map((s) => s.trim()).filter(Boolean);
   else if (act === 'mseason-name' && m && m.seasonings[j]) m.seasonings[j].name = el.value;
   else if (act === 'mseason-amt' && m && m.seasonings[j]) m.seasonings[j].amount = el.value;
+});
+
+document.addEventListener('change', (e) => {
+  const el = e.target;
+  const act = el.dataset && el.dataset.act;
+  if (!act || !S.draft) return;
+  const i = Number(el.dataset.i);
+  const j = Number(el.dataset.j);
+  const m = S.draft.dish.methods[i];
+  if (act === 'season-type' && S.draft.dish.seasonings[i]) S.draft.dish.seasonings[i].purchaseType = el.value;
+  else if (act === 'mseason-type' && m && m.seasonings[j]) m.seasonings[j].purchaseType = el.value;
 });
 
 /* 搜索输入 */
