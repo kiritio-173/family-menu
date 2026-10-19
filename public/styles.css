@@ -1059,6 +1059,21 @@ a { color: var(--primary-dark); }
 }
 .preset-opt:active { border-color: var(--primary); background: var(--primary-soft); color: var(--primary-dark); }
 
+/* 库存分类用可滚动按钮网格，弹层内不会被原生下拉菜单截断。 */
+.pantry-category-picker {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px;
+  max-height: 246px; overflow-y: auto; padding: 3px;
+}
+.pantry-category-option {
+  display: flex; align-items: center; gap: 7px; min-height: 38px;
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--surface-2); color: var(--text-mid); text-align: left; cursor: pointer;
+}
+.pantry-category-option.on {
+  border-color: var(--primary); background: var(--primary-soft); color: var(--primary-dark); font-weight: 650;
+}
+.pantry-category-option:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
 .quick-dates { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 
 .pill-now {

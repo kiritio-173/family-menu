@@ -247,6 +247,9 @@ async function main() {
   const chicken = pre.presets.find((p) => p.name === '鸡蛋');
   eq('鸡蛋 → 蛋类/个/20天', [chicken.category, chicken.unit, chicken.shelfLife], ['蛋类', '个', 20]);
   eq('鸡蛋保质期已换算成日期', chicken.expireAt, dayOffset(20));
+  eq('葱姜蒜默认归调味干货',
+    ['大葱', '生姜', '大蒜'].map((name) => (pre.presets.find((p) => p.name === name) || {}).category),
+    ['调味干货', '调味干货', '调味干货']);
   const cats = new Set(pre.presets.map((p) => p.category));
   ok('预设分类都在分类表里', [...cats].every((c) => pre.categories.some((x) => x.name === c)), [...cats]);
   ok('预设名不重复', new Set(pre.presets.map((p) => p.name)).size === pre.presets.length);

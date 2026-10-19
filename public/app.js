@@ -3330,6 +3330,25 @@ function renderPresetGrid() {
     : '<p class="section-sub">没有匹配的，直接在上面输入名字也行</p>';
 }
 
+function foodCategoryPickerHtml(category) {
+  const current = PANTRY_ORDER.includes(category) ? category : '其他';
+  return `<input type="hidden" id="fFoodCat" value="${esc(current)}" />
+    <div class="pantry-category-picker" role="listbox" aria-label="库存分类">
+      ${PANTRY_ORDER.map((c) => `<button type="button" class="pantry-category-option ${c === current ? 'on' : ''}"
+        data-act="pick-food-category" data-cat="${esc(c)}" aria-pressed="${c === current}">
+        <span>${catEmoji(c)}</span><span>${esc(c)}</span>
+      </button>`).join('')}
+    </div>`;
+}
+
+function syncFoodCategoryPicker(category) {
+  document.querySelectorAll('.pantry-category-option').forEach((btn) => {
+    const on = btn.dataset.cat === category;
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', String(on));
+  });
+}
+
 async function openFoodEditor(item) {
   await ensurePresets();
   const p = item || {
@@ -3341,10 +3360,6 @@ async function openFoodEditor(item) {
     expireAt: '',
     note: '',
   };
-
-  const catOptions = PANTRY_ORDER.map(
-    (c) => `<option value="${esc(c)}" ${p.category === c ? 'selected' : ''}>${catEmoji(c)} ${esc(c)}</option>`
-  ).join('');
 
   openSheet({
     title: item ? '编辑食材' : '记一样食材',
@@ -3360,7 +3375,7 @@ async function openFoodEditor(item) {
       </div>
       <div class="field">
         <label class="field-label">分类</label>
-        <select class="select" id="fFoodCat">${catOptions}</select>
+        ${foodCategoryPickerHtml(p.category)}
       </div>
       <div class="field">
         <label class="field-label">家里还有多少</label>
@@ -6721,11 +6736,21 @@ const ACTIONS = {
   'pick-preset'(el) {
     const { name, cat, unit, exp } = el.dataset;
     $('#fFoodName').value = name;
-    if (cat) $('#fFoodCat').value = cat;
+    if (cat) {
+      $('#fFoodCat').value = cat;
+      syncFoodCategoryPicker(cat);
+    }
     if (unit) $('#fFoodUnit').value = unit;
     if (exp) $('#fFoodExp').value = exp;
     if (!$('#fFoodNote').value.trim()) $('#fFoodNote').value = '';
     toast(`已填入「${name}」`);
+  },
+  'pick-food-category'(el) {
+    const cat = el.dataset.cat || '其他';
+    const input = $('#fFoodCat');
+    if (input) input.value = cat;
+    syncFoodCategoryPicker(cat);
+    renderPresetGrid();
   },
   'exp-preset'(el) {
     const d = Number(el.dataset.days) || 0;
