@@ -591,6 +591,19 @@ function planRecord(weekOf, id) {
   return (S.data.plans || []).find((p) => p.householdId === hid && p.weekOf === wk) || null;
 }
 
+function planItemDate(it, weekOf) {
+  const week = mondayOf(weekOf);
+  const raw = it && it.plannedFor ? String(it.plannedFor).slice(0, 10) : week;
+  return /^\d{4}-\d{2}-\d{2}$/.test(raw) && mondayOf(raw) === week ? raw : week;
+}
+
+function planDayLabel(date, weekOf) {
+  const week = mondayOf(weekOf);
+  const offset = Math.round((parseDay(date) - parseDay(week)) / 86400000);
+  const names = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  return `${names[Math.max(0, Math.min(6, offset))]} ${date.slice(5)}`;
+}
+
 function planCount(weekOf) {
   return planItems(weekOf).length;
 }
@@ -1955,7 +1968,12 @@ function viewMenu() {
 async function addToPlan(entry, weekOf, after) {
   const week = mondayOf(weekOf);
   try {
-    await api('POST', '/api/plans/items', { householdId: S.householdId, weekOf: week, ...entry });
+    await api('POST', '/api/plans/items', {
+      householdId: S.householdId,
+      weekOf: week,
+      plannedFor: entry.plannedFor || week,
+      ...entry,
+    });
     await loadState(true);
     if (after) after();
     else closeSheet();
@@ -2327,6 +2345,7 @@ function mergeSeasonings(rows) {
       map.set(mergeKey, {
         name: r.name,
         parts: [],
+        useCount: 0,
         requiredQty: null,
         requiredUnit: '',
         requiredComparable: true,
@@ -2334,6 +2353,7 @@ function mergeSeasonings(rows) {
       });
     }
     const item = map.get(mergeKey);
+    item.useCount += 1;
     // 同一调料有明确“需要采购”的一条时，采购优先；否则保留明确的常备设置。
     if (r.purchaseType === 'purchase' || (r.purchaseType === 'staple' && !item.purchaseType)) item.purchaseType = r.purchaseType;
     const parts = item.parts;
@@ -2516,7 +2536,7 @@ function shopItemHtml(it) {
       aria-label="${esc(it.name)} 是否已买" data-act="toggle-shop" data-name="${esc(it.name)}">✓</div>
     <div class="shop-main">
       <div class="shop-name">${esc(it.name)} <span class="tag ${stateKey === 'enough' ? 'own' : stateKey === 'completed' ? 'done' : stateKey}">${stateLabel}</span></div>
-      <div class="shop-from">${esc(it.parts.join(' · '))}</div>
+      <div class="shop-from">${it.requiredQty != null ? `本周需 ${esc(fmtQty(it.requiredQty))}${esc(it.requiredUnit)} · ` : ''}${it.useCount > 1 ? `使用 ${it.useCount} 次 · ` : ''}${esc(it.parts.join(' · '))}</div>
     </div>
     <div class="shop-side">${stockHtml}${restockHtml}</div>
   </div>`;
@@ -2853,6 +2873,9 @@ function planRow(it) {
     ? dishEmoji(d.name)
     : '✍️';
   const meta = [];
+  const plannedFor = planItemDate(it, planWeek());
+  meta.push(`📅 ${planDayLabel(plannedFor, planWeek())}`);
+  meta.push(it.status === 'done' ? '✅ 已完成，库存已扣' : '待做');
   if (it.servings) meta.push(esc(it.servings));
   if (d && d.duration) meta.push(`⏱ ${d.duration}′`);
   if (it.note) meta.push(esc(it.note));
@@ -2871,6 +2894,11 @@ function planRow(it) {
     );
   }
 
+  const planAction = it.status === 'done'
+    ? '<span class="section-sub">已完成</span>'
+    : isHouseAdmin(S.householdId)
+      ? `<button class="btn green sm" data-act="complete-plan-item" data-id="${esc(it.id)}">完成并扣库存</button>`
+      : '<span class="section-sub">管理员完成并扣库存</span>';
   return `<div class="plan-item">
     <div class="plan-thumb">${thumb}</div>
     <div class="plan-main" role="button" tabindex="0" ${d ? `data-act="open-dish" data-id="${esc(d.id)}"` : ''}
@@ -2878,7 +2906,7 @@ function planRow(it) {
       <div class="plan-name">${esc(it.name)}</div>
       ${meta.length ? `<div class="plan-meta">${meta.join(' · ')}</div>` : ''}
     </div>
-    <button class="icon-mini" data-act="rm-plan" data-id="${esc(it.id)}" aria-label="从计划里拿掉 ${esc(it.name)}">✕</button>
+    <div class="plan-actions">${planAction}<button class="icon-mini" data-act="rm-plan" data-id="${esc(it.id)}" aria-label="从计划里拿掉 ${esc(it.name)}">✕</button></div>
   </div>`;
 }
 
@@ -2888,11 +2916,15 @@ function viewPlan() {
   S.shopContext = { kind: 'plan', weekOf: week };
   const offset = planWeekOffset(week);
   const house = currentHousehold();
-  const items = planItems(week);
+  const items = [...planItems(week)].sort((a, b) =>
+    planItemDate(a, week).localeCompare(planItemDate(b, week)) ||
+    String(a.addedAt || '').localeCompare(String(b.addedAt || ''))
+  );
   const names = items.map((it) => it.name).join('、');
 
   // 只有能查到调料的菜才进采购汇总（自己随手写的那道不算）
-  const dishIds = items.map((it) => it.dishId).filter(Boolean);
+  // 已完成的计划菜已经实际扣过库存，不再重复计入本周待采购需求。
+  const dishIds = items.filter((it) => it.status !== 'done').map((it) => it.dishId).filter(Boolean);
   const shop = shoppingFromDishIds(dishIds);
   const received = (planRecord(week) || {}).received || {};
   shop.forEach((it) => {
@@ -2981,19 +3013,20 @@ function viewPlan() {
  */
 function openPlanPicker(weekOf) {
   const week = weekOf || planWeek();
-  const planned = new Set(planItems(week).map((it) => it.name));
+  const plannedCount = new Map();
+  planItems(week).forEach((it) => plannedCount.set(it.name, (plannedCount.get(it.name) || 0) + 1));
   S.planPickWeek = week;
   S.planPickSel = new Set();
 
   const picker = scopeDishes()
     .map((x) => {
-      const on = planned.has(x.name);
+      const count = plannedCount.get(x.name) || 0;
       const t = x.images && x.images[0] ? `<img src="${esc(x.images[0])}" alt="" />` : dishEmoji(x.name);
       return `<button class="picker-item" data-act="pick-plan-dish" data-id="${esc(x.id)}"
-        aria-pressed="${on}" ${on ? 'disabled style="opacity:.45"' : ''}>
+        aria-pressed="false">
         <span class="picker-thumb">${t}</span>
         <span style="flex:1;min-width:0">
-          <span class="picker-name">${esc(x.name)}${on ? ' · 已加入' : ''}</span>
+          <span class="picker-name">${esc(x.name)}${count ? ` · 已排 ${count} 次` : ''}</span>
           ${x.category ? `<span class="tag">${esc(x.category)}</span>` : ''}
         </span>
       </button>`;
@@ -3003,6 +3036,10 @@ function openPlanPicker(weekOf) {
   openSheet({
     title: `加到${planWeekTitle(week)}`,
     body: `
+      <div class="field">
+        <label class="field-label">安排日期<span class="field-hint">同一道菜可以在一周内重复安排</span></label>
+        <input class="input" id="planDate" type="date" min="${esc(week)}" max="${esc(addDays(week, 6))}" value="${esc(week)}" />
+      </div>
       <div class="field">
         <label class="field-label">从菜单里选<span class="field-hint">可以多选</span></label>
         <div class="picker-list">${picker}</div>
@@ -6683,12 +6720,13 @@ const ACTIONS = {
     const ids = [...(S.planPickSel || new Set())];
     if (!ids.length) return toast('先勾几道菜');
     const week = S.planPickWeek || planWeek();
+    const plannedFor = ($('#planDate') && $('#planDate').value) || week;
     let n = 0;
     for (const id of ids) {
       const d = dishById(id);
       if (!d) continue;
       try {
-        await addToPlan({ dishId: d.id, name: d.name, servings: d.servings }, week, () => {});
+        await addToPlan({ dishId: d.id, name: d.name, servings: d.servings, plannedFor }, week, () => {});
         n++;
       } catch (_) {
         /* 已经在计划里的那道跳过，不打断其余的 */
@@ -6722,7 +6760,23 @@ const ACTIONS = {
   async 'save-plan-custom'(el) {
     const name = ($('#planName').value || '').trim();
     if (!name) return toast('写上想做的菜名');
-    await addToPlan({ name }, el.dataset.week || planWeek());
+    const week = el.dataset.week || planWeek();
+    await addToPlan({ name, plannedFor: ($('#planDate') && $('#planDate').value) || week }, week);
+  },
+  async 'complete-plan-item'(el) {
+    if (!isHouseAdmin(S.householdId)) return toast('只有家庭管理员能完成计划并扣库存');
+    const item = planItems(planWeek()).find((x) => x.id === el.dataset.id);
+    if (!item) return toast('计划菜不存在');
+    if (!confirm(`完成「${item.name}」并按菜谱用量扣除库存？`)) return;
+    try {
+      const result = await api('PATCH', `/api/plans/items/${encodeURIComponent(item.id)}`, { status: 'done' });
+      await loadState(true);
+      render();
+      const warningCount = Array.isArray(result.warnings) ? result.warnings.length : 0;
+      toast(warningCount ? `已完成，${warningCount} 项库存不足或需要确认` : '已完成，库存已扣除');
+    } catch (err) {
+      toast(err.message || '扣库存失败');
+    }
   },
   async 'rm-plan'(el) {
     await api('DELETE', `/api/plans/items/${el.dataset.id}`);
@@ -6743,7 +6797,7 @@ const ACTIONS = {
     toast('已清空');
   },
   async 'copy-plan-shopping'() {
-    const dishIds = planItems(planWeek()).map((it) => it.dishId).filter(Boolean);
+    const dishIds = planItems(planWeek()).filter((it) => it.status !== 'done').map((it) => it.dishId).filter(Boolean);
     const list = shoppingFromDishIds(dishIds);
     if (!list.length) return toast('计划里的菜还没写调料用量');
     await copyText(list.map((i) => `□ ${i.name}（${i.parts.join(' + ')}）`).join('\n'));

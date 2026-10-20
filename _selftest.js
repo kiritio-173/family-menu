@@ -314,6 +314,12 @@ async function main() {
     const p = (x) => String(x).padStart(2, '0');
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   })();
+  const tuesday = (() => {
+    const d = new Date(`${monday}T00:00:00`);
+    d.setDate(d.getDate() + 1);
+    const p = (x) => String(x).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  })();
 
   const add1 = (await post('/api/plans/items', { householdId: h301.id, weekOf: wednesday, dishId: DISH.id })).body.data;
   ok('加菜进计划', add1.item && add1.item.name === DISH.name, add1);
@@ -321,9 +327,9 @@ async function main() {
   eq('自动带出份量', add1.item.servings, DISH.servings);
   eq('菜谱 id 也记下来', add1.item.dishId, DISH.id);
 
-  const dupDish = await post('/api/plans/items', { householdId: h301.id, weekOf: wednesday, dishId: DISH.id });
-  eq('同一道菜不重复加', dupDish.status, 400);
-  ok('重复的提示说得清', /已经在/.test(dupDish.body.error || ''), dupDish.body);
+  const dupDish = await post('/api/plans/items', { householdId: h301.id, weekOf: wednesday, plannedFor: tuesday, dishId: DISH.id });
+  eq('同一道菜允许重复安排', dupDish.status, 200);
+  eq('重复安排保留计划日期', dupDish.body.data.item.plannedFor, tuesday);
 
   await post('/api/plans/items', { householdId: h301.id, weekOf: wednesday, name: '楼下那家的烤鸭' });
   await post('/api/plans/items', { householdId: h301.id, weekOf: nextMonday, dishId: DISH.id });
@@ -332,7 +338,7 @@ async function main() {
   let plans = (await get('/api/state')).body.data.plans;
   eq('一共 3 条计划记录（本周/下周 × 两个家庭）', plans.length, 3);
   const planThis = plans.find((p) => p.householdId === h301.id && p.weekOf === monday);
-  eq('本周这家有 2 道', planThis.items.length, 2);
+  eq('本周这家有 3 道（含重复菜）', planThis.items.length, 3);
   eq('下周这家有 1 道', plans.find((p) => p.householdId === h301.id && p.weekOf === nextMonday).items.length, 1);
   eq('另一家本周也是 1 道（互不影响）',
     plans.find((p) => p.householdId === st.households[0].id && p.weekOf === monday).items.length, 1);
@@ -342,19 +348,28 @@ async function main() {
   eq('幽灵家庭拉回默认', (await post('/api/plans/items', { householdId: '幽灵', name: '测试菜' })).body.data.plan.householdId, st.households[0].id);
 
   const getPlan = (await get(`/api/plans?householdId=${h301.id}&weekOf=${monday}`)).body.data;
-  eq('GET 单周计划', getPlan.items.length, 2);
+  eq('GET 单周计划', getPlan.items.length, 3);
   eq('查没有的一周返回 null', (await get(`/api/plans?householdId=${h301.id}&weekOf=1999-01-04`)).body.data, null);
 
   // 拿掉一道
   const target = planThis.items[0];
+  const tomatoStock = (await post('/api/pantry', {
+    householdId: h301.id, name: '番茄', category: '蔬菜', quantity: 5, unit: '个',
+  })).body.data;
+  const completedPlanItem = await req('PATCH', `/api/plans/items/${target.id}`, { status: 'done' });
+  eq('管理员完成计划菜返回 200', completedPlanItem.status, 200);
+  eq('完成计划菜会扣对应库存',
+    (await get(`/api/state?householdId=${encodeURIComponent(h301.id)}`)).body.data.pantry.find((p) => p.id === tomatoStock.id).quantity, 3);
+  eq('同一计划菜不能重复扣库存',
+    (await req('PATCH', `/api/plans/items/${target.id}`, { status: 'done' })).status, 409);
   const rm = (await del(`/api/plans/items/${target.id}`)).body.data;
   eq('拿掉后返回的是被删的那条', rm.id, target.id);
   eq('删不存在的计划项 404', (await del('/api/plans/items/p_不存在')).status, 404);
-  eq('删完剩 1 道', (await get(`/api/plans?householdId=${h301.id}&weekOf=${monday}`)).body.data.items.length, 1);
+  eq('删完剩 2 道', (await get(`/api/plans?householdId=${h301.id}&weekOf=${monday}`)).body.data.items.length, 2);
 
   // 清空某一周
   const clearedPlan = (await del(`/api/plans?householdId=${h301.id}&weekOf=${monday}`)).body.data;
-  eq('清空本周', clearedPlan.removed, 1);
+  eq('清空本周', clearedPlan.removed, 2);
   eq('本周空了', (await get(`/api/plans?householdId=${h301.id}&weekOf=${monday}`)).body.data.items.length, 0);
   eq('下周没被清掉', (await get(`/api/plans?householdId=${h301.id}&weekOf=${nextMonday}`)).body.data.items.length, 1);
   // 默认家庭里有 1 道菜谱菜 + 前面「幽灵家庭」用例兜回来的「测试菜」，共 2 道
@@ -445,7 +460,7 @@ async function main() {
   const delRes = (await del(`/api/households/${h301.id}`)).body.data;
   eq('级联删掉点餐', delRes.removedOrders, 0);
   // 302 室里被「清理过期」干掉一个，只剩 f2 了
-  eq('级联删掉库存', delRes.removedPantry, 1);
+  eq('级联删掉库存', delRes.removedPantry, 2);
   st = (await get('/api/state')).body.data;
   eq('302 室已消失', st.households.some((h) => h.id === h301.id), false);
   eq('它的库存也没了', st.pantry.filter((p) => p.householdId === h301.id).length, 0);

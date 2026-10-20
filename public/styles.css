@@ -991,6 +991,7 @@ a { color: var(--primary-dark); }
 .plan-name { font-weight: 650; font-size: 14.5px; }
 .plan-meta { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plan-item .icon-mini { background: var(--bg-soft); }
+.plan-actions { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
 
 /* ---------- 库存 ---------- */
 

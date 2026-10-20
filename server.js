@@ -41,10 +41,21 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.25.2';
+const APP_VERSION = '1.26.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.26.0',
+    date: '2026-10-20',
+    title: '重复计划与完成扣库存',
+    items: [
+      '同一道菜可以在一周内安排多次，并可精确到具体日期',
+      '计划采购按整周重复次数累计需求，显示使用次数和总用量',
+      '家庭管理员完成计划菜时按菜谱用量实际扣减库存，重复点击不会重复扣减',
+      '库存不足、适量或单位不一致时完成仍会给出明确提醒',
+    ],
+  },
   {
     version: '1.25.2',
     date: '2026-10-19',
@@ -1284,6 +1295,67 @@ function addPantryQuantity(item) {
   return hit;
 }
 
+/** 菜谱用量解析：扣库存只处理明确的数字+单位，不把“适量”猜成一个单位。 */
+function parseRecipeAmount(text) {
+  const raw = safeText(text, 40).trim();
+  const m = /(\d+(?:\.\d+)?)\s*([a-zA-Z]+|[\u4e00-\u9fff]{1,4})/.exec(raw);
+  if (!m || Number(m[1]) <= 0) return null;
+  const aliases = {
+    克: 'g', 公克: 'g', 千克: 'kg', 公斤: 'kg', 毫升: 'ml', 升: 'l', 毫克: 'mg',
+    个: '个', 只: '只', 条: '条', 盒: '盒', 包: '包', 瓶: '瓶', 袋: '袋',
+    勺: '勺', 小勺: '小勺', 大勺: '大勺', 片: '片', 瓣: '瓣', 根: '根', 把: '把',
+    颗: '颗', 块: '块', 丝: '丝', 份: '份', 斤: '斤', 两: '两',
+  };
+  const unit = aliases[String(m[2]).trim().toLowerCase()] || String(m[2]).trim().toLowerCase();
+  return { quantity: Math.round(Number(m[1]) * 1000) / 1000, unit };
+}
+
+function dishRecipeIngredients(dish) {
+  if (!dish) return [];
+  const rows = [];
+  (dish.seasonings || []).forEach((s) => { if (s && s.name) rows.push(s); });
+  (dish.methods || []).forEach((m) => (m.seasonings || []).forEach((s) => { if (s && s.name) rows.push(s); }));
+  return rows;
+}
+
+/** 完成计划菜时实际扣库存；同名同单位库存可跨多条记录扣减，不足时保留到 0 并返回提醒。 */
+function consumeDishPantry(householdId, dish) {
+  const totals = new Map();
+  const warnings = [];
+  dishRecipeIngredients(dish).forEach((s) => {
+    const amount = parseRecipeAmount(s.amount);
+    if (!amount) {
+      warnings.push(`${s.name}：用量为“适量”或无法识别，未自动扣除`);
+      return;
+    }
+    const key = `${pantryIngredientKey(s.name)}|${pantryUnitKey(amount.unit)}`;
+    const current = totals.get(key) || { name: s.name, unit: amount.unit, quantity: 0 };
+    current.quantity += amount.quantity;
+    totals.set(key, current);
+  });
+
+  const consumed = [];
+  for (const need of totals.values()) {
+    const rows = state.pantry
+      .filter((p) => p.householdId === householdId &&
+        pantryIngredientKey(p.name) === pantryIngredientKey(need.name) &&
+        pantryUnitKey(p.unit) === pantryUnitKey(need.unit))
+      .sort((a, b) => String(a.expireAt || '9999-12-31').localeCompare(String(b.expireAt || '9999-12-31')));
+    let remain = need.quantity;
+    for (const row of rows) {
+      if (remain <= 0) break;
+      const before = Number(row.quantity) || 0;
+      const used = Math.min(before, remain);
+      row.quantity = Math.round((before - used) * 1000) / 1000;
+      row.updatedAt = nowISO();
+      remain = Math.round((remain - used) * 1000) / 1000;
+      if (used > 0) consumed.push({ name: row.name, quantity: used, unit: row.unit });
+    }
+    if (remain > 0) warnings.push(`${need.name}：库存还缺 ${remain}${need.unit}`);
+  }
+  return { consumed, warnings };
+}
+
 /** 今天往前推 n 天，返回 YYYY-MM-DD */
 function daysFromNow(n) {
   const d = new Date();
@@ -1306,17 +1378,25 @@ function mondayOf(dateStr) {
   return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`;
 }
 
-/** 本周计划里的一道菜 */
-function normPlanItem(input, prev, keepInputId) {
+/** 本周计划里的一道菜；plannedFor 用于同一周重复安排同一道菜时按日期排序。 */
+function normPlanItem(input, prev, keepInputId, defaultWeek) {
   const base = prev || {};
   const name = safeText(input.name ?? base.name, 40).trim();
   if (!name) return null;
+  const week = mondayOf(defaultWeek || input.weekOf || base.weekOf);
+  const requestedDate = normDate(input.plannedFor ?? base.plannedFor) || week;
+  const plannedFor = mondayOf(requestedDate) === week ? requestedDate : week;
   return {
     id: base.id || (keepInputId && typeof input.id === 'string' && input.id ? input.id : uid('pi_')),
     dishId: safeText(input.dishId ?? base.dishId, 40) || null,
     name,
     servings: safeText(input.servings ?? base.servings, 30),
     note: safeText(input.note ?? base.note, 100),
+    plannedFor,
+    status: (input.status ?? base.status) === 'done' ? 'done' : 'planned',
+    completedAt: (input.status ?? base.status) === 'done'
+      ? (base.completedAt || input.completedAt || nowISO())
+      : '',
     addedAt: base.addedAt || input.addedAt || nowISO(),
   };
 }
@@ -1326,15 +1406,14 @@ function normPlan(input, prev) {
   const base = prev || {};
   const weekOf = mondayOf(input.weekOf ?? base.weekOf);
   const items = (Array.isArray(input.items) ? input.items : base.items || [])
-    .map((it) => normPlanItem(it, undefined, true))
+    .map((it) => normPlanItem(it, undefined, true, weekOf))
     .filter(Boolean);
-  // 同一周同一道菜只留一条
-  const seen = new Set();
   return {
     id: base.id || (typeof input.id === 'string' && input.id ? input.id : uid('pl_')),
     householdId: resolveHouseholdId(input.householdId ?? base.householdId),
     weekOf,
-    items: items.filter((it) => (seen.has(it.name) ? false : (seen.add(it.name), true))),
+    // 同一道菜允许在一周内安排多次，plannedFor 区分每次安排。
+    items,
     received: input.received && typeof input.received === 'object'
       ? input.received
       : (base.received && typeof base.received === 'object' ? base.received : {}),
@@ -4042,17 +4121,42 @@ async function handleAPI(req, res, url) {
         ...body,
         name: body.name || (dish && dish.name),
         servings: body.servings || (dish && dish.servings),
-      });
+        weekOf: body.weekOf,
+      }, undefined, false, body.weekOf);
       if (!item) return sendError(res, 400, '要加哪道菜？写个菜名吧');
       const plan = findPlan(body.householdId, body.weekOf, true);
-      // 同一道菜别重复加
-      if (plan.items.some((it) => it.name === item.name)) {
-        return sendError(res, 400, `「${item.name}」已经在本周计划里了`);
-      }
       plan.items.push(item);
       plan.updatedAt = nowISO();
       scheduleSave('plans');
       return sendJSON(res, 200, { ok: true, data: { plan, item } });
+    }
+
+    // 管理员完成计划菜并实际扣库存；每个计划项只允许完成一次。
+    if (method === 'PATCH' && route[1] === 'items' && route[2]) {
+      const target = route[2];
+      let foundPlan = null;
+      let item = null;
+      for (const plan of state.plans) {
+        if (!accountCanAccessHousehold(req, plan.householdId)) continue;
+        const hit = plan.items.find((it) => it.id === target);
+        if (hit) { foundPlan = plan; item = hit; break; }
+      }
+      if (!item || !foundPlan) return sendError(res, 404, '计划里没有这道菜');
+      if (!isHouseAdmin(req, foundPlan.householdId)) return sendError(res, 403, '只有家庭管理员能完成计划并扣库存');
+      const body = await readBody(req);
+      if (body.status !== 'done') return sendError(res, 400, '计划状态只能标记为完成');
+      if (item.status === 'done') return sendError(res, 409, '这道计划菜已经完成并扣过库存');
+
+      const dish = item.dishId ? state.dishes.find((d) => d.id === item.dishId) : null;
+      const result = dish
+        ? consumeDishPantry(foundPlan.householdId, dish)
+        : { consumed: [], warnings: ['这是临时菜，没有可读取的菜谱用量，未自动扣库存'] };
+      item.status = 'done';
+      item.completedAt = nowISO();
+      foundPlan.updatedAt = nowISO();
+      scheduleSave('plans');
+      if (result.consumed.length) scheduleSave('pantry');
+      return sendJSON(res, 200, { ok: true, data: { item, consumed: result.consumed, warnings: result.warnings } });
     }
 
     // 从计划里一次拿掉几道菜（计划页多选模式）
