@@ -420,6 +420,24 @@ async function main() {
     (await get(`/api/state?householdId=${encodeURIComponent(h301.id)}`)).body.data.pantry
       .filter((p) => p.name === '鸡蛋' && p.unit === '个').length, 1);
 
+  // 明确的食材别名应合并到已有库存，不应因为录入名称不同而产生重复条目。
+  const whiteSugar = (await post('/api/pantry', {
+    householdId: h301.id, name: '白糖', category: '调味干货', quantity: 1, unit: '袋',
+  })).body.data;
+  const sugarAlias = (await post('/api/pantry', {
+    householdId: h301.id, name: '白砂糖', category: '调味干货', quantity: 2, unit: '袋',
+    addToExisting: true,
+  })).body.data;
+  eq('白砂糖合并白糖库存', [sugarAlias.id, sugarAlias.quantity], [whiteSugar.id, 3]);
+  const salt = (await post('/api/pantry', {
+    householdId: h301.id, name: '盐', category: '调味干货', quantity: 1, unit: '瓶',
+  })).body.data;
+  const saltAlias = (await post('/api/pantry', {
+    householdId: h301.id, name: '食盐', category: '调味干货', quantity: 2, unit: '瓶',
+    addToExisting: true,
+  })).body.data;
+  eq('食盐合并盐库存', [saltAlias.id, saltAlias.quantity], [salt.id, 3]);
+
   // 同一计划同一食材只允许入库一次，避免重复点击把库存加两遍。
   const receiveWeek = monday;
   await post('/api/plans/items', { householdId: h301.id, weekOf: receiveWeek, name: '采购入库测试菜' });
@@ -436,6 +454,18 @@ async function main() {
   eq('重复入库没有再次累加',
     (await get(`/api/state?householdId=${encodeURIComponent(h301.id)}`)).body.data.pantry
       .find((p) => p.id === f1.id).quantity, 13);
+
+  // 计划入库的同义名称也必须沿用同一周的去重键。
+  const aliasReceive = await post('/api/plans/receive', {
+    householdId: h301.id, weekOf: receiveWeek, name: '白砂糖', quantity: 1, unit: '袋', category: '调味干货',
+  });
+  eq('计划入库接受白砂糖别名', aliasReceive.status, 200);
+  eq('计划入库同义名称不能重复',
+    (await post('/api/plans/receive', {
+      householdId: h301.id, weekOf: receiveWeek, name: '白糖', quantity: 1, unit: '袋', category: '调味干货',
+    })).status, 409);
+  await del(`/api/pantry/${whiteSugar.id}`);
+  await del(`/api/pantry/${salt.id}`);
 
   await put(`/api/pantry/${f1.id}`, { expireAt: dayOffset(-2) });
   await put(`/api/pantry/${f2.id}`, { expireAt: dayOffset(1) });
@@ -982,6 +1012,7 @@ async function main() {
   });
   ok('每条更新记录都有标题和日期', v.releases.every((r) => r.title && /^\d{4}-\d{2}-\d{2}$/.test(r.date)), v.releases.map((r) => r.version));
   ok('每条更新记录都列了具体改了什么', v.releases.every((r) => Array.isArray(r.items) && r.items.length), v.releases.map((r) => r.items && r.items.length));
+  ok('采购入库不调用原生 prompt', !fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8').includes('window.prompt'));
   // 版本页不该要口令：网页上任何人都该能看到自己跑的是哪一版
   const noPinVer = (await get('/api/version')).status;
   eq('没口令也能看版本', noPinVer, 200);

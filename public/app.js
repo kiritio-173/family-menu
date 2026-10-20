@@ -1231,6 +1231,7 @@ let sheetOnMount = null;
 const dishDrafts = new Map();
 let sheetBaseline = null; // 打开时的表单快照；null = 不做脏检查
 let sheetDraftKey = null; // 这次草稿归属谁
+let pendingStockInputResolve = null;
 
 /**
  * 抓当前弹层里所有可编辑控件的值，用来判断「有没有改过」和存草稿。
@@ -1295,6 +1296,7 @@ function stashSheetDraft() {
 function requestCloseSheet() {
   // AI 正在往这个表单里写结果，中途关掉等于白等一场，还白花一次额度
   if (aiBusyOn) return;
+  if (pendingStockInputResolve) return closeSheet();
   if (!sheetBaseline) return closeSheet();
   if (sheetIsDirty()) {
     stashSheetDraft();
@@ -1339,6 +1341,8 @@ function openSheet({ title, body, foot, onMount, draftKey }) {
 function closeSheet() {
   aiBusyDone(); // 弹层没了，忙碌遮罩不能留着
   cancelPinCheck(); // 密码弹层被关掉 = 放弃验证，别让等着的人永远挂着
+  const pendingStock = pendingStockInputResolve;
+  pendingStockInputResolve = null;
   const root = $('#modalRoot');
   root.hidden = true;
   root.innerHTML = '';
@@ -1346,6 +1350,39 @@ function closeSheet() {
   sheetOnMount = null;
   sheetBaseline = null;
   sheetDraftKey = null;
+  if (pendingStock) pendingStock(null);
+}
+
+/** 内置浏览器不支持原生 prompt，采购入库统一使用应用自己的弹层。 */
+function askStockInput(name, defaultQty, defaultUnit) {
+  return new Promise((resolve) => {
+    pendingStockInputResolve = resolve;
+    openSheet({
+      title: `入库「${name}」`,
+      body: `<div class="field">
+          <label class="field-label" for="stockQty">实际购买数量</label>
+          <input class="input" id="stockQty" type="number" min="0.001" step="any" inputmode="decimal" value="${esc(defaultQty)}" />
+          <div class="field-hint">默认填入当前采购缺口，按实际买回的数量修改。</div>
+        </div>
+        <div class="field">
+          <label class="field-label" for="stockUnit">单位</label>
+          <input class="input" id="stockUnit" value="${esc(defaultUnit || '份')}" placeholder="个、袋、瓶、斤…" />
+        </div>`,
+      foot: `<button class="btn ghost" data-act="cancel-stock-input">取消</button>
+             <button class="btn" data-act="confirm-stock-input">确认入库</button>`,
+      onMount(root) {
+        root.querySelector('#stockQty')?.focus();
+        root.querySelector('#stockQty')?.select();
+      },
+    });
+  });
+}
+
+function resolveStockInput(value) {
+  const resolve = pendingStockInputResolve;
+  pendingStockInputResolve = null;
+  closeSheet();
+  if (resolve) resolve(value);
 }
 
 document.addEventListener('click', (e) => {
@@ -1564,16 +1601,9 @@ async function stockOne(name, parts, options) {
     ? assessment.shortageQty
     : (item && item.requiredQty != null ? item.requiredQty : guessed.quantity);
   const defaultUnit = (item && item.requiredUnit) || guessed.unit || '份';
-  const enteredQty = window.prompt(`实际购买了多少「${name}」？`, String(defaultQty));
-  if (enteredQty === null) return null;
-  const quantity = Number(String(enteredQty).trim());
-  if (!Number.isFinite(quantity) || quantity <= 0) {
-    toast('购买数量必须大于 0');
-    return null;
-  }
-  const enteredUnit = window.prompt(`「${name}」的单位是什么？`, defaultUnit);
-  if (enteredUnit === null) return null;
-  const unit = normalizeAmountUnit(enteredUnit) || defaultUnit;
+  const entered = await askStockInput(name, defaultQty, defaultUnit);
+  if (!entered) return null;
+  const { quantity, unit } = entered;
   let category = '其他';
   if (S.presets && S.presets.presets) {
     const hit = S.presets.presets.find((p) => p.name === name);
@@ -2306,12 +2336,36 @@ function guessAmount(parts) {
   return { quantity: 1, unit: '份' };
 }
 
-/** 在当前家庭库存里找同名（或名字互相包含）的食材 */
+/** 采购、库存和计划共用的食材标准化键；只收录明确同义词，避免把红糖误并到白糖。 */
+const INGREDIENT_ALIASES = Object.freeze({
+  生抽酱油: '生抽',
+  酱油: '生抽',
+  老抽酱油: '老抽',
+  食盐: '盐',
+  食用盐: '盐',
+  精盐: '盐',
+  盐巴: '盐',
+  白砂糖: '糖',
+  白糖: '糖',
+});
+
+function ingredientMatchKey(name) {
+  const key = String(name || '')
+    .toLowerCase()
+    .replace(/[\s\u3000、，。；：:（）()【】\[\]\/\\·'"“”‘’\-_.]/g, '');
+  return INGREDIENT_ALIASES[key] || key;
+}
+
+/** 在当前家庭库存里找同义名称；模糊包含只用于双方至少两个字符的名称。 */
 function findStock(name) {
   const list = householdPantry();
-  const exact = list.filter((p) => p.name === name);
+  const wanted = ingredientMatchKey(name);
+  const exact = list.filter((p) => ingredientMatchKey(p.name) === wanted);
   if (exact.length) return exact;
-  return list.filter((p) => p.name && (p.name.includes(name) || name.includes(p.name)));
+  return list.filter((p) => {
+    const other = ingredientMatchKey(p.name);
+    return other.length >= 2 && wanted.length >= 2 && (other.includes(wanted) || wanted.includes(other));
+  });
 }
 
 /**
@@ -2338,9 +2392,7 @@ function mergeSeasonings(rows) {
   const map = new Map();
   rows.forEach((r) => {
     if (!r.name) return;
-    const key = String(r.name).toLowerCase().replace(/[\s\u3000、，。；：:（）()【】\[\]\/\\·'"“”‘’\-_.]/g, '');
-    const aliases = { 生抽酱油: '生抽', 酱油: '生抽', 老抽酱油: '老抽', 食用盐: '盐', 精盐: '盐', 白砂糖: '糖', 白糖: '糖' };
-    const mergeKey = aliases[key] || key;
+    const mergeKey = ingredientMatchKey(r.name);
     if (!map.has(mergeKey)) {
       map.set(mergeKey, {
         name: r.name,
@@ -2394,9 +2446,7 @@ function mergeSeasonings(rows) {
 }
 
 function shoppingIngredientKey(name, unit) {
-  const raw = String(name || '').toLowerCase().replace(/[\s\u3000、，。；：:（）()【】\[\]\/\\·'"“”‘’\-_.]/g, '');
-  const aliases = { 生抽酱油: '生抽', 酱油: '生抽', 老抽酱油: '老抽', 食用盐: '盐', 精盐: '盐', 白砂糖: '糖', 白糖: '糖' };
-  const key = aliases[raw] || raw;
+  const key = ingredientMatchKey(name);
   return unit ? `${key}|${normalizeAmountUnit(unit)}` : key;
 }
 
@@ -7472,6 +7522,25 @@ const ACTIONS = {
     openChangelogSheet();
   },
   /** 买菜清单里「入库」：把买回来的东西记进当前家庭库存 */
+  'confirm-stock-input'() {
+    const quantity = Number(String($('#stockQty')?.value || '').trim());
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      toast('购买数量必须大于 0');
+      $('#stockQty')?.focus();
+      return;
+    }
+    const rawUnit = String($('#stockUnit')?.value || '').trim();
+    const unit = normalizeAmountUnit(rawUnit) || rawUnit;
+    if (!unit) {
+      toast('请填写单位');
+      $('#stockUnit')?.focus();
+      return;
+    }
+    resolveStockInput({ quantity, unit });
+  },
+  'cancel-stock-input'() {
+    closeSheet();
+  },
   async 'stock-it'(el) {
     const name = el.dataset.name;
     const parts = (el.dataset.parts || '').split('|').filter(Boolean);
