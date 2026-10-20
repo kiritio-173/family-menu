@@ -2380,29 +2380,57 @@ function shoppingIngredientKey(name, unit) {
   return unit ? `${key}|${normalizeAmountUnit(unit)}` : key;
 }
 
+/** 采购数量统一保留三位小数，避免浮点误差把 0.3 显示成 0.30000000000000004。 */
+function roundQty(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.round(n * 1000) / 1000) : 0;
+}
+
 /** 根据需求量和当前家庭库存，判断采购条目的真实状态。 */
 function stockAssessment(item) {
   const stock = Array.isArray(item.stock) ? item.stock : [];
   const positive = stock.filter((p) => Number(p.quantity) > 0);
-  if (!positive.length) return { key: item.isStaple ? 'staple' : 'needed', stockQty: 0, shortageQty: null };
-
   const requiredUnit = normalizeAmountUnit(item.requiredUnit);
-  if (!item.requiredComparable || item.requiredQty == null || !requiredUnit) {
-    return { key: 'uncertain', stockQty: item.stockQty, shortageQty: null };
+  const stockQty = positive.reduce((sum, p) => sum + Number(p.quantity || 0), 0);
+  const unitRows = positive.length ? positive : stock;
+  const units = [...new Set(unitRows.map((p) => normalizeAmountUnit(p.unit)).filter(Boolean))];
+  const comparableUnit = requiredUnit && units.length === 1 && units[0] === requiredUnit;
+  const stockMinQty = comparableUnit
+    ? unitRows.reduce((sum, p) => sum + (Number(p.minQuantity) > 0 ? Number(p.minQuantity) : 0), 0)
+    : 0;
+  const comparableStock = positive.length > 0 && comparableUnit;
+
+  // 没有库存时仍然给出可比较的目标数量；常备调料保留「请确认」语义，
+  // 但入库按钮可以把实际买到的数量记入库存。
+  if (!positive.length) {
+    const targetComparable = item.requiredComparable && item.requiredQty != null && requiredUnit
+      && (!stock.length || comparableUnit);
+    const targetQty = targetComparable
+      ? roundQty(item.requiredQty + stockMinQty)
+      : null;
+    return {
+      key: item.isStaple ? 'staple' : 'needed',
+      stockQty: 0,
+      stockMinQty,
+      targetQty,
+      shortageQty: targetQty,
+    };
   }
 
-  const units = [...new Set(positive.map((p) => normalizeAmountUnit(p.unit)))];
-  if (units.length !== 1 || units[0] !== requiredUnit) {
-    return { key: 'uncertain', stockQty: item.stockQty, shortageQty: null };
+  if (!item.requiredComparable || item.requiredQty == null || !requiredUnit || !comparableStock) {
+    return { key: 'uncertain', stockQty, stockMinQty, targetQty: null, shortageQty: null };
   }
-  const stockQty = positive.reduce((sum, p) => sum + Number(p.quantity || 0), 0);
-  if (stockQty >= item.requiredQty) {
-    return { key: 'enough', stockQty, shortageQty: 0 };
+
+  const targetQty = roundQty(item.requiredQty + stockMinQty);
+  if (stockQty >= targetQty) {
+    return { key: 'enough', stockQty, stockMinQty, targetQty, shortageQty: 0 };
   }
   return {
     key: 'shortage',
     stockQty,
-    shortageQty: Math.max(0, Math.round((item.requiredQty - stockQty) * 1000) / 1000),
+    stockMinQty,
+    targetQty,
+    shortageQty: Math.max(0, roundQty(targetQty - stockQty)),
   };
 }
 
@@ -2462,11 +2490,20 @@ function shopItemHtml(it) {
   const stateLabel = {
     enough: '已有', shortage: '库存不足', uncertain: '需确认', staple: '请确认', completed: '已完成', received: '已入库', needed: '待购买',
   }[stateKey];
-  const stockHtml = it.stock.length
-    ? `<span class="shop-stock" title="家里已经有 ${esc(it.stock.map((p) => p.name + ' ' + p.quantity + p.unit).join('、'))}">
-        ${stateKey === 'needed' ? '⚠️ 库存已用完' : `${stateKey === 'shortage' ? '⚠️' : '🏠'} 家里有 ${esc(String(assessment.stockQty))}${esc(it.stockUnit)}`}
-        ${stateKey === 'shortage' ? `，还需 ${esc(String(assessment.shortageQty))}${esc(it.requiredUnit)}` : ''}
+  const displayUnit = it.stockUnit || it.requiredUnit || '';
+  const reserveHint = assessment.stockMinQty > 0
+    ? `（最低保有量 ${esc(fmtQty(assessment.stockMinQty))}${esc(displayUnit)}）`
+    : '';
+  const stockHtml = it.stock.length || ['needed', 'staple'].includes(stateKey)
+    ? `<span class="shop-stock" title="家里已经有 ${esc(it.stock.map((p) => p.name + ' ' + p.quantity + p.unit).join('、') || '暂无库存')}">
+        ${stateKey === 'needed'
+          ? `⚠️ 库存已用完${assessment.shortageQty != null ? `，还需 ${esc(fmtQty(assessment.shortageQty))}${esc(displayUnit)}` : ''}`
+          : stateKey === 'staple'
+            ? `🧂 暂无库存 · ${assessment.shortageQty != null ? `建议备 ${esc(fmtQty(assessment.shortageQty))}${esc(displayUnit)}` : '请确认是否需要补充'}`
+            : `${stateKey === 'shortage' ? '⚠️' : '🏠'} 家里有 ${esc(fmtQty(assessment.stockQty))}${esc(displayUnit)}`}
+        ${stateKey === 'shortage' ? `，还需 ${esc(fmtQty(assessment.shortageQty))}${esc(it.requiredUnit)}` : ''}
         ${stateKey === 'uncertain' ? ' · 请确认余量' : ''}
+        ${['enough', 'shortage'].includes(stateKey) ? reserveHint : ''}
       </span>`
     : '';
   const restockHtml = ['enough', 'received'].includes(stateKey)
@@ -3020,9 +3057,12 @@ function qtyStep(unit) {
 
 function foodRow(p) {
   const st = shelfStatus(p);
+  const low = Number(p.minQuantity) > 0 && Number(p.quantity) < Number(p.minQuantity);
   const flagText = Number(p.quantity) <= 0
     ? '用完，待补'
+    : low ? `低于最低量 ${fmtQty(p.minQuantity)}${p.unit}`
     : st.key === 'none' ? (p.expireAt || '未填保质期') : st.label;
+  const flagKey = low && st.key === 'none' ? 'low' : st.key;
 
   // 多选模式：整行变成一个勾选框，数量加减暂时让位（批量操作不需要先调数量）
   if (picking('pantry')) {
@@ -3050,7 +3090,7 @@ function foodRow(p) {
       <div class="food-sub">${esc(p.category)}${p.note ? ' · ' + esc(p.note) : ''}</div>
     </div>
     <div class="food-ops">
-      <span class="food-flag flag-${st.key}">${esc(flagText)}</span>
+      <span class="food-flag flag-${flagKey}">${esc(flagText)}</span>
       <div class="stepper">
         <button class="step-btn" data-act="qty-dec" data-id="${esc(p.id)}" aria-label="减少 ${esc(p.name)}">−</button>
         <span class="step-val">${esc(fmtQty(p.quantity))}</span>
@@ -3356,6 +3396,7 @@ async function openFoodEditor(item) {
     name: '',
     category: '蔬菜',
     quantity: 1,
+    minQuantity: 0,
     unit: '份',
     expireAt: '',
     note: '',
@@ -3384,6 +3425,13 @@ async function openFoodEditor(item) {
           <input class="input" id="fFoodUnit" value="${esc(p.unit)}" list="unitList" placeholder="单位" />
         </div>
         <datalist id="unitList">${UNITS.map((u) => `<option value="${esc(u)}"></option>`).join('')}</datalist>
+      </div>
+      <div class="field">
+        <label class="field-label">最低保有量<span class="field-hint">低于这个数量时提示补货，可不填</span></label>
+        <div class="row-2">
+          <input class="input" id="fFoodMin" type="number" min="0" step="0.01" value="${esc(fmtQty(p.minQuantity || 0))}" />
+          <div class="input" style="background:var(--bg-soft);color:var(--muted)">${esc(p.unit || '份')}</div>
+        </div>
       </div>
       <div class="field">
         <label class="field-label">保质期到哪天<span class="field-hint">超过或快到 3 天会自动标红提醒</span></label>
@@ -6764,6 +6812,7 @@ const ACTIONS = {
       name,
       category: $('#fFoodCat').value,
       quantity: Number($('#fFoodQty').value) || 0,
+      minQuantity: Number($('#fFoodMin').value) || 0,
       unit: $('#fFoodUnit').value.trim() || '份',
       expireAt: $('#fFoodExp').value || '',
       note: $('#fFoodNote').value.trim(),

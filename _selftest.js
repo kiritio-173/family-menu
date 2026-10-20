@@ -373,10 +373,10 @@ async function main() {
   console.log('\n[5] 库存');
   const f1 = (await post('/api/pantry', {
     householdId: h301.id, name: '鸡蛋', category: '蛋类',
-    quantity: 10, unit: '个', expireAt: dayOffset(5), note: '冰箱门',
+    quantity: 10, minQuantity: 3, unit: '个', expireAt: dayOffset(5), note: '冰箱门',
   })).body.data;
   ok('新增库存条目', f1.id, f1);
-  eq('字段原样保存', [f1.name, f1.category, f1.quantity, f1.unit, f1.note], ['鸡蛋', '蛋类', 10, '个', '冰箱门']);
+  eq('字段原样保存', [f1.name, f1.category, f1.quantity, f1.minQuantity, f1.unit, f1.note], ['鸡蛋', '蛋类', 10, 3, '个', '冰箱门']);
   eq('保质期日期', f1.expireAt, dayOffset(5));
 
   const f2 = (await post('/api/pantry', { householdId: h301.id, name: '牛奶' })).body.data;
@@ -393,6 +393,7 @@ async function main() {
   const updated = (await put(`/api/pantry/${f1.id}`, { quantity: 8 })).body.data;
   eq('数量改成 8', updated.quantity, 8);
   eq('数量改 8 不丢其它字段', [updated.name, updated.category, updated.expireAt], ['鸡蛋', '蛋类', dayOffset(5)]);
+  eq('数量改 8 不丢最低保有量', updated.minQuantity, 3);
 
   // 采购入库应累加已有同名同单位库存，而不是再建一条重复记录。
   const merged = (await post('/api/pantry', {
@@ -412,6 +413,7 @@ async function main() {
   });
   eq('计划购买量入库返回 200', received.status, 200);
   eq('计划入库继续累加', received.body.data.item.quantity, 13);
+  eq('计划入库不覆盖最低保有量', received.body.data.item.minQuantity, 3);
   eq('同一计划同一食材不能重复入库',
     (await post('/api/plans/receive', {
       householdId: h301.id, weekOf: receiveWeek, name: '鸡蛋', quantity: 4, unit: '个', category: '蛋类',

@@ -41,10 +41,20 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.25.1';
+const APP_VERSION = '1.25.2';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.25.2',
+    date: '2026-10-19',
+    title: '库存最低保有量与采购缺口',
+    items: [
+      '库存条目可设置最低保有量，低于最低量时在库存页提示补货',
+      '采购页按“菜谱需求量 + 最低保有量”计算目标库存，显示真实缺口',
+      '无库存但用量可比较时显示建议补足数量；适量和单位不同仍要求人工确认',
+    ],
+  },
   {
     version: '1.25.1',
     date: '2026-10-19',
@@ -1199,6 +1209,10 @@ function normPantryItem(input, prev, keepInputId) {
   const qty = Number.isFinite(rawQty)
     ? Math.min(99999, Math.max(0, Math.round(rawQty * 1000) / 1000))
     : 0;
+  const rawMin = Number(input.minQuantity ?? base.minQuantity ?? 0);
+  const minQuantity = Number.isFinite(rawMin)
+    ? Math.min(99999, Math.max(0, Math.round(rawMin * 1000) / 1000))
+    : 0;
 
   const cat = safeText(input.category ?? base.category, 12).trim();
   const known = PANTRY_CATEGORIES.some((c) => c.name === cat);
@@ -1211,6 +1225,7 @@ function normPantryItem(input, prev, keepInputId) {
     name,
     category: known ? cat : '其他',
     quantity: qty,
+    minQuantity,
     unit: safeText(input.unit ?? base.unit, 8).trim() || '份',
     expireAt: normDate(input.expireAt ?? base.expireAt),
     note: safeText(input.note ?? base.note, 100),

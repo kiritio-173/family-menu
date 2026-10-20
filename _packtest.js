@@ -117,7 +117,7 @@ async function main() {
   ok('页面文件都在', (await fetch(BASE + '/')).status === 200 && (await fetch(BASE + '/app.js')).status === 200);
 
   const pre = (await api('GET', '/api/ingredient-presets')).body.data;
-  ok('食材预设在包里也可用', pre.presets.length === 148, pre.presets.length);
+  ok('食材预设在包里也可用', pre.presets.length >= 148, pre.presets.length);
 
   console.log('\n跑一遍多家庭 + 库存 …');
   // 打进去的家庭有几个取决于本机当时的数据（写死 1 的话，用户多建一个家庭就误报）

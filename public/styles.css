@@ -1028,6 +1028,7 @@ a { color: var(--primary-dark); }
 .flag-ok { background: var(--green-soft); color: var(--green); }
 .flag-none { background: var(--bg-soft); color: var(--muted); }
 .flag-soon, .flag-today { background: #fdf0d8; color: #a8741c; }
+.flag-low { background: #fff0d9; color: #b45f06; }
 .flag-expired { background: var(--danger); color: #fff; }
 
 .stepper {
