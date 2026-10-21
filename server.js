@@ -41,10 +41,20 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.31.5';
+const APP_VERSION = '1.31.6';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.31.6',
+    date: '2026-10-21',
+    title: '统一菜谱、计划与库存原料目录',
+    items: [
+      '菜谱原料按分类和目录条目选择，与计划和家庭库存共享原料 ID；家庭管理员可维护全局原料及子分类，家庭可补充本地项',
+      '旧菜谱材料可由 AI 提出已有目录匹配建议；共享菜只显示全局目录，建议须通过范围和原始行校验并由用户确认后保存',
+      '家庭本地目录继续隔离；计划与库存按家庭独立计算，不会因共用全局原料 ID 而共享余量',
+    ],
+  },
   {
     version: '1.31.5',
     date: '2026-10-21',
@@ -1163,6 +1173,7 @@ function pantryRootCategories() {
   return PANTRY_CATEGORIES.map((category, index) => ({
     id: `pantry-root-${index + 1}`,
     householdId: null,
+    scope: 'global',
     parentId: null,
     name: category.name,
     builtin: true,
@@ -1172,11 +1183,13 @@ function pantryRootCategories() {
 function normPantryCategory(input, base) {
   if (!input || typeof input !== 'object') return null;
   const name = safeText(input.name ?? (base && base.name), 40).trim();
-  const householdId = safeText(input.householdId ?? (base && base.householdId), 40);
-  if (!name || !householdId) return null;
+  const scope = (input.scope ?? (base && base.scope)) === 'global' ? 'global' : 'household';
+  const householdId = scope === 'global' ? '' : safeText(input.householdId ?? (base && base.householdId), 40);
+  if (!name || (scope === 'household' && !householdId)) return null;
   return {
     id: safeText((base && base.id) || input.id, 80) || uid('pc_'),
-    householdId,
+    householdId: householdId || null,
+    scope,
     parentId: safeText(input.parentId ?? (base && base.parentId), 80),
     name,
     createdAt: (base && base.createdAt) || safeText(input.createdAt, 40) || nowISO(),
@@ -1187,8 +1200,9 @@ function normPantryCategory(input, base) {
 function normIngredient(input, base) {
   if (!input || typeof input !== 'object') return null;
   const name = safeText(input.name ?? (base && base.name), 80).trim();
-  const householdId = safeText(input.householdId ?? (base && base.householdId), 40);
-  if (!name || !householdId) return null;
+  const scope = (input.scope ?? (base && base.scope)) === 'global' ? 'global' : 'household';
+  const householdId = scope === 'global' ? '' : safeText(input.householdId ?? (base && base.householdId), 40);
+  if (!name || (scope === 'household' && !householdId)) return null;
   const sourceAliases = input.aliases ?? (base && base.aliases);
   const aliases = Array.isArray(sourceAliases)
     ? [...new Set(sourceAliases.map((alias) => safeText(alias, 80).trim()).filter((alias) => alias && alias !== name))].slice(0, 30)
@@ -1200,7 +1214,8 @@ function normIngredient(input, base) {
   const trackingMode = categoryRoot === '调味干货' && categoryChanged ? 'presence' : mode === 'presence' ? 'presence' : 'quantity';
   return {
     id: safeText((base && base.id) || input.id, 80) || uid('ing_'),
-    householdId,
+    householdId: householdId || null,
+    scope,
     name,
     aliases,
     categoryId,
@@ -1213,7 +1228,8 @@ function normIngredient(input, base) {
 
 function pantryCategoryExists(householdId, categoryId) {
   return pantryRootCategories().some((category) => category.id === categoryId) ||
-    state.pantryCategories.some((category) => category.householdId === householdId && category.id === categoryId);
+    state.pantryCategories.some((category) => category.id === categoryId &&
+      (category.scope === 'global' || category.householdId === householdId));
 }
 
 function pantryCategoryLabel(householdId, categoryId) {
@@ -1221,7 +1237,7 @@ function pantryCategoryLabel(householdId, categoryId) {
   const root = roots.find((category) => category.id === categoryId);
   if (root) return root.name;
   const findCategory = (id) => state.pantryCategories.find((category) =>
-    category.householdId === householdId && category.id === id) || roots.find((category) => category.id === id);
+    category.id === id && (category.scope === 'global' || category.householdId === householdId)) || roots.find((category) => category.id === id);
   const parts = [];
   let current = findCategory(categoryId);
   const visited = new Set();
@@ -1236,23 +1252,26 @@ function pantryCategoryLabel(householdId, categoryId) {
 
 function pantryCategoryIdByLabel(householdId, label) {
   const categories = pantryRootCategories().concat(
-    state.pantryCategories.filter((category) => category.householdId === householdId)
+    state.pantryCategories.filter((category) => category.scope === 'global' || category.householdId === householdId)
   );
   const match = categories.find((category) => pantryCategoryLabel(householdId, category.id) === label);
   return match ? match.id : '';
 }
 
-function pantryCategoryNameExists(householdId, name, excludeId) {
+function pantryCategoryNameExists(householdId, name, excludeId, scope) {
   const key = safeText(name, 40).trim().toLocaleLowerCase();
+  const targetScope = scope || 'household';
   return pantryRootCategories().some((category) => category.name.toLocaleLowerCase() === key) ||
-    state.pantryCategories.some((category) => category.id !== excludeId && category.householdId === householdId && category.name.toLocaleLowerCase() === key);
+    state.pantryCategories.some((category) => category.id !== excludeId &&
+      (targetScope === 'global' ? category.scope === 'global' : (category.scope === 'global' || category.householdId === householdId)) && category.name.toLocaleLowerCase() === key);
 }
 
 function ingredientCategoryId(householdId, name, pantryCategory) {
   const categoryName = safeText(pantryCategory, 40).trim() ||
     (FOOD_PRESETS.find((preset) => pantryIngredientKey(preset[0]) === pantryIngredientKey(name)) || [])[1] || '其他';
   const custom = state.pantryCategories.find((category) =>
-    category.householdId === householdId && category.name === categoryName);
+    category.householdId === householdId && category.name === categoryName) || state.pantryCategories.find((category) =>
+    category.scope === 'global' && category.name === categoryName);
   if (custom) return custom.id;
   const rootIndex = PANTRY_CATEGORIES.findIndex((category) => category.name === categoryName);
   return `pantry-root-${rootIndex >= 0 ? rootIndex + 1 : PANTRY_CATEGORIES.length}`;
@@ -1265,6 +1284,21 @@ function findHouseholdIngredient(householdId, name) {
     (ingredient.name.toLocaleLowerCase() === key || ingredient.aliases.some((alias) => alias.toLocaleLowerCase() === key))) || null;
 }
 
+function ingredientAvailableInHousehold(ingredient, householdId) {
+  return !!ingredient && (ingredient.scope === 'global' || ingredient.householdId === householdId);
+}
+
+function findGlobalIngredient(name) {
+  const key = safeText(name, 80).trim().toLocaleLowerCase();
+  if (!key) return null;
+  return state.ingredients.find((ingredient) => ingredient.scope === 'global' &&
+    (ingredient.name.toLocaleLowerCase() === key || ingredient.aliases.some((alias) => alias.toLocaleLowerCase() === key))) || null;
+}
+
+function findAvailableIngredient(householdId, name) {
+  return findHouseholdIngredient(householdId, name) || findGlobalIngredient(name);
+}
+
 function ensureHouseholdIngredient(householdId, row, pantryCategory) {
   const name = safeText(row && row.name, 80).trim();
   if (!name || !householdId) return null;
@@ -1272,14 +1306,14 @@ function ensureHouseholdIngredient(householdId, row, pantryCategory) {
   if (existing) return existing;
   const stock = state.pantry.find((item) => item.householdId === householdId &&
     item.name.toLocaleLowerCase() === name.toLocaleLowerCase());
-  const purchaseType = row && row.purchaseType;
-  const trackingMode = purchaseType === 'staple' ? 'presence' :
-    purchaseType === 'purchase' ? 'quantity' : isKnownSeasoning(name) ? 'presence' : 'quantity';
+  const categoryId = ingredientCategoryId(householdId, name, pantryCategory || (stock && stock.category));
+  const categoryRoot = pantryCategoryLabel(householdId, categoryId).split(' > ')[0];
+  const trackingMode = categoryRoot === '调味干货' || isKnownSeasoning(name) ? 'presence' : 'quantity';
   const ingredient = normIngredient({
     householdId,
     name,
     aliases: [],
-    categoryId: ingredientCategoryId(householdId, name, pantryCategory || (stock && stock.category)),
+    categoryId,
     defaultTrackingMode: trackingMode,
     defaultUnit: trackingMode === 'quantity' && stock ? stock.unit : '',
   });
@@ -1297,7 +1331,7 @@ function linkHouseholdIngredientReferences() {
     if (!householdId || !Array.isArray(rows)) return;
     rows.forEach((row) => {
       if (!row || !safeText(row.name, 80).trim()) return;
-      const current = state.ingredients.find((ingredient) => ingredient.id === row.ingredientId && ingredient.householdId === householdId);
+      const current = state.ingredients.find((ingredient) => ingredient.id === row.ingredientId && ingredientAvailableInHousehold(ingredient, householdId));
       if (current) return;
       const ingredient = ensureHouseholdIngredient(householdId, row);
       if (ingredient) {
@@ -1308,13 +1342,32 @@ function linkHouseholdIngredientReferences() {
   };
 
   state.dishes.forEach((dish) => {
-    if (!dish || !dish.householdId) return;
+    if (!dish) return;
+    if (!dish.householdId) {
+      const linkGlobalRows = (rows) => {
+        if (!Array.isArray(rows)) return;
+        rows.forEach((row) => {
+          if (!row || !safeText(row.name, 80).trim()) return;
+          const current = row.ingredientId && state.ingredients.find((ingredient) =>
+            ingredient.id === row.ingredientId && ingredient.scope === 'global');
+          if (current) return;
+          const ingredient = findGlobalIngredient(row.name);
+          if (ingredient) {
+            row.ingredientId = ingredient.id;
+            dishesChanged = true;
+          }
+        });
+      };
+      linkGlobalRows(dish.seasonings);
+      (Array.isArray(dish.methods) ? dish.methods : []).forEach((method) => linkGlobalRows(method && method.seasonings));
+      return;
+    }
     linkRows(dish.seasonings, dish.householdId);
     (Array.isArray(dish.methods) ? dish.methods : []).forEach((method) => linkRows(method && method.seasonings, dish.householdId));
   });
   state.pantry.forEach((item) => {
     if (!item || !item.householdId) return;
-    const ingredient = state.ingredients.find((entry) => entry.id === item.ingredientId && entry.householdId === item.householdId) ||
+    const ingredient = state.ingredients.find((entry) => entry.id === item.ingredientId && ingredientAvailableInHousehold(entry, item.householdId)) ||
       ensureHouseholdIngredient(item.householdId, item, item.category);
     if (ingredient && item.ingredientId !== ingredient.id) {
       item.ingredientId = ingredient.id;
@@ -1335,9 +1388,12 @@ function dishIngredientReferenceProblem(dish, householdId) {
     ...(Array.isArray(dish && dish.seasonings) ? dish.seasonings : []),
     ...((Array.isArray(dish && dish.methods) ? dish.methods : []).flatMap((method) => Array.isArray(method && method.seasonings) ? method.seasonings : [])),
   ];
-  return rows.some((row) => row && row.ingredientId && !state.ingredients.some((ingredient) =>
-    ingredient.id === row.ingredientId && ingredient.householdId === householdId))
-    ? '原料必须属于当前菜谱家庭，请重新选择原料'
+  return rows.some((row) => {
+    if (!row || !row.ingredientId) return false;
+    const ingredient = state.ingredients.find((item) => item.id === row.ingredientId);
+    return !ingredient || !ingredientAvailableInHousehold(ingredient, householdId) || (!householdId && ingredient.scope !== 'global');
+  })
+    ? '共享菜谱只能使用全局原料，家庭菜谱只能使用全局或本家庭原料'
     : '';
 }
 
@@ -1354,9 +1410,17 @@ function copyDishToScope(source, householdId, req) {
 
   const mapRows = (rows) => (Array.isArray(rows) ? rows : []).map((row) => {
     const mapped = { ...row };
+    const existing = mapped.ingredientId && state.ingredients.find((ingredient) =>
+      ingredient.id === mapped.ingredientId && ingredient.scope === 'global');
+    if (existing) return mapped;
     delete mapped.ingredientId;
     if (householdId) {
-      const ingredient = findHouseholdIngredient(householdId, mapped.name);
+      const ingredient = source.householdId
+        ? findAvailableIngredient(householdId, mapped.name)
+        : findGlobalIngredient(mapped.name);
+      if (ingredient) mapped.ingredientId = ingredient.id;
+    } else {
+      const ingredient = findGlobalIngredient(mapped.name);
       if (ingredient) mapped.ingredientId = ingredient.id;
     }
     return mapped;
@@ -1384,7 +1448,7 @@ function copyDishToScope(source, householdId, req) {
 
 function pantryIngredientReferenceProblem(item) {
   if (!item || !item.ingredientId) return '';
-  return state.ingredients.some((ingredient) => ingredient.id === item.ingredientId && ingredient.householdId === item.householdId)
+  return state.ingredients.some((ingredient) => ingredient.id === item.ingredientId && ingredientAvailableInHousehold(ingredient, item.householdId))
     ? ''
     : '原料必须属于当前库存家庭，请重新选择原料';
 }
@@ -1587,7 +1651,7 @@ function normPantryItem(input, prev, keepInputId) {
   const householdId = resolveHouseholdId(input.householdId ?? base.householdId);
   const ingredientId = safeText(input.ingredientId ?? base.ingredientId, 80);
   const linkedIngredient = ingredientId
-    ? state.ingredients.find((ingredient) => ingredient.id === ingredientId && ingredient.householdId === householdId)
+    ? state.ingredients.find((ingredient) => ingredient.id === ingredientId && ingredientAvailableInHousehold(ingredient, householdId))
     : null;
 
   const rawQty = Number(input.quantity ?? base.quantity ?? 1);
@@ -1744,7 +1808,7 @@ function consumeDishPantry(householdId, dish) {
   const warnings = [];
   dishRecipeIngredients(dish).forEach((s) => {
     const ingredient = s.ingredientId
-      ? state.ingredients.find((row) => row.id === s.ingredientId && row.householdId === householdId)
+      ? state.ingredients.find((row) => row.id === s.ingredientId && ingredientAvailableInHousehold(row, householdId))
       : null;
     const matchesPantryIngredient = (row) => row.householdId === householdId &&
       (ingredient ? row.ingredientId === ingredient.id : pantryIngredientKey(row.name) === pantryIngredientKey(s.name));
@@ -2070,14 +2134,15 @@ function loadState() {
   const loadedPantryCategories = Array.isArray(state.pantryCategories) ? state.pantryCategories : [];
   state.pantryCategories = loadedPantryCategories
     .map((category) => normPantryCategory(category, category))
-    .filter((category) => category && hhIds.has(category.householdId));
+    .filter((category) => category && (category.scope === 'global' || hhIds.has(category.householdId)));
   const categoryIds = new Set(pantryRootCategories().map((category) => category.id));
   const seenCategoryIds = new Set(categoryIds);
   const seenCategoryNames = new Set();
   state.pantryCategories = state.pantryCategories.filter((category) => {
-    const key = `${category.householdId}\0${category.name.toLocaleLowerCase()}`;
+    const key = `${category.scope === 'global' ? 'global' : category.householdId}\0${category.name.toLocaleLowerCase()}`;
     const parentValid = categoryIds.has(category.parentId) || state.pantryCategories.some((parent) =>
-      parent.id === category.parentId && parent.householdId === category.householdId);
+      parent.id === category.parentId && (parent.scope === 'global' || (category.scope === 'household' && parent.householdId === category.householdId)) &&
+      (category.scope !== 'global' || parent.scope === 'global'));
     if (seenCategoryIds.has(category.id) || seenCategoryNames.has(key) || !parentValid || category.id === category.parentId) return false;
     seenCategoryIds.add(category.id);
     seenCategoryNames.add(key);
@@ -2089,11 +2154,13 @@ function loadState() {
   const loadedIngredients = Array.isArray(state.ingredients) ? state.ingredients : [];
   state.ingredients = loadedIngredients
     .map((ingredient) => normIngredient(ingredient, ingredient))
-    .filter((ingredient) => ingredient && hhIds.has(ingredient.householdId) && pantryCategoryExists(ingredient.householdId, ingredient.categoryId));
+    .filter((ingredient) => ingredient && (ingredient.scope === 'global' || hhIds.has(ingredient.householdId)) &&
+      pantryCategoryExists(ingredient.householdId, ingredient.categoryId) &&
+      (ingredient.scope !== 'global' || state.pantryCategories.every((category) => category.id !== ingredient.categoryId || category.scope === 'global')));
   const seenIngredientIds = new Set();
   const seenIngredientNames = new Set();
   state.ingredients = state.ingredients.filter((ingredient) => {
-    const nameKey = `${ingredient.householdId}\0${ingredient.name.toLocaleLowerCase()}`;
+    const nameKey = `${ingredient.scope === 'global' ? 'global' : ingredient.householdId}\0${ingredient.name.toLocaleLowerCase()}`;
     if (seenIngredientIds.has(ingredient.id) || seenIngredientNames.has(nameKey)) return false;
     seenIngredientIds.add(ingredient.id);
     seenIngredientNames.add(nameKey);
@@ -2552,14 +2619,14 @@ function applyBackup(src) {
     const seen = new Set();
     state.pantryCategories = src.pantryCategories
       .map((category) => (category && typeof category === 'object' ? normPantryCategory(category, undefined) : null))
-      .filter((category) => category && backupHouseholdIds.has(category.householdId))
+      .filter((category) => category && (category.scope === 'global' || backupHouseholdIds.has(category.householdId)))
       .filter((category) => (seen.has(category.id) ? false : (seen.add(category.id), true)));
   }
   if (Array.isArray(src.ingredients)) {
     const seen = new Set();
     state.ingredients = src.ingredients
       .map((ingredient) => (ingredient && typeof ingredient === 'object' ? normIngredient(ingredient, undefined) : null))
-      .filter((ingredient) => ingredient && backupHouseholdIds.has(ingredient.householdId))
+      .filter((ingredient) => ingredient && (ingredient.scope === 'global' || backupHouseholdIds.has(ingredient.householdId)))
       .filter((ingredient) => (seen.has(ingredient.id) ? false : (seen.add(ingredient.id), true)))
       .filter((ingredient) => pantryCategoryExists(ingredient.householdId, ingredient.categoryId));
   }
@@ -2631,8 +2698,8 @@ function applyBackup(src) {
   state.pantry.forEach((p) => {
     if (!hhIds.has(p.householdId)) p.householdId = state.households[0].id;
   });
-  state.ingredients = state.ingredients.filter((ingredient) => hhIds.has(ingredient.householdId));
-  state.pantryCategories = state.pantryCategories.filter((category) => hhIds.has(category.householdId));
+  state.ingredients = state.ingredients.filter((ingredient) => ingredient.scope === 'global' || hhIds.has(ingredient.householdId));
+  state.pantryCategories = state.pantryCategories.filter((category) => category.scope === 'global' || hhIds.has(category.householdId));
   state.plans.forEach((pl) => {
     if (!hhIds.has(pl.householdId)) pl.householdId = state.households[0].id;
   });
@@ -2854,12 +2921,10 @@ function normDish(input, prev, keepInputId) {
       .slice(0, 8),
     seasonings: safeList(input.seasonings)
       .map((s) => {
-        const purchaseType = ['staple', 'purchase'].includes(s && s.purchaseType) ? s.purchaseType : '';
         return {
           name: safeText(s && s.name, 30).trim(),
           amount: safeText(s && s.amount, 30).trim(),
           ...(safeText(s && s.ingredientId, 80) ? { ingredientId: safeText(s.ingredientId, 80) } : {}),
-          ...(purchaseType ? { purchaseType } : {}),
         };
       })
       .filter((s) => s.name)
@@ -2874,12 +2939,10 @@ function normDish(input, prev, keepInputId) {
         // 老数据没有这个字段，解析出来就是空数组 —— 不用迁移，菜谱不会少东西。
         seasonings: safeList(m && m.seasonings)
           .map((s) => {
-            const purchaseType = ['staple', 'purchase'].includes(s && s.purchaseType) ? s.purchaseType : '';
             return {
               name: safeText(s && s.name, 30).trim(),
               amount: safeText(s && s.amount, 30).trim(),
               ...(safeText(s && s.ingredientId, 80) ? { ingredientId: safeText(s.ingredientId, 80) } : {}),
-              ...(purchaseType ? { purchaseType } : {}),
             };
           })
           .filter((s) => s.name)
@@ -3937,6 +4000,16 @@ async function handleAPI(req, res, url) {
           '不要推断库存数量、单位、采购数量或计划状态。逐项对应输入，不要新增材料。',
         wantJSON: true,
       },
+      'ingredient-match': {
+        system:
+          '你是菜谱原料匹配助手。输入 JSON 包含待匹配材料 rows 和可选原料 candidates。' +
+          '只能为确认为同一种原料或明确同义名称的行返回候选 ID。' +
+          '牛里脊和牛排即使同属牛肉也不是同一种原料，不能互相匹配。' +
+          '不要创建或改写原料、分类、别名、用量或菜谱内容；不确定时不返回该行。' +
+          '只输出 JSON：{"matches":[{"rowId":"输入行 ID","ingredientId":"候选原料 ID"}]}。' +
+          'rowId 和 ingredientId 必须逐字复制输入，禁止编造 ID；不要输出理由、名称、置信度或其他字段。',
+        wantJSON: true,
+      },
       'plan-analysis': {
         system:
           '你是家庭备菜计划解释助手。输入中已经包含程序计算的需求、库存和缺口。' +
@@ -4072,8 +4145,7 @@ async function handleAPI(req, res, url) {
     });
   }
 
-  // Household-owned pantry dictionary. Built-in roots are generated in memory;
-  // only custom child nodes and ingredients are written to their JSON files.
+  // The dictionary combines globally visible entries with the active household's local entries.
   if (route[0] === 'pantry-categories') {
     const id = route[1];
     const queryHouseholdId = safeText(url.searchParams.get('householdId'), 40);
@@ -4083,7 +4155,8 @@ async function handleAPI(req, res, url) {
       if (!requirePantryDictionaryAccess(req, res, queryHouseholdId)) return;
       return sendJSON(res, 200, {
         ok: true,
-        data: pantryRootCategories().concat(state.pantryCategories.filter((category) => category.householdId === queryHouseholdId)),
+        data: pantryRootCategories().concat(state.pantryCategories.filter((category) =>
+          category.scope === 'global' || category.householdId === queryHouseholdId)),
       });
     }
     if (method === 'POST' && !id) {
@@ -4094,11 +4167,15 @@ async function handleAPI(req, res, url) {
       if (!state.households.some((household) => household.id === householdId)) return sendError(res, 404, '家庭不存在');
       if (!requirePantryDictionaryAccess(req, res, householdId)) return;
       if (!isHouseAdmin(req, householdId)) return sendError(res, 403, '只有家庭管理员能维护分类');
-      const category = normPantryCategory({ ...body, householdId });
+      const scope = body.scope === 'global' ? 'global' : 'household';
+      const category = normPantryCategory({ ...body, householdId, scope });
       const parentId = category && category.parentId;
-      if (!category || !parentId || !pantryCategoryExists(householdId, parentId)) return sendError(res, 400, '请选择本家庭有效的父分类');
-      if (pantryCategoryNameExists(householdId, category.name)) {
-        return sendError(res, 409, '这个家庭已经有同名分类');
+      const parent = parentId && (pantryRootCategories().find((item) => item.id === parentId) ||
+        state.pantryCategories.find((item) => item.id === parentId &&
+          (item.scope === 'global' || (scope === 'household' && item.householdId === householdId))));
+      if (!category || !parent || (scope === 'global' && parent.scope !== 'global')) return sendError(res, 400, '请选择当前作用域有效的父分类');
+      if (pantryCategoryNameExists(householdId, category.name, '', scope)) {
+        return sendError(res, 409, '目录中已经有同名分类');
       }
       state.pantryCategories.push(category);
       scheduleSave('pantryCategories');
@@ -4108,28 +4185,38 @@ async function handleAPI(req, res, url) {
       const index = state.pantryCategories.findIndex((category) => category.id === id);
       if (index < 0) return sendError(res, 404, '自定义分类不存在');
       const existing = state.pantryCategories[index];
-      if (queryHouseholdId && queryHouseholdId !== existing.householdId) return sendError(res, 403, '不能操作其他家庭的分类');
-      if (!requirePantryDictionaryAccess(req, res, existing.householdId)) return;
-      if (!isHouseAdmin(req, existing.householdId)) return sendError(res, 403, '只有家庭管理员能维护分类');
+      if (existing.scope === 'global') {
+        if (!isSuperAdmin(req)) return sendError(res, 403, '全局分类由超级管理员维护');
+      } else {
+        if (queryHouseholdId && queryHouseholdId !== existing.householdId) return sendError(res, 403, '不能操作其他家庭的分类');
+        if (!requirePantryDictionaryAccess(req, res, existing.householdId)) return;
+        if (!isHouseAdmin(req, existing.householdId)) return sendError(res, 403, '只有家庭管理员能维护分类');
+      }
       if (method === 'PUT') {
         const body = await readBody(req);
         if (body.householdId && body.householdId !== existing.householdId) return sendError(res, 400, '不能更改分类所属家庭');
-        const category = normPantryCategory({ ...existing, ...body, householdId: existing.householdId }, existing);
-        if (!category || !category.parentId || !pantryCategoryExists(existing.householdId, category.parentId)) return sendError(res, 400, '请选择本家庭有效的父分类');
+        if (body.scope && body.scope !== existing.scope) return sendError(res, 400, '不能更改分类作用域');
+        const category = normPantryCategory({ ...existing, ...body, householdId: existing.householdId, scope: existing.scope }, existing);
+        const parent = category && (pantryRootCategories().find((item) => item.id === category.parentId) ||
+          state.pantryCategories.find((item) => item.id === category.parentId &&
+            (item.scope === 'global' || (existing.scope === 'household' && item.householdId === existing.householdId))));
+        if (!category || !parent || (existing.scope === 'global' && parent.scope !== 'global')) return sendError(res, 400, '请选择当前作用域有效的父分类');
         if (pantryCategoryWouldCycle(existing.householdId, id, category.parentId)) {
           return sendError(res, 400, '分类不能设置为自己的子分类');
         }
-        if (pantryCategoryNameExists(existing.householdId, category.name, id)) {
+        if (pantryCategoryNameExists(existing.householdId, category.name, id, existing.scope)) {
           return sendError(res, 409, '这个家庭已经有同名分类');
         }
         state.pantryCategories[index] = category;
         scheduleSave('pantryCategories');
         return sendJSON(res, 200, { ok: true, data: category });
       }
-      if (state.pantryCategories.some((category) => category.parentId === id && category.householdId === existing.householdId)) {
+      if (state.pantryCategories.some((category) => category.parentId === id &&
+        (existing.scope === 'global' || category.householdId === existing.householdId))) {
         return sendError(res, 409, '请先删除或移动这个分类下的子分类');
       }
-      if (state.ingredients.some((ingredient) => ingredient.householdId === existing.householdId && ingredient.categoryId === id)) {
+      if (state.ingredients.some((ingredient) => ingredient.categoryId === id &&
+        (existing.scope === 'global' || ingredient.householdId === existing.householdId))) {
         return sendError(res, 409, '这个分类仍被原料使用，请先迁移原料');
       }
       state.pantryCategories.splice(index, 1);
@@ -4260,7 +4347,8 @@ async function handleAPI(req, res, url) {
       if (!queryHouseholdId) return sendError(res, 400, '缺少家庭 ID');
       if (!state.households.some((household) => household.id === queryHouseholdId)) return sendError(res, 404, '家庭不存在');
       if (!requirePantryDictionaryAccess(req, res, queryHouseholdId)) return;
-      return sendJSON(res, 200, { ok: true, data: state.ingredients.filter((ingredient) => ingredient.householdId === queryHouseholdId) });
+      return sendJSON(res, 200, { ok: true, data: state.ingredients.filter((ingredient) =>
+        ingredient.scope === 'global' || ingredient.householdId === queryHouseholdId) });
     }
     if (method === 'POST' && !id) {
       const body = await readBody(req);
@@ -4269,10 +4357,16 @@ async function handleAPI(req, res, url) {
       if (body.householdId && body.householdId !== householdId) return sendError(res, 400, '家庭 ID 不一致');
       if (!state.households.some((household) => household.id === householdId)) return sendError(res, 404, '家庭不存在');
       if (!requirePantryDictionaryAccess(req, res, householdId)) return;
-      const ingredient = normIngredient({ ...body, householdId });
+      const scope = body.scope === 'global' ? 'global' : 'household';
+      if (scope === 'global' && !isHouseAdmin(req, householdId)) return sendError(res, 403, '只有家庭管理员能新增全局原料');
+      const ingredient = normIngredient({ ...body, householdId, scope });
       if (!ingredient || !ingredient.categoryId || !pantryCategoryExists(householdId, ingredient.categoryId)) return sendError(res, 400, '请选择本家庭有效分类');
-      if (state.ingredients.some((item) => item.householdId === householdId && item.name.toLocaleLowerCase() === ingredient.name.toLocaleLowerCase())) {
-        return sendError(res, 409, '这个家庭已经有同名原料');
+      const category = state.pantryCategories.find((item) => item.id === ingredient.categoryId) ||
+        pantryRootCategories().find((item) => item.id === ingredient.categoryId);
+      if (scope === 'global' && category && category.scope !== 'global') return sendError(res, 400, '全局原料必须选择全局分类');
+      if (state.ingredients.some((item) => item.scope === scope &&
+        (scope === 'global' || item.householdId === householdId) && item.name.toLocaleLowerCase() === ingredient.name.toLocaleLowerCase())) {
+        return sendError(res, 409, '当前目录中已经有同名原料');
       }
       state.ingredients.push(ingredient);
       scheduleSave('ingredients');
@@ -4282,22 +4376,31 @@ async function handleAPI(req, res, url) {
       const index = state.ingredients.findIndex((ingredient) => ingredient.id === id);
       if (index < 0) return sendError(res, 404, '原料不存在');
       const existing = state.ingredients[index];
-      if (queryHouseholdId && queryHouseholdId !== existing.householdId) return sendError(res, 403, '不能操作其他家庭的原料');
-      if (!requirePantryDictionaryAccess(req, res, existing.householdId)) return;
+      if (existing.scope === 'global') {
+        if (!isSuperAdmin(req)) return sendError(res, 403, '全局原料由超级管理员维护');
+      } else {
+        if (queryHouseholdId && queryHouseholdId !== existing.householdId) return sendError(res, 403, '不能操作其他家庭的原料');
+        if (!requirePantryDictionaryAccess(req, res, existing.householdId)) return;
+      }
       if (method === 'PUT') {
         const body = await readBody(req);
         if (body.householdId && body.householdId !== existing.householdId) return sendError(res, 400, '不能更改原料所属家庭');
-        const ingredient = normIngredient({ ...existing, ...body, householdId: existing.householdId }, existing);
-        if (!ingredient || !ingredient.categoryId || !pantryCategoryExists(existing.householdId, ingredient.categoryId)) return sendError(res, 400, '请选择本家庭有效分类');
-        const categoryLabel = pantryCategoryLabel(existing.householdId, ingredient.categoryId);
+        if (body.scope && body.scope !== existing.scope) return sendError(res, 400, '不能更改原料作用域');
+        const ingredient = normIngredient({ ...existing, ...body, householdId: existing.householdId, scope: existing.scope }, existing);
+        const scopeHouseholdId = existing.householdId || queryHouseholdId;
+        if (!ingredient || !ingredient.categoryId || !pantryCategoryExists(scopeHouseholdId, ingredient.categoryId)) return sendError(res, 400, '请选择当前作用域有效分类');
+        const category = state.pantryCategories.find((item) => item.id === ingredient.categoryId) || pantryRootCategories().find((item) => item.id === ingredient.categoryId);
+        if (existing.scope === 'global' && category && category.scope !== 'global') return sendError(res, 400, '全局原料必须选择全局分类');
+        const categoryLabel = pantryCategoryLabel(scopeHouseholdId, ingredient.categoryId);
         if (categoryLabel.split(' > ')[0] === '调味干货') ingredient.defaultTrackingMode = 'presence';
-        if (state.ingredients.some((item) => item.id !== id && item.householdId === existing.householdId && item.name.toLocaleLowerCase() === ingredient.name.toLocaleLowerCase())) {
-          return sendError(res, 409, '这个家庭已经有同名原料');
+        if (state.ingredients.some((item) => item.id !== id && item.scope === existing.scope &&
+          (existing.scope === 'global' || item.householdId === existing.householdId) && item.name.toLocaleLowerCase() === ingredient.name.toLocaleLowerCase())) {
+          return sendError(res, 409, '当前目录中已经有同名原料');
         }
         state.ingredients[index] = ingredient;
         scheduleSave('ingredients');
         state.pantry.forEach((pantry) => {
-          if (pantry.householdId !== existing.householdId || pantry.ingredientId !== id) return;
+          if (pantry.ingredientId !== id) return;
           pantry.name = ingredient.name;
           pantry.category = categoryLabel || pantry.category;
           if (ingredient.defaultTrackingMode === 'presence') {
@@ -4407,10 +4510,10 @@ async function handleAPI(req, res, url) {
           ? []
           : state.pantry.filter((p) => p.householdId === visibleHouseholdId),
         ingredients: canReadHouseholdDictionary
-          ? state.ingredients.filter((ingredient) => ingredient.householdId === visibleHouseholdId)
+          ? state.ingredients.filter((ingredient) => ingredient.scope === 'global' || ingredient.householdId === visibleHouseholdId)
           : [],
         pantryCategories: canReadHouseholdDictionary
-          ? state.pantryCategories.filter((category) => category.householdId === visibleHouseholdId)
+          ? state.pantryCategories.filter((category) => category.scope === 'global' || category.householdId === visibleHouseholdId)
           : [],
         plans: fullState
           ? state.plans
@@ -4976,7 +5079,7 @@ async function handleAPI(req, res, url) {
       if (!plan.received || typeof plan.received !== 'object') plan.received = {};
       const requestedIngredientId = safeText(body.ingredientId, 80).trim();
       const linkedIngredient = requestedIngredientId
-        ? state.ingredients.find((ingredient) => ingredient.id === requestedIngredientId && ingredient.householdId === hid)
+        ? state.ingredients.find((ingredient) => ingredient.id === requestedIngredientId && ingredientAvailableInHousehold(ingredient, hid))
         : null;
       if (requestedIngredientId && !linkedIngredient) return sendError(res, 400, '原料不属于当前家庭，请刷新后重试');
       const receivedKey = linkedIngredient ? `id:${linkedIngredient.id}` : `name:${pantryIngredientKey(name)}`;
@@ -5150,7 +5253,7 @@ async function handleAPI(req, res, url) {
       const existing = state.pantry[idx];
       if (!requireAccountHousehold(req, res, existing.householdId)) return;
       const linkedIngredient = existing.ingredientId
-        ? state.ingredients.find((ingredient) => ingredient.id === existing.ingredientId && ingredient.householdId === existing.householdId)
+        ? state.ingredients.find((ingredient) => ingredient.id === existing.ingredientId && ingredientAvailableInHousehold(ingredient, existing.householdId))
         : null;
       const requestedCategory = safeText(body.category, 80).trim();
       if (linkedIngredient && requestedCategory && requestedCategory !== pantryCategoryLabel(existing.householdId, linkedIngredient.categoryId)) {

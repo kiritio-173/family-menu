@@ -6,10 +6,13 @@ const { PUBLISH_FILES, buildPublishPlan, publishDecision } = require('./publish-
 assert.ok(Array.isArray(PUBLISH_FILES), 'publish file list must be exported');
 assert.ok(PUBLISH_FILES.includes('server.js'));
 assert.ok(PUBLISH_FILES.includes('public/app.js'));
+assert.ok(PUBLISH_FILES.includes('public/recipe-ingredient-logic.js'));
 assert.ok(PUBLISH_FILES.includes('public/pantry-logic.js'));
 assert.ok(PUBLISH_FILES.includes('_pantrylogic-test.js'));
 assert.ok(PUBLISH_FILES.includes('build-package.js'));
 assert.ok(PUBLISH_FILES.includes('docs/product/2026-10-18-family-workspace-flow.md'));
+assert.ok(PUBLISH_FILES.includes('docs/superpowers/specs/2026-10-21-recipe-ingredient-picker-design.md'));
+assert.ok(PUBLISH_FILES.includes('docs/superpowers/plans/2026-10-21-unified-recipe-ingredients.md'));
 assert.ok(!PUBLISH_FILES.some((p) => p.startsWith('data/')));
 assert.ok(!PUBLISH_FILES.some((p) => p.startsWith('package/')));
 

@@ -9,6 +9,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const assert = require('assert');
 const http = require('http'); // [14] 起假 AI 服务器用
 const { spawn } = require('child_process');
 
@@ -209,6 +210,103 @@ async function boot(label, writeData) {
 /* ================================================================ */
 
 async function main() {
+  const pantryLogic = require(path.join(ROOT, 'public', 'pantry-logic.js'));
+  const recipeIngredientLogic = require(path.join(ROOT, 'public', 'recipe-ingredient-logic.js'));
+  const ingredientRows = [
+    { id: 'ing-beef', householdId: 'h1', categoryId: 'cat-beef' },
+    { id: 'ing-steak', householdId: 'h1', categoryId: 'cat-steak' },
+    { id: 'ing-egg', householdId: 'h1', categoryId: 'cat-egg' },
+  ];
+  const ingredientCategories = [
+    { id: 'cat-beef', parentId: '' },
+    { id: 'cat-steak', parentId: 'cat-beef' },
+    { id: 'cat-egg', parentId: '' },
+  ];
+  assert.deepStrictEqual(
+    recipeIngredientLogic.filterIngredientsByCategory(ingredientRows, ingredientCategories, 'cat-beef').map((row) => row.id),
+    ['ing-beef', 'ing-steak']
+  );
+  assert.strictEqual(typeof recipeIngredientLogic.filterIngredientsByScope, 'function', '菜谱原料目录应统一按菜谱作用域过滤');
+  assert.deepStrictEqual(
+    recipeIngredientLogic.filterIngredientsByScope([
+      { id: 'global-beef', scope: 'global', householdId: null },
+      { id: 'h1-beef', scope: 'household', householdId: 'h1' },
+      { id: 'h2-beef', scope: 'household', householdId: 'h2' },
+    ], '').map((row) => row.id),
+    ['global-beef'],
+    '共享菜只能使用全局目录'
+  );
+  assert.deepStrictEqual(
+    recipeIngredientLogic.filterIngredientsByScope([
+      { id: 'global-beef', scope: 'global', householdId: null },
+      { id: 'h1-beef', scope: 'household', householdId: 'h1' },
+      { id: 'h2-beef', scope: 'household', householdId: 'h2' },
+    ], 'h1').map((row) => row.id),
+    ['global-beef', 'h1-beef'],
+    '家庭菜只能使用全局和本家庭目录'
+  );
+  assert.strictEqual(typeof recipeIngredientLogic.applyIngredientToRecipeRow, 'function', '新增原料应能关联到触发的通用或做法材料行');
+  const rowTargetDish = {
+    seasonings: [{ name: '旧名', amount: '200 g', ingredientId: '' }],
+    methods: [{ seasonings: [{ name: '另一旧名', amount: '1 块', ingredientId: '' }] }],
+  };
+  assert.strictEqual(recipeIngredientLogic.applyIngredientToRecipeRow(rowTargetDish, 'method:0:0', {
+    id: 'new-steak', name: '牛排', categoryId: 'cat-beef',
+  }), true);
+  assert.deepStrictEqual(rowTargetDish.methods[0].seasonings[0], {
+    name: '牛排', amount: '1 块', ingredientId: 'new-steak', categoryId: 'cat-beef',
+  });
+  assert.strictEqual(rowTargetDish.seasonings[0].name, '旧名', '给做法行新增原料不能改到通用材料行');
+  assert.deepStrictEqual(
+    recipeIngredientLogic.validateAiMatches(
+      [{ rowId: 'row-1', ingredientId: 'ing-steak' }, { rowId: 'row-2', ingredientId: 'foreign-id' }],
+      [{ id: 'row-1', name: '牛排' }, { id: 'row-2', name: '牛里脊' }],
+      [{ id: 'ing-steak', householdId: 'h1' }],
+      'h1'
+    ),
+    [{ rowId: 'row-1', ingredientId: 'ing-steak' }]
+  );
+  assert.deepStrictEqual(
+    recipeIngredientLogic.validateAiMatches(
+      [{ rowId: 'row-1', ingredientId: 'global-beef' }, { rowId: 'row-2', ingredientId: 'foreign-id' }],
+      [{ id: 'row-1', name: '牛肉' }, { id: 'row-2', name: '牛排' }],
+      [{ id: 'global-beef', scope: 'global', householdId: null }, { id: 'foreign-id', scope: 'household', householdId: 'h2' }],
+      'h1'
+    ),
+    [{ rowId: 'row-1', ingredientId: 'global-beef' }]
+  );
+  assert.deepStrictEqual(
+    recipeIngredientLogic.validateAiMatches(
+      [{ rowId: 'row-1', ingredientId: 'household-beef' }],
+      [{ id: 'row-1', name: '牛肉' }],
+      [{ id: 'household-beef', scope: 'household', householdId: 'h1' }],
+      ''
+    ),
+    [],
+    '共享菜匹配必须拒绝家庭本地候选'
+  );
+  assert.strictEqual(typeof recipeIngredientLogic.filterCurrentAiMatches, 'function', 'AI 匹配必须能校验请求后的旧行状态');
+  assert.deepStrictEqual(
+    recipeIngredientLogic.filterCurrentAiMatches(
+      [{ rowId: 'general:0', ingredientId: 'global-beef' }, { rowId: 'general:1', ingredientId: 'global-beef' }],
+      [{ rowId: 'general:0', name: '牛肉', ingredientId: 'old-local-id' }, { rowId: 'general:1', name: '牛排', ingredientId: '' }],
+      [{ rowId: 'general:0', name: '牛肉', ingredientId: 'old-local-id' }, { rowId: 'general:1', name: '牛里脊', ingredientId: '' }]
+    ),
+    [{ rowId: 'general:0', ingredientId: 'global-beef' }],
+    'AI 响应到达后只保留仍然相同且未关联的菜谱材料行'
+  );
+  assert.strictEqual(
+    pantryLogic.inferTrackingMode({ name: '食用油', category: '调味干货', trackingMode: 'quantity', purchaseType: 'staple' }),
+    'quantity'
+  );
+  const noLegacyModeOverride = pantryLogic.aggregatePlanMaterials([
+    { name: '食用油', ingredientId: 'ing-oil', amount: '2 瓶', trackingMode: 'quantity', purchaseType: 'staple' },
+  ], {
+    parseAmount: () => ({ quantity: 2, unit: '瓶' }),
+  })[0];
+  assert.strictEqual(noLegacyModeOverride.trackingMode, 'quantity');
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(noLegacyModeOverride, 'purchaseType'), false);
+
   fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 3 });
   fs.mkdirSync(TMP, { recursive: true });
 
@@ -1199,6 +1297,16 @@ async function main() {
   ok('计划收到已入库但用量不明确的状态', /it\.received[\s\S]{0,120}uncertain/.test(appSource));
   ok('选择调味干货时自动切换有无方式', /function applyFoodCategoryDefaults\(category\)[\s\S]{0,280}调味干货[\s\S]{0,180}tracking\.value\s*=\s*'presence'/.test(appSource));
   ok('计划模式从家庭原料字典读取库存方式', /const ingredient = ingredientById\(row\.ingredientId\)/.test(appSource) && /ingredient && ingredient\.defaultTrackingMode/.test(appSource));
+  ok('菜谱原料编辑使用分类和字典选择器', /function recipeIngredientRowHtml\(/.test(appSource) && /data-act="season-category"/.test(appSource) && /data-act="season-ingredient"/.test(appSource));
+  ok('通用和做法材料行均提供就地新增原料入口', /data-act="\$\{action\}-create"/.test(appSource) && /'season-create'\(el\)/.test(appSource) && /'mseason-create'\(el\)/.test(appSource));
+  ok('就地新增保留空白材料行及已选分类', /function collectDish\(preserveEmptyRows = false\)/.test(appSource) && /collectDish\(true\)/.test(appSource));
+  ok('新增原料回填触发行并保留原用量', /applyIngredientToRecipeRow\(dish, target\.rowId, ingredient\)/.test(appSource));
+  ok('旧材料关联检测按菜谱作用域过滤原料 ID', /function unresolvedRecipeIngredients\(dish\)[\s\S]{0,260}const available = recipeIngredients\(dish\)/.test(appSource));
+  ok('共享菜谱编辑器只展示全局分类和原料', /function recipeIngredientRowHtml\([\s\S]{0,220}category\.scope === 'global' \|\| category\.builtin/.test(appSource) && /RecipeIngredientLogic\.filterIngredientsByScope/.test(appSource));
+  ok('AI 匹配展示和应用前都检查材料行是否变更', /filterCurrentAiMatches\([\s\S]{0,260}unresolvedRecipeIngredients/.test(appSource) && /const validMatches = new Set\(RecipeIngredientLogic\.filterCurrentAiMatches/.test(appSource));
+  ok('AI 确认只接受当前菜谱作用域中可用的候选', /const availableIds = new Set\(recipeIngredients\(dish\)\.map/.test(appSource) && /!availableIds\.has\(candidate\.id\)/.test(appSource));
+  ok('菜谱材料选择区不再提供旧采购类型', !dishEditorSource.includes('seasoningTypeSelect') && !dishEditorSource.includes('season-type'));
+  ok('菜单和库存入口均提供全局原料创建范围', /quickIngredientScope/.test(appSource) && /fFoodIngredientScope/.test(appSource));
   ok('旧菜谱无原料 ID 时优先使用当前库存分类', /resolveIngredientCategory\([\s\S]{0,220}stockCategory/.test(appSource));
   const pantryLogicSource = fs.readFileSync(path.join(ROOT, 'public', 'pantry-logic.js'), 'utf8');
   ok('计划有无型食材不汇总菜谱用量', /if\s*\(item\.trackingMode\s*===\s*'presence'\)\s*return;/.test(pantryLogicSource));
@@ -2449,6 +2557,16 @@ async function main() {
   eq('内置分类可用于新增子分类', rootCategories.status, 200);
   const meatRoot = (rootCategories.body.data || []).find((c) => c.name === '肉类');
   ok('肉类内置根分类存在', !!meatRoot, rootCategories.body.data);
+  const globalMeatCategory = await req('POST', `/api/pantry-categories?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '全局肉品测试类', parentId: meatRoot && meatRoot.id, scope: 'global',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('家庭管理员可创建全局子分类', globalMeatCategory.status, 200);
+  eq('全局子分类不属于特定家庭', globalMeatCategory.body.data?.householdId, null);
+  const categoriesVisibleInB = await req('GET', `/api/pantry-categories?householdId=${encodeURIComponent(ingredientHouseBId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  ok('全局子分类对其他家庭可见', categoriesVisibleInB.body.data?.some((c) => c.id === globalMeatCategory.body.data?.id));
+  eq('普通成员不能创建全局子分类', (await req('POST', `/api/pantry-categories?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '成员全局分类', parentId: meatRoot && meatRoot.id, scope: 'global',
+  }, undefined, undefined, undefined, undefined, ingredientMember.token)).status, 403);
   eq('不能新增与内置根分类重名的子分类', (await req('POST', `/api/pantry-categories?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
     name: '肉类', parentId: meatRoot && meatRoot.id,
   }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 409);
@@ -2460,6 +2578,7 @@ async function main() {
     name: 'B 家肉类子分类', parentId: meatRoot && meatRoot.id,
   }, undefined, undefined, undefined, undefined, ingredientOwner.token);
   eq('另一家庭能创建自己的子分类', householdBCategory.status, 200);
+  ok('其他家庭看不到 B 家本地子分类', !categoriesVisibleInB.body.data?.some((c) => c.id === householdBCategory.body.data?.id));
   const beefCategory = await req('POST', `/api/pantry-categories?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
     name: '牛肉', parentId: meatRoot && meatRoot.id,
   }, undefined, undefined, undefined, undefined, ingredientOwner.token);
@@ -2477,6 +2596,29 @@ async function main() {
     name: '牛排', aliases: [], categoryId, defaultTrackingMode: 'quantity', defaultUnit: 'g',
   }, undefined, undefined, undefined, undefined, ingredientOwner.token);
   eq('管理员能创建家庭原料', tenderloin.status, 200);
+  const globalIngredient = await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '全局牛肉测试品', aliases: [], categoryId: globalMeatCategory.body.data?.id, defaultTrackingMode: 'quantity', scope: 'global',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('家庭管理员可创建全局原料', globalIngredient.status, 200);
+  eq('全局原料不属于特定家庭', globalIngredient.body.data?.householdId, null);
+  const ingredientsVisibleInB = await req('GET', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseBId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  ok('全局原料对其他家庭可见', ingredientsVisibleInB.body.data?.some((i) => i.id === globalIngredient.body.data?.id));
+  ok('其他家庭看不到 A 家本地原料', !ingredientsVisibleInB.body.data?.some((i) => i.id === tenderloin.body.data?.id));
+  eq('普通成员不能创建全局原料', (await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '成员全局原料', aliases: [], categoryId: globalMeatCategory.body.data?.id, defaultTrackingMode: 'quantity', scope: 'global',
+  }, undefined, undefined, undefined, undefined, ingredientMember.token)).status, 403);
+  eq('家庭管理员不能直接编辑全局原料', (await req('PUT', `/api/ingredients/${globalIngredient.body.data.id}?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '擅自改名',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 403);
+  eq('家庭管理员不能删除全局原料', (await req('DELETE', `/api/ingredients/${globalIngredient.body.data.id}?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 403);
+  const globalStockA = await req('POST', '/api/pantry', {
+    householdId: ingredientHouseAId, name: '全局牛肉测试品', ingredientId: globalIngredient.body.data.id, quantity: 120, unit: 'g',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const globalStockB = await req('POST', '/api/pantry', {
+    householdId: ingredientHouseBId, name: '全局牛肉测试品', ingredientId: globalIngredient.body.data.id, quantity: 40, unit: 'g',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('多个家庭可以引用同一全局原料记录库存', [globalStockA.status, globalStockB.status], [200, 200]);
+  eq('同一个全局原料的库存仍按家庭分离', [globalStockA.body.data.householdId, globalStockB.body.data.householdId, globalStockA.body.data.quantity, globalStockB.body.data.quantity], [ingredientHouseAId, ingredientHouseBId, 120, 40]);
   eq('未认证请求不能编辑原料', (await put(`/api/ingredients/${tenderloin.body.data.id}?householdId=${encodeURIComponent(ingredientHouseAId)}`, { name: '未认证改名' })).status, 403);
   eq('未认证请求不能删除原料', (await del(`/api/ingredients/${tenderloin.body.data.id}?householdId=${encodeURIComponent(ingredientHouseAId)}`)).status, 403);
   eq('同分类不同名称可创建原料', steak.status, 200);
@@ -2582,6 +2724,16 @@ async function main() {
     name: '牛排菜谱', category: '家常菜', seasonings: [{ name: '牛排', amount: '200 g', ingredientId: steak.body.data.id }],
   }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 200);
   eq('菜谱引用中的原料不能删除', (await req('DELETE', `/api/ingredients/${steak.body.data.id}?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 409);
+  const globalIngredientDish = await req('POST', '/api/dishes', {
+    name: '共享菜引用全局原料', category: '家常菜', seasonings: [{ name: '全局牛肉测试品', amount: '100 g', ingredientId: globalIngredient.body.data.id }],
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('共享菜谱可以引用全局原料', globalIngredientDish.status, 200);
+  eq('共享菜谱不能引用家庭本地原料', (await req('POST', '/api/dishes', {
+    name: '共享菜引用本地原料', category: '家常菜', seasonings: [{ name: '牛里脊', amount: '100 g', ingredientId: tenderloin.body.data.id }],
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 400);
+  eq('另一家庭菜谱可以引用全局原料', (await req('POST', `/api/my-dishes?householdId=${encodeURIComponent(ingredientHouseBId)}`, {
+    name: 'B 家使用全局原料', category: '家常菜', seasonings: [{ name: '全局牛肉测试品', amount: '100 g', ingredientId: globalIngredient.body.data.id }],
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 200);
   const householdRecipeCategory = await req('POST', `/api/my-categories?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
     name: '家庭私有菜谱分类',
   }, undefined, undefined, undefined, undefined, ingredientOwner.token);
@@ -2599,11 +2751,13 @@ async function main() {
     name: '共享原料菜谱', category: '家常菜', seasonings: [{ name: '牛排', amount: '200 g' }],
   }, undefined, undefined, undefined, undefined, ingredientOwner.token);
   const adoptedIngredientRecipe = await req('POST', `/api/my-dishes/${sharedIngredientRecipe.body.data.id}/adopt?householdId=${encodeURIComponent(ingredientHouseAId)}`, {}, undefined, undefined, undefined, undefined, ingredientOwner.token);
-  eq('共享菜加入家庭时按名称映射家庭原料', adoptedIngredientRecipe.body.data.seasonings[0].ingredientId, steak.body.data.id);
+  eq('共享菜加入家庭时不关联同名家庭原料', adoptedIngredientRecipe.body.data.seasonings[0].ingredientId || '', '');
+  const adoptedGlobalRecipe = await req('POST', `/api/my-dishes/${globalIngredientDish.body.data.id}/adopt?householdId=${encodeURIComponent(ingredientHouseAId)}`, {}, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('共享菜加入家庭保留全局原料 ID', adoptedGlobalRecipe.body.data.seasonings[0].ingredientId, globalIngredient.body.data.id);
   const externalIngredientAccount = await registerAccount('原料字典外部账号');
   eq('未加入成员不能读取家庭原料', (await req('GET', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, externalIngredientAccount.token)).status, 403);
   const scopedIngredientState = await req('GET', `/api/state?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
-  ok('家庭状态只含本家庭原料', scopedIngredientState.body.data.ingredients?.some((i) => i.name === '牛里脊') && !scopedIngredientState.body.data.ingredients?.some((i) => i.name === 'B 家独有食材'));
+  ok('家庭状态包含全局和本地原料但不含其他家庭原料', scopedIngredientState.body.data.ingredients?.some((i) => i.name === '牛里脊') && scopedIngredientState.body.data.ingredients?.some((i) => i.id === globalIngredient.body.data.id) && !scopedIngredientState.body.data.ingredients?.some((i) => i.name === 'B 家独有食材'));
   eq('未选择家庭状态不暴露家庭原料', (await req('GET', '/api/state', undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).body.data.ingredients, []);
   eq('未选择家庭状态不暴露自定义分类', (await req('GET', '/api/state', undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).body.data.pantryCategories, []);
   const ingredientSuper = await authorizeSuper('2468', ingredientOwner.token);
@@ -2615,13 +2769,13 @@ async function main() {
   const ingredientRestore = await reqRaw('POST', '/api/import', ingredientBackup.buf, ingredientSuper.token);
   eq('原料字典备份导入成功', ingredientRestore.status, 200);
   const restoredIngredientState = await req('GET', `/api/state?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
-  ok('备份往返保留家庭原料和分类', restoredIngredientState.body.data.ingredients?.some((i) => i.name === '牛里脊') && restoredIngredientState.body.data.pantryCategories?.some((c) => c.id === categoryId));
+  ok('备份往返保留全局及家庭原料和分类', restoredIngredientState.body.data.ingredients?.some((i) => i.name === '牛里脊') && restoredIngredientState.body.data.ingredients?.some((i) => i.id === globalIngredient.body.data.id) && restoredIngredientState.body.data.pantryCategories?.some((c) => c.id === categoryId) && restoredIngredientState.body.data.pantryCategories?.some((c) => c.id === globalMeatCategory.body.data.id));
   ok('备份往返保留菜谱和库存原料引用', restoredIngredientState.body.data.pantry?.some((p) => p.ingredientId === tenderloin.body.data.id) && restoredIngredientState.body.data.dishes?.some((dish) => dish.seasonings.some((s) => s.ingredientId === steak.body.data.id)));
   ok('备份往返保留双向复制来源关系', restoredIngredientState.body.data.dishes?.some((dish) => dish.id === scopedCopyToShared.body.data.id && dish.copySourceDishId === scopedSource.body.data.id));
   eq('被原料引用的子分类不能删除', (await req('DELETE', `/api/pantry-categories/${categoryId}?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 409);
   eq('解散家庭时原料和自定义分类一并清理', (await req('DELETE', `/api/households/${ingredientHouseAId}`, undefined, ingredientSuper.token, undefined, undefined, undefined, ingredientOwner.token)).status, 200);
   const afterIngredientDissolve = await req('GET', `/api/state?householdId=${encodeURIComponent(ingredientHouseBId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
-  ok('解散家庭后另一家庭原料仍在', afterIngredientDissolve.body.data.ingredients?.some((i) => i.name === 'B 家独有食材') && !afterIngredientDissolve.body.data.ingredients?.some((i) => i.name === '牛里脊'));
+  ok('解散家庭后另一家庭原料仍在且全局目录保留', afterIngredientDissolve.body.data.ingredients?.some((i) => i.name === 'B 家独有食材') && afterIngredientDissolve.body.data.ingredients?.some((i) => i.id === globalIngredient.body.data.id) && !afterIngredientDissolve.body.data.ingredients?.some((i) => i.name === '牛里脊'));
   await stop(ingredientInst);
 
   /* ---------- 旧菜谱与库存原料关联迁移 ---------- */
@@ -2639,7 +2793,11 @@ async function main() {
     }]));
     fs.writeFileSync(path.join(dataDir, 'dishes.json'), JSON.stringify([{
       id: 'd_legacy-ingredients', householdId: 'h_legacy-ingredients', name: '旧菜谱', category: '家常菜',
-      seasonings: [{ name: '牛里脊', amount: '200 g', purchaseType: 'purchase' }],
+      seasonings: [
+        { name: '牛里脊', amount: '200 g', purchaseType: 'purchase' },
+        { name: '牛排', amount: '1 块', purchaseType: 'staple' },
+        { name: '食盐', amount: '适量', purchaseType: 'purchase' },
+      ],
       methods: [{ name: '煎制', steps: ['煎熟'], seasonings: [{ name: '牛排', amount: '1 块' }] }],
     }]));
     fs.writeFileSync(path.join(dataDir, 'pantry.json'), JSON.stringify([
@@ -2664,11 +2822,16 @@ async function main() {
   eq('启动迁移为旧菜谱原料补 ingredientId', !!tenderloinRef, true);
   eq('启动迁移为做法级原料补 ingredientId', !!steakRef, true);
   eq('启动迁移为旧库存补 ingredientId', migratedPantry?.ingredientId, tenderloinRef);
-  eq('旧数据原料用量和采购方式保留', [migratedDish?.seasonings[0]?.amount, migratedDish?.seasonings[0]?.purchaseType], ['200 g', 'purchase']);
+  eq('旧菜谱原文和旧字段读取兼容', [migratedDish?.seasonings[0]?.amount, migratedDish?.seasonings[0]?.purchaseType], ['200 g', 'purchase']);
   eq('旧库存数量单位备注保留', [migratedPantry?.quantity, migratedPantry?.unit, migratedPantry?.note], [500, 'g', '真空包装']);
   const migrationLogin = await loginAccount('旧用户');
+  const legacyDishSaved = await req('PUT', `/api/my-dishes/${migratedDish.id}?householdId=h_legacy-ingredients`, migratedDish, undefined, undefined, undefined, undefined, migrationLogin.token);
+  eq('旧菜谱下一次保存时移除逐行采购方式', [legacyDishSaved.body.data?.seasonings[0]?.purchaseType, legacyDishSaved.body.data?.seasonings[1]?.purchaseType], [undefined, undefined]);
   const migrationIngredients = (await req('GET', '/api/ingredients?householdId=h_legacy-ingredients', undefined, undefined, undefined, undefined, undefined, migrationLogin.token)).body.data || [];
-  eq('不同材料不会因同类而合并', [tenderloinRef !== steakRef, migrationIngredients.length], [true, 4]);
+  eq('旧家庭原料仍保留家庭本地作用域', migrationIngredients.find((item) => item.name === '牛里脊')?.scope, 'household');
+  eq('旧 purchaseType 不能覆盖牛排的数量管理方式', migrationIngredients.find((item) => item.name === '牛排')?.defaultTrackingMode, 'quantity');
+  eq('旧 purchaseType 不能覆盖食盐的有无管理方式', migrationIngredients.find((item) => item.name === '食盐')?.defaultTrackingMode, 'presence');
+  eq('不同材料不会因同类而合并', [tenderloinRef !== steakRef, migrationIngredients.length], [true, 5]);
   const migrationForeignIngredient = { id: 'ing_other-ingredients' };
   eq('菜谱不能引用同家庭之外的原料 ID', (await req('POST', '/api/my-dishes?householdId=h_legacy-ingredients', {
     name: '跨家庭材料菜', category: '家常菜', seasonings: [{ name: '外部牛排', amount: '100 g', ingredientId: migrationForeignIngredient.id }],

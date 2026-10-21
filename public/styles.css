@@ -1515,4 +1515,7 @@ a { color: var(--primary-dark); }
   .join-request-row { flex-wrap: wrap; }
   .join-request-actions { width: 100%; padding-left: 40px; justify-content: flex-start; }
   .dish-tools .btn { padding-left: 7px; padding-right: 7px; }
+  .recipe-ingredient-row { grid-template-columns: minmax(0, 1fr) auto !important; }
+  .recipe-ingredient-row select:nth-child(1), .recipe-ingredient-row select:nth-child(2) { grid-column: 1 / -1; }
+  .recipe-ingredient-row input { grid-column: 1; }
 }
