@@ -504,6 +504,16 @@ async function main() {
     (await post('/api/plans/receive', {
       householdId: h301.id, weekOf: receiveWeek, name: '白糖', quantity: 1, unit: '袋', category: '调味干货',
     })).status, 409);
+  const repeatReceipt = {
+    householdId: h301.id, weekOf: receiveWeek, name: '后续新增需求测试', quantity: 2, unit: 'kg',
+    category: '肉类', requestId: 'receipt-request-a',
+  };
+  eq('计划食材新增缺口允许再次入库', (await post('/api/plans/receive', repeatReceipt)).status, 200);
+  eq('同一入库请求编号重试被拦截', (await post('/api/plans/receive', repeatReceipt)).status, 409);
+  const repeatReceiptAgain = await post('/api/plans/receive', { ...repeatReceipt, quantity: 3, requestId: 'receipt-request-b' });
+  eq('同食材的新入库请求可继续累加返回 200', repeatReceiptAgain.status, 200);
+  if (repeatReceiptAgain.status === 200) eq('同食材的新入库请求累加库存', repeatReceiptAgain.body.data.item.quantity, 5);
+  if (repeatReceiptAgain.status === 200) await del(`/api/pantry/${repeatReceiptAgain.body.data.item.id}`);
   await del(`/api/pantry/${whiteSugar.id}`);
   await del(`/api/pantry/${salt.id}`);
 
@@ -1137,7 +1147,15 @@ async function main() {
   ok('每条更新记录都列了具体改了什么', v.releases.every((r) => Array.isArray(r.items) && r.items.length), v.releases.map((r) => r.items && r.items.length));
   ok('采购入库不调用原生 prompt', !fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8').includes('window.prompt'));
   const appSource = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
-  ok('计划采购按调料/普通食材分组', /purchaseShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning\)/.test(appSource) && /stapleShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*it\.isSeasoning\)/.test(appSource));
+  ok('计划采购按调料/普通食材分组', /purchaseShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning\s*&&/.test(appSource) && /stapleShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*it\.isSeasoning\)/.test(appSource));
+  ok('计划采购只列当前缺口或需确认项目', /purchaseShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning\s*&&\s*stockAssessment\(it\)\.key\s*!==\s*'enough'\)/.test(appSource));
+  ok('库存已覆盖时仍显示无需采购汇总', /purchaseMaterials\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning\)/.test(appSource) && /没有待购食材 · 库存可覆盖/.test(appSource));
+  ok('计划采购状态不受旧的名字勾选或入库标记覆盖', /const stateKey\s*=\s*planMode\s*\?\s*assessment\.key\s*:\s*it\.received/.test(appSource));
+  ok('计划批量勾选与家庭已买状态分离', /function activeShopChecks\(\)/.test(appSource) && /return S\.shopContext\s*&&\s*S\.shopContext\.kind\s*===\s*'plan'\s*\?\s*S\.planShopSelected\s*:\s*S\.shoppingChecked/.test(appSource));
+  ok('采购折叠状态按栏目范围隔离', /function shoppingGroupOpen\(category, scope\)/.test(appSource) && /data-scope="\$\{esc\(scope\s*\|\|\s*'default'\)\}"/.test(appSource));
+  ok('计划批量操作按栏目范围筛选条目', /function shopItemsForScope\(scope\)/.test(appSource) && /shopItemsForScope\(scope\)/.test(appSource));
+  ok('入库进行中对同一食材加锁', /S\.stocking\.has\(lockKey\)/.test(appSource) && /S\.stocking\.add\(lockKey\)/.test(appSource));
+  ok('计划入库携带幂等请求编号', /requestId:\s*\(globalThis\.crypto\s*&&\s*crypto\.randomUUID\)/.test(appSource));
   const pantryLogicSource = fs.readFileSync(path.join(ROOT, 'public', 'pantry-logic.js'), 'utf8');
   ok('计划有无型食材不汇总菜谱用量', /if\s*\(item\.trackingMode\s*===\s*'presence'\)\s*return;/.test(pantryLogicSource));
   ok('库存逻辑脚本先于应用脚本加载', /pantry-logic\.js[\s\S]*app\.js/.test(fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8')));

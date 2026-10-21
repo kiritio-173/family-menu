@@ -1761,6 +1761,9 @@ function normPlan(input, prev) {
     received: input.received && typeof input.received === 'object'
       ? input.received
       : (base.received && typeof base.received === 'object' ? base.received : {}),
+    receiveRequests: input.receiveRequests && typeof input.receiveRequests === 'object'
+      ? input.receiveRequests
+      : (base.receiveRequests && typeof base.receiveRequests === 'object' ? base.receiveRequests : {}),
     createdAt: base.createdAt || input.createdAt || nowISO(),
     updatedAt: nowISO(),
   };
@@ -4837,7 +4840,7 @@ async function handleAPI(req, res, url) {
   if (route[0] === 'plans') {
     const id = route[1];
 
-    // 计划里购买完成后入库：同一周同一食材只处理一次，并累加到已有库存。
+    // 计划采购可以因新增缺口再次入库；请求编号保证同一次提交不会重复入账。
     if (method === 'POST' && route[1] === 'receive') {
       const body = await readBody(req);
       const hid = resolveHouseholdId(body.householdId);
@@ -4851,9 +4854,11 @@ async function handleAPI(req, res, url) {
       const plan = findPlan(hid, wk, false);
       if (!plan) return sendError(res, 404, '这一周还没有计划');
       if (!plan.received || typeof plan.received !== 'object') plan.received = {};
-      // 计划里同一食材无论实际购买时选了哪种包装单位，都只允许处理一次。
       const receivedKey = pantryIngredientKey(name);
-      if (plan.received[receivedKey]) return sendError(res, 409, '本计划这项已经入库，不能重复添加');
+      if (!plan.receiveRequests || typeof plan.receiveRequests !== 'object') plan.receiveRequests = {};
+      const requestId = safeText(body.requestId, 120).trim();
+      const requestKey = requestId || `legacy:${receivedKey}`;
+      if (plan.receiveRequests[requestKey]) return sendError(res, 409, '这次入库请求已经处理，请刷新库存');
       const item = normPantryItem({
         householdId: hid,
         name,
@@ -4865,6 +4870,7 @@ async function handleAPI(req, res, url) {
       });
       const stored = addPantryQuantity(item);
       plan.received[receivedKey] = nowISO();
+      plan.receiveRequests[requestKey] = nowISO();
       plan.updatedAt = nowISO();
       scheduleSave('pantry');
       scheduleSave('plans');

@@ -23,6 +23,9 @@ const S = {
   noteSticker: '', // 写留言时挑的贴纸
   shopList: [], // 当前页面渲染出来的那张买菜清单，批量入库时要用
   shopContext: null, // 当前清单来源：计划入库需要带周次，点餐页则为空
+  stocking: new Set(), // 正在提交的库存项目，阻止快速重复点击
+  planShopSelected: new Set(), // 计划采购仅用于当前周的批量操作选择
+  planShopSelectionWeek: '',
   orderPickSel: new Set(), // 点餐弹层里勾中的几道菜
   planPickSel: new Set(), // 计划弹层里勾中的几道菜
   planPickWeek: '', // 计划弹层是给哪一周开的
@@ -1648,8 +1651,20 @@ function pickPreview(names, unit) {
 }
 
 /** 当前这张买菜清单里勾上了哪几样（点餐页和计划页是两张不同的单子） */
-function shopCheckedItems() {
-  return (S.shopList || []).filter((it) => S.shoppingChecked.has(it.name));
+function shopItemsForScope(scope) {
+  const list = S.shopList || [];
+  if (scope === 'plan-purchase') return list.filter((it) => !it.isSeasoning);
+  if (scope === 'plan-seasonings') return list.filter((it) => it.isSeasoning);
+  return list;
+}
+
+function shopCheckedItems(scope) {
+  const selected = activeShopChecks();
+  return shopItemsForScope(scope).filter((it) => selected.has(it.name));
+}
+
+function activeShopChecks() {
+  return S.shopContext && S.shopContext.kind === 'plan' ? S.planShopSelected : S.shoppingChecked;
 }
 
 /** 「已买」的勾要存到服务端，刷新页面才不会丢 */
@@ -1675,6 +1690,17 @@ async function setShoppingStatus(name, state) {
  * 单条「入库」和批量「全部入库」共用这一份，免得两处逻辑走偏。
  */
 async function stockOne(name, parts, options) {
+  const lockKey = `${S.shopContext?.weekOf || 'shopping'}::${ingredientMatchKey(name)}`;
+  if (S.stocking.has(lockKey)) return null;
+  S.stocking.add(lockKey);
+  try {
+    return await stockOneUnlocked(name, parts, options);
+  } finally {
+    S.stocking.delete(lockKey);
+  }
+}
+
+async function stockOneUnlocked(name, parts, options) {
   const opts = options || {};
   const item = opts.item || (S.shopList || []).find((x) => x.name === name) || null;
   if (item && item.trackingMode === 'presence') {
@@ -1727,6 +1753,9 @@ async function stockOne(name, parts, options) {
       category,
       quantity,
       unit,
+      requestId: (globalThis.crypto && crypto.randomUUID)
+        ? globalThis.crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       note: '从计划采购入库',
     });
   } else {
@@ -1741,7 +1770,9 @@ async function stockOne(name, parts, options) {
       addToExisting: true,
     });
   }
-  if (S.householdId) {
+  if (context && context.kind === 'plan') {
+    S.planShopSelected.delete(name);
+  } else if (S.householdId) {
     await api('PUT', '/api/shopping-status', { householdId: S.householdId, name, state: 'needed' });
     S.shoppingChecked.delete(name);
   }
@@ -2635,22 +2666,24 @@ function buildShoppingList() {
  * 勾上一个就冒出这条工具条，买完一袋一袋点「全部入库」，入库完自动清掉勾选。
  * 多造一个「选中但没买」的概念反而更容易点错。
  */
-function shopBatchBar(list) {
-  const checked = list.filter((it) => S.shoppingChecked.has(it.name));
+function shopBatchBar(list, scope) {
+  const selected = activeShopChecks();
+  const checked = list.filter((it) => selected.has(it.name));
   if (!checked.length) return '';
   const allOn = checked.length === list.length;
   const canStock = checked.some((it) => stockAssessment(it).key !== 'enough');
   return `<div class="pick-bar">
-    <button class="btn ghost sm" data-act="shop-all" data-on="${allOn ? '0' : '1'}">${allOn ? '☑ 全不勾' : '☐ 全勾'}</button>
+    <button class="btn ghost sm" data-act="shop-all" data-scope="${esc(scope || 'default')}" data-on="${allOn ? '0' : '1'}">${allOn ? '☑ 全不勾' : '☐ 全勾'}</button>
     <span class="pick-count">已勾 ${checked.length} / ${list.length}</span>
-    <button class="btn soft sm" data-act="shop-stock" ${canStock ? '' : 'disabled'}>🧊 全部入库</button>
-    <button class="btn ghost sm" data-act="shop-copy">复制勾中的</button>
-    <button class="btn ghost sm" data-act="shop-uncheck">取消勾选</button>
+    <button class="btn soft sm" data-act="shop-stock" data-scope="${esc(scope || 'default')}" ${canStock ? '' : 'disabled'}>🧊 全部入库</button>
+    <button class="btn ghost sm" data-act="shop-copy" data-scope="${esc(scope || 'default')}">复制勾中的</button>
+    <button class="btn ghost sm" data-act="shop-uncheck" data-scope="${esc(scope || 'default')}">取消勾选</button>
   </div>`;
 }
 
-function shoppingGroupOpen(category) {
-  return S.shoppingGroups[category] !== false;
+function shoppingGroupOpen(category, scope) {
+  const key = `${scope || 'default'}::${category}`;
+  return S.shoppingGroups[key] !== false;
 }
 
 function shopItemHtml(it) {
@@ -2658,9 +2691,12 @@ function shopItemHtml(it) {
   const assessment = stockAssessment(it);
   const planMode = S.shopContext && S.shopContext.kind === 'plan';
   const inventoryComplete = planMode && assessment.key === 'enough';
-  const stateKey = it.received
-    ? 'received'
-    : inventoryComplete || (done && ['needed', 'staple', 'uncertain'].includes(assessment.key))
+  const selected = planMode ? S.planShopSelected.has(it.name) : done;
+  const stateKey = planMode
+    ? assessment.key
+    : it.received
+      ? 'received'
+      : (inventoryComplete || (done && ['needed', 'staple', 'uncertain'].includes(assessment.key)))
       ? 'completed'
       : assessment.key;
   const stateLabel = {
@@ -2688,8 +2724,8 @@ function shopItemHtml(it) {
     ? ''
     : `<button class="btn soft sm" data-act="stock-it" data-name="${esc(it.name)}"
          data-parts="${esc(it.parts.join('|'))}">入库</button>`;
-  const checked = done || inventoryComplete || stateKey === 'received';
-  const rowDone = checked || (stateKey === 'completed' && done);
+  const checked = planMode ? selected || inventoryComplete : done || stateKey === 'received';
+  const rowDone = planMode ? inventoryComplete : checked || (stateKey === 'completed' && done);
   return `<div class="shop-item ${rowDone ? 'done' : ''} shop-state-${stateKey}">
     <div class="shop-check" role="checkbox" tabindex="0" aria-checked="${checked}"
       aria-label="${esc(it.name)} 是否已买" data-act="toggle-shop" data-name="${esc(it.name)}">✓</div>
@@ -2701,21 +2737,22 @@ function shopItemHtml(it) {
   </div>`;
 }
 
-function shopGroupHtml(category, items) {
-  const open = shoppingGroupOpen(category);
+function shopGroupHtml(category, items, scope) {
+  const open = shoppingGroupOpen(category, scope);
   const ids = items.map((it) => it.name);
-  const selected = ids.filter((name) => S.shoppingChecked.has(name));
+  const selectedSet = activeShopChecks();
+  const selected = ids.filter((name) => selectedSet.has(name));
   const allOn = ids.length > 0 && selected.length === ids.length;
-  const need = items.filter((it) => ['needed', 'shortage'].includes(stockAssessment(it).key)).length;
+  const need = items.filter((it) => stockAssessment(it).key !== 'enough').length;
   return `<section class="category-group shop-category-group ${open ? 'is-open' : 'is-closed'}">
     <div class="category-group-head">
-      <button class="category-group-toggle" data-act="toggle-shopping-group" data-cat="${esc(category)}" aria-expanded="${open}">
+      <button class="category-group-toggle" data-act="toggle-shopping-group" data-cat="${esc(category)}" data-scope="${esc(scope || 'default')}" aria-expanded="${open}">
         <span class="category-group-caret">${open ? '⌄' : '›'}</span>
         <span class="category-group-title">${catEmoji(category)} ${esc(category)}</span>
         <span class="category-group-count">${items.length} 样${need ? ` · ${need} 待补` : ''}</span>
       </button>
-      <button class="category-group-select" data-act="select-shopping-group" data-cat="${esc(category)}" data-on="${allOn ? '0' : '1'}" role="checkbox" aria-checked="${allOn}">${allOn ? '☑' : '☐'} 全选</button>
-      <button class="btn soft sm category-group-stock" data-act="stock-shopping-group" data-cat="${esc(category)}" ${need ? '' : 'disabled'}>本组入库</button>
+      <button class="category-group-select" data-act="select-shopping-group" data-cat="${esc(category)}" data-scope="${esc(scope || 'default')}" data-on="${allOn ? '0' : '1'}" role="checkbox" aria-checked="${allOn}">${allOn ? '☑' : '☐'} 全选</button>
+      <button class="btn soft sm category-group-stock" data-act="stock-shopping-group" data-cat="${esc(category)}" data-scope="${esc(scope || 'default')}" ${need ? '' : 'disabled'}>本组入库</button>
     </div>
     ${open ? `<div class="category-group-body">${items.map(shopItemHtml).join('')}</div>` : ''}
   </section>`;
@@ -2751,7 +2788,7 @@ function shopListHtml(list, opts) {
       <button class="btn ghost sm" style="margin-left:auto" data-act="copy-shopping" data-scope="${esc(o.scope || '')}">复制</button>
     </div>`;
   const groups = groupedByCategory(list, (it) => ingredientCategory(it.name, it.stock));
-  return `${head}${shopBatchBar(list)}${groups.map(([category, items]) => shopGroupHtml(category, items)).join('')}
+  return `${head}${shopBatchBar(list, o.groupScope)}${groups.map(([category, items]) => shopGroupHtml(category, items, o.groupScope)).join('')}
     ${o.hint ? `<p class="section-sub" style="margin-top:6px">${esc(o.hint)}</p>` : ''}`;
 }
 
@@ -3071,6 +3108,10 @@ function planRow(it) {
 
 function viewPlan() {
   const week = planWeek();
+  if (S.planShopSelectionWeek !== week) {
+    S.planShopSelected.clear();
+    S.planShopSelectionWeek = week;
+  }
   S.shopList = [];
   S.shopContext = { kind: 'plan', weekOf: week };
   const offset = planWeekOffset(week);
@@ -3089,7 +3130,8 @@ function viewPlan() {
   shop.forEach((it) => {
     it.received = Boolean(received[shoppingIngredientKey(it.name)]);
   });
-  const purchaseShop = shop.filter((it) => !it.isSeasoning);
+  const purchaseMaterials = shop.filter((it) => !it.isSeasoning);
+  const purchaseShop = shop.filter((it) => !it.isSeasoning && stockAssessment(it).key !== 'enough');
   const stapleShop = shop.filter((it) => it.isSeasoning);
   const missing = purchaseShop.filter((it) => ['needed', 'shortage'].includes(stockAssessment(it).key));
 
@@ -3136,17 +3178,18 @@ function viewPlan() {
   }
 
   const shopSection = items.length
-    ? `${purchaseShop.length || stapleShop.length ? `<div class="section-head">
-        <h2 class="section-title">食材采购</h2>
-        <span class="section-sub">${purchaseShop.length ? `${purchaseShop.length} 样食材${missing.length ? ` · ${missing.length} 样库存不足` : ' · 库存可覆盖'}` : '没有需要采购的食材'}</span>
+    ? `${purchaseMaterials.length || stapleShop.length ? `<div class="section-head">
+        <h2 class="section-title">${purchaseMaterials.length ? '食材采购' : '备菜确认'}</h2>
+        <span class="section-sub">${purchaseShop.length ? `${purchaseShop.length} 样待采购${missing.length ? ` · ${missing.length} 样库存不足` : ''}` : purchaseMaterials.length ? '没有待购食材 · 库存可覆盖' : `${stapleShop.length} 样调料待确认`}</span>
         ${isSuper() && aiReady() && shop.length ? `<button class="btn soft sm" style="margin-left:auto" data-act="ai-plan-analysis">✨ AI 备菜分析</button>` : ''}
         ${shop.length ? `<button class="btn soft sm" style="margin-left:auto" data-act="copy-plan-shopping">复制清单</button>` : ''}
       </div>` : ''}
       ${purchaseShop.length
         ? shopListHtml(purchaseShop, {
             bare: true,
+            groupScope: 'plan-purchase',
             context: { kind: 'plan', weekOf: week },
-            hint: '填写实际购买数量后入库；同一计划同一食材不会重复入库。',
+            hint: '填写实际购买数量后入库；新增菜品造成新缺口时可再次补货。',
           })
         : ''}
       ${stapleShop.length ? `<div class="section-head" style="margin-top:18px">
@@ -3155,6 +3198,7 @@ function viewPlan() {
       </div>${shopListHtml(stapleShop, {
         bare: true,
         remember: false,
+        groupScope: 'plan-seasonings',
         hint: '调料只确认家中是否有；没有时可手动勾选完成，或按实际购买数量入库。',
       })}` : ''}
       ${!shop.length ? '<p class="section-sub">给计划里的菜谱补充食材和调料名称，这里会按食材用量计算缺口，并单独提示调料库存。</p>' : ''}`
@@ -6489,8 +6533,14 @@ const ACTIONS = {
   },
   async 'toggle-shop'(el) {
     const name = el.dataset.name;
+    const item = (S.shopList || []).find((row) => row.name === name);
+    if (S.shopContext?.kind === 'plan' && (!item || item.trackingMode !== 'presence')) {
+      if (S.planShopSelected.has(name)) S.planShopSelected.delete(name);
+      else S.planShopSelected.add(name);
+      render();
+      return;
+    }
     try {
-      const item = (S.shopList || []).find((row) => row.name === name);
       if (item && item.trackingMode === 'presence') {
         const currentlyDone = S.shoppingChecked.has(name);
         const stock = findStock(name);
@@ -7913,20 +7963,25 @@ const ACTIONS = {
 
   async 'shop-all'(el) {
     const on = el.dataset.on === '1';
-    (S.shopList || []).forEach((it) =>
-      on ? S.shoppingChecked.add(it.name) : S.shoppingChecked.delete(it.name)
+    const scope = el.dataset.scope || 'default';
+    const selected = activeShopChecks();
+    shopItemsForScope(scope).forEach((it) =>
+      on ? selected.add(it.name) : selected.delete(it.name)
     );
-    await saveShoppingChecked();
+    if (S.shopContext?.kind !== 'plan') await saveShoppingChecked();
     render();
   },
-  async 'shop-uncheck'() {
-    shopCheckedItems().forEach((it) => S.shoppingChecked.delete(it.name));
-    await saveShoppingChecked();
+  async 'shop-uncheck'(el) {
+    const scope = el.dataset.scope || 'default';
+    const selected = activeShopChecks();
+    shopCheckedItems(scope).forEach((it) => selected.delete(it.name));
+    if (S.shopContext?.kind !== 'plan') await saveShoppingChecked();
     render();
   },
   /** 勾上的几样一起入库，入完把勾选清掉 —— 免得明天还带着今天的勾 */
-  async 'shop-stock'() {
-    const items = shopCheckedItems().filter((it) => stockAssessment(it).key !== 'enough');
+  async 'shop-stock'(el) {
+    const scope = el.dataset.scope || 'default';
+    const items = shopCheckedItems(scope).filter((it) => stockAssessment(it).key !== 'enough');
     if (!items.length) return toast('勾上的这几样家里都有了，不用入库');
     const preview = pickPreview(items.map((i) => i.name), '样');
     if (!confirm(`把 ${preview} 记进「${currentHousehold() ? currentHousehold().name : ''}」的库存？`))
@@ -7935,29 +7990,34 @@ const ACTIONS = {
     for (const it of items) {
       if (await stockOne(it.name, it.parts, { item: it })) stocked.push(it);
     }
-    stocked.forEach((it) => S.shoppingChecked.delete(it.name));
-    await saveShoppingChecked();
+    stocked.forEach((it) => activeShopChecks().delete(it.name));
+    if (S.shopContext?.kind !== 'plan') await saveShoppingChecked();
     await loadState(true);
     render();
     toast(stocked.length ? `${stocked.length} 样已入库` : '没有入库任何东西');
   },
   'toggle-shopping-group'(el) {
     const cat = el.dataset.cat || '其他';
-    S.shoppingGroups[cat] = !shoppingGroupOpen(cat);
+    const scope = el.dataset.scope || 'default';
+    const key = `${scope}::${cat}`;
+    S.shoppingGroups[key] = !shoppingGroupOpen(cat, scope);
     saveAccountContext();
     render();
   },
   async 'select-shopping-group'(el) {
     const cat = el.dataset.cat || '其他';
+    const scope = el.dataset.scope || 'default';
     const on = el.dataset.on === '1';
-    const items = (S.shopList || []).filter((it) => ingredientCategory(it.name, it.stock) === cat);
-    items.forEach((it) => on ? S.shoppingChecked.add(it.name) : S.shoppingChecked.delete(it.name));
-    await saveShoppingChecked();
+    const selected = activeShopChecks();
+    const items = shopItemsForScope(scope).filter((it) => ingredientCategory(it.name, it.stock) === cat);
+    items.forEach((it) => on ? selected.add(it.name) : selected.delete(it.name));
+    if (S.shopContext?.kind !== 'plan') await saveShoppingChecked();
     render();
   },
   async 'stock-shopping-group'(el) {
     const cat = el.dataset.cat || '其他';
-    const items = (S.shopList || []).filter(
+    const scope = el.dataset.scope || 'default';
+    const items = shopItemsForScope(scope).filter(
       (it) => ingredientCategory(it.name, it.stock) === cat && stockAssessment(it).key !== 'enough'
     );
     if (!items.length) return toast('本组没有需要入库的东西');
@@ -7967,14 +8027,14 @@ const ACTIONS = {
     for (const it of items) {
       if (await stockOne(it.name, it.parts, { item: it })) stocked.push(it);
     }
-    stocked.forEach((it) => S.shoppingChecked.delete(it.name));
-    await saveShoppingChecked();
+    stocked.forEach((it) => activeShopChecks().delete(it.name));
+    if (S.shopContext?.kind !== 'plan') await saveShoppingChecked();
     await loadState(true);
     render();
     toast(stocked.length ? `${stocked.length} 样已入库` : '没有入库任何东西');
   },
-  async 'shop-copy'() {
-    const items = shopCheckedItems();
+  async 'shop-copy'(el) {
+    const items = shopCheckedItems(el.dataset.scope || 'default');
     if (!items.length) return toast('还没勾任何一样');
     await copyText(items.map((i) => `□ ${i.name}（${i.parts.join(' + ')}）`).join('\n'));
   },
