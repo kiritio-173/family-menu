@@ -40,21 +40,26 @@
     const categoryFor = opts.categoryFor || (() => '其他');
     const map = new Map();
     const modeByKey = new Map();
+    const keyFor = (row) => row.ingredientId
+      ? `id:${String(row.ingredientId)}`
+      : `name:${normalizeName(row.name)}`;
 
     (rows || []).forEach((row) => {
       if (!row || !String(row.name || '').trim()) return;
-      const key = normalizeName(row.name);
+      const key = keyFor(row);
       const mode = infer(row);
       if (mode === 'quantity' || !modeByKey.has(key)) modeByKey.set(key, mode);
     });
 
     (rows || []).forEach((row) => {
       if (!row || !String(row.name || '').trim()) return;
-      const key = normalizeName(row.name);
+      const key = keyFor(row);
       const mode = modeByKey.get(key) || infer(row);
       if (!map.has(key)) {
         map.set(key, {
           name: row.name,
+          ingredientId: row.ingredientId || '',
+          categoryId: row.categoryId || '',
           parts: [],
           useCount: 0,
           requiredQty: null,
@@ -88,10 +93,10 @@
     });
 
     return [...map.values()].map((item) => {
-      const stock = stockFor(item.name) || [];
+      const stock = stockFor(item.name, item.ingredientId, item) || [];
       return {
         ...item,
-        category: categoryFor(item.name, stock),
+        category: categoryFor(item.name, stock, item.ingredientId, item),
         isSeasoning: item.trackingMode === 'presence',
         isStaple: item.trackingMode === 'presence',
         stock,

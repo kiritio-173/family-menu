@@ -41,10 +41,21 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.28.0';
+const APP_VERSION = '1.29.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.29.0',
+    date: '2026-10-21',
+    title: '家庭共享原料字典与计划联动',
+    items: [
+      '菜单和库存共用家庭原料 ID 与分类子树，可从菜单新建原料/子分类，也可从库存登记原料',
+      '计划与库存按原料 ID 对应；同分类的牛里脊、牛排仍是独立原料和库存',
+      '旧菜谱与库存启动时自动补原料关联，跨家庭引用会被拒绝',
+      'AI 原料建议可逐项编辑确认，保存后更新家庭字典和菜谱关联并重新计算计划，不改库存或采购状态',
+    ],
+  },
   {
     version: '1.28.0',
     date: '2026-10-21',
@@ -628,6 +639,8 @@ const FILES = {
   settings: 'settings.json',
   households: 'households.json',
   pantry: 'pantry.json',
+  ingredients: 'ingredients.json',
+  pantryCategories: 'pantry-categories.json',
   plans: 'plans.json',
   // 当前家庭采购清单的“已买”状态。库存属于 pantry，采购状态单独保存，
   // 这样普通成员勾选清单不需要触碰全局 settings。
@@ -852,6 +865,28 @@ function requireAccountHousehold(req, res, householdId) {
   return false;
 }
 
+function canAccessPantryDictionary(req, householdId) {
+  const household = state.households.find((item) => item.id === householdId);
+  if (!household) return false;
+  const userId = accountUserId(req);
+  const isAccountMember = !!(userId && memberForUser(householdId, userId));
+  const device = deviceMember(req);
+  const isDeviceMember = !!(device && device.householdId === householdId &&
+    household.members.some((member) => member.id === device.memberId));
+  const hasAuthenticatedSuperAdmin = isSuperAdmin(req) && (!!userId || !!sessionOf(req));
+  return isAccountMember || isDeviceMember || hasAuthenticatedSuperAdmin;
+}
+
+function requirePantryDictionaryAccess(req, res, householdId) {
+  if (canAccessPantryDictionary(req, householdId)) return true;
+  if (!state.households.some((item) => item.id === householdId)) {
+    sendError(res, 404, '家庭不存在');
+    return false;
+  }
+  sendError(res, 403, '请使用已加入家庭的账号或设备访问原料字典');
+  return false;
+}
+
 function seedDishes() {
   return [
     {
@@ -1017,6 +1052,8 @@ function defaultState() {
       },
     ],
     pantry: [],
+    ingredients: [],
+    pantryCategories: [],
     plans: [],
     shoppingStatus: {},
     // 留言板留言 + 每道菜的「想吃 / 我来做」投票
@@ -1054,6 +1091,197 @@ const PANTRY_CATEGORIES = [
   { name: '零食', emoji: '🍪' },
   { name: '其他', emoji: '📦' },
 ];
+
+function pantryRootCategories() {
+  return PANTRY_CATEGORIES.map((category, index) => ({
+    id: `pantry-root-${index + 1}`,
+    householdId: null,
+    parentId: null,
+    name: category.name,
+    builtin: true,
+  }));
+}
+
+function normPantryCategory(input, base) {
+  if (!input || typeof input !== 'object') return null;
+  const name = safeText(input.name ?? (base && base.name), 40).trim();
+  const householdId = safeText(input.householdId ?? (base && base.householdId), 40);
+  if (!name || !householdId) return null;
+  return {
+    id: safeText((base && base.id) || input.id, 80) || uid('pc_'),
+    householdId,
+    parentId: safeText(input.parentId ?? (base && base.parentId), 80),
+    name,
+    createdAt: (base && base.createdAt) || safeText(input.createdAt, 40) || nowISO(),
+    updatedAt: nowISO(),
+  };
+}
+
+function normIngredient(input, base) {
+  if (!input || typeof input !== 'object') return null;
+  const name = safeText(input.name ?? (base && base.name), 80).trim();
+  const householdId = safeText(input.householdId ?? (base && base.householdId), 40);
+  if (!name || !householdId) return null;
+  const sourceAliases = input.aliases ?? (base && base.aliases);
+  const aliases = Array.isArray(sourceAliases)
+    ? [...new Set(sourceAliases.map((alias) => safeText(alias, 80).trim()).filter((alias) => alias && alias !== name))].slice(0, 30)
+    : [];
+  const mode = input.defaultTrackingMode ?? (base && base.defaultTrackingMode);
+  return {
+    id: safeText((base && base.id) || input.id, 80) || uid('ing_'),
+    householdId,
+    name,
+    aliases,
+    categoryId: safeText(input.categoryId ?? (base && base.categoryId), 80),
+    defaultTrackingMode: mode === 'presence' ? 'presence' : 'quantity',
+    defaultUnit: safeText(input.defaultUnit ?? (base && base.defaultUnit), 20).trim(),
+    createdAt: (base && base.createdAt) || safeText(input.createdAt, 40) || nowISO(),
+    updatedAt: nowISO(),
+  };
+}
+
+function pantryCategoryExists(householdId, categoryId) {
+  return pantryRootCategories().some((category) => category.id === categoryId) ||
+    state.pantryCategories.some((category) => category.householdId === householdId && category.id === categoryId);
+}
+
+function pantryCategoryLabel(householdId, categoryId) {
+  const roots = pantryRootCategories();
+  const root = roots.find((category) => category.id === categoryId);
+  if (root) return root.name;
+  const findCategory = (id) => state.pantryCategories.find((category) =>
+    category.householdId === householdId && category.id === id) || roots.find((category) => category.id === id);
+  const parts = [];
+  let current = findCategory(categoryId);
+  const visited = new Set();
+  while (current) {
+    if (visited.has(current.id)) return '';
+    visited.add(current.id);
+    parts.unshift(current.name);
+    current = current.parentId ? findCategory(current.parentId) : null;
+  }
+  return parts.join(' > ');
+}
+
+function pantryCategoryNameExists(householdId, name, excludeId) {
+  const key = safeText(name, 40).trim().toLocaleLowerCase();
+  return pantryRootCategories().some((category) => category.name.toLocaleLowerCase() === key) ||
+    state.pantryCategories.some((category) => category.id !== excludeId && category.householdId === householdId && category.name.toLocaleLowerCase() === key);
+}
+
+function ingredientCategoryId(householdId, name, pantryCategory) {
+  const categoryName = safeText(pantryCategory, 40).trim() ||
+    (FOOD_PRESETS.find((preset) => pantryIngredientKey(preset[0]) === pantryIngredientKey(name)) || [])[1] || '其他';
+  const custom = state.pantryCategories.find((category) =>
+    category.householdId === householdId && category.name === categoryName);
+  if (custom) return custom.id;
+  const rootIndex = PANTRY_CATEGORIES.findIndex((category) => category.name === categoryName);
+  return `pantry-root-${rootIndex >= 0 ? rootIndex + 1 : PANTRY_CATEGORIES.length}`;
+}
+
+function findHouseholdIngredient(householdId, name) {
+  const key = safeText(name, 80).trim().toLocaleLowerCase();
+  if (!key) return null;
+  return state.ingredients.find((ingredient) => ingredient.householdId === householdId &&
+    (ingredient.name.toLocaleLowerCase() === key || ingredient.aliases.some((alias) => alias.toLocaleLowerCase() === key))) || null;
+}
+
+function ensureHouseholdIngredient(householdId, row, pantryCategory) {
+  const name = safeText(row && row.name, 80).trim();
+  if (!name || !householdId) return null;
+  const existing = findHouseholdIngredient(householdId, name);
+  if (existing) return existing;
+  const stock = state.pantry.find((item) => item.householdId === householdId &&
+    item.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+  const purchaseType = row && row.purchaseType;
+  const trackingMode = purchaseType === 'staple' ? 'presence' :
+    purchaseType === 'purchase' ? 'quantity' : isKnownSeasoning(name) ? 'presence' : 'quantity';
+  const ingredient = normIngredient({
+    householdId,
+    name,
+    aliases: [],
+    categoryId: ingredientCategoryId(householdId, name, pantryCategory || (stock && stock.category)),
+    defaultTrackingMode: trackingMode,
+    defaultUnit: trackingMode === 'quantity' && stock ? stock.unit : '',
+  });
+  if (!ingredient) return null;
+  state.ingredients.push(ingredient);
+  return ingredient;
+}
+
+function linkHouseholdIngredientReferences() {
+  let dishesChanged = false;
+  let pantryChanged = false;
+  let ingredientsChanged = false;
+  const previousIngredientCount = state.ingredients.length;
+  const linkRows = (rows, householdId) => {
+    if (!householdId || !Array.isArray(rows)) return;
+    rows.forEach((row) => {
+      if (!row || !safeText(row.name, 80).trim()) return;
+      const current = state.ingredients.find((ingredient) => ingredient.id === row.ingredientId && ingredient.householdId === householdId);
+      if (current) return;
+      const ingredient = ensureHouseholdIngredient(householdId, row);
+      if (ingredient) {
+        row.ingredientId = ingredient.id;
+        dishesChanged = true;
+      }
+    });
+  };
+
+  state.dishes.forEach((dish) => {
+    if (!dish || !dish.householdId) return;
+    linkRows(dish.seasonings, dish.householdId);
+    (Array.isArray(dish.methods) ? dish.methods : []).forEach((method) => linkRows(method && method.seasonings, dish.householdId));
+  });
+  state.pantry.forEach((item) => {
+    if (!item || !item.householdId) return;
+    const ingredient = state.ingredients.find((entry) => entry.id === item.ingredientId && entry.householdId === item.householdId) ||
+      ensureHouseholdIngredient(item.householdId, item, item.category);
+    if (ingredient && item.ingredientId !== ingredient.id) {
+      item.ingredientId = ingredient.id;
+      pantryChanged = true;
+    }
+    const categoryLabel = ingredient && pantryCategoryLabel(item.householdId, ingredient.categoryId);
+    if (categoryLabel && item.category !== categoryLabel) {
+      item.category = categoryLabel;
+      pantryChanged = true;
+    }
+  });
+  ingredientsChanged = state.ingredients.length !== previousIngredientCount;
+  return { dishesChanged, pantryChanged, ingredientsChanged };
+}
+
+function dishIngredientReferenceProblem(dish, householdId) {
+  const rows = [
+    ...(Array.isArray(dish && dish.seasonings) ? dish.seasonings : []),
+    ...((Array.isArray(dish && dish.methods) ? dish.methods : []).flatMap((method) => Array.isArray(method && method.seasonings) ? method.seasonings : [])),
+  ];
+  return rows.some((row) => row && row.ingredientId && !state.ingredients.some((ingredient) =>
+    ingredient.id === row.ingredientId && ingredient.householdId === householdId))
+    ? '原料必须属于当前菜谱家庭，请重新选择原料'
+    : '';
+}
+
+function pantryIngredientReferenceProblem(item) {
+  if (!item || !item.ingredientId) return '';
+  return state.ingredients.some((ingredient) => ingredient.id === item.ingredientId && ingredient.householdId === item.householdId)
+    ? ''
+    : '原料必须属于当前库存家庭，请重新选择原料';
+}
+
+function pantryCategoryWouldCycle(householdId, categoryId, parentId) {
+  const seen = new Set();
+  let currentId = parentId;
+  while (currentId) {
+    if (currentId === categoryId) return true;
+    if (seen.has(currentId)) return true;
+    seen.add(currentId);
+    const current = state.pantryCategories.find((category) => category.householdId === householdId && category.id === currentId);
+    if (!current) return false;
+    currentId = current.parentId;
+  }
+  return false;
+}
 
 /* ------------------------------------------------------------------ *
  * 预置食材库：录入库存时点一下就有名字、分类、单位、参考保质期
@@ -1235,6 +1463,11 @@ function normPantryItem(input, prev, keepInputId) {
   const base = prev || {};
   const name = safeText(input.name ?? base.name, 24).trim();
   if (!name) return null;
+  const householdId = resolveHouseholdId(input.householdId ?? base.householdId);
+  const ingredientId = safeText(input.ingredientId ?? base.ingredientId, 80);
+  const linkedIngredient = ingredientId
+    ? state.ingredients.find((ingredient) => ingredient.id === ingredientId && ingredient.householdId === householdId)
+    : null;
 
   const rawQty = Number(input.quantity ?? base.quantity ?? 1);
   const qty = Number.isFinite(rawQty)
@@ -1245,9 +1478,11 @@ function normPantryItem(input, prev, keepInputId) {
     ? Math.min(99999, Math.max(0, Math.round(rawMin * 1000) / 1000))
     : 0;
 
-  const cat = safeText(input.category ?? base.category, 12).trim();
+  const cat = safeText(input.category ?? base.category, 80).trim();
   const known = PANTRY_CATEGORIES.some((c) => c.name === cat);
-  const category = isKnownSeasoning(name)
+  const category = linkedIngredient
+    ? pantryCategoryLabel(householdId, linkedIngredient.categoryId) || '其他'
+    : isKnownSeasoning(name)
     ? '调味干货'
     : known ? cat : '其他';
   const requestedMode = input.trackingMode ?? base.trackingMode;
@@ -1265,7 +1500,8 @@ function normPantryItem(input, prev, keepInputId) {
     id:
       base.id ||
       (keepInputId && typeof input.id === 'string' && input.id ? input.id : uid('f_')),
-    householdId: resolveHouseholdId(input.householdId ?? base.householdId),
+    householdId,
+    ...(ingredientId ? { ingredientId } : {}),
     name,
     category,
     trackingMode,
@@ -1678,6 +1914,40 @@ function loadState() {
   const hhIds = new Set(state.households.map((h) => h.id));
   const fallbackH = state.households[0].id;
 
+  const loadedPantryCategories = Array.isArray(state.pantryCategories) ? state.pantryCategories : [];
+  state.pantryCategories = loadedPantryCategories
+    .map((category) => normPantryCategory(category, category))
+    .filter((category) => category && hhIds.has(category.householdId));
+  const categoryIds = new Set(pantryRootCategories().map((category) => category.id));
+  const seenCategoryIds = new Set(categoryIds);
+  const seenCategoryNames = new Set();
+  state.pantryCategories = state.pantryCategories.filter((category) => {
+    const key = `${category.householdId}\0${category.name.toLocaleLowerCase()}`;
+    const parentValid = categoryIds.has(category.parentId) || state.pantryCategories.some((parent) =>
+      parent.id === category.parentId && parent.householdId === category.householdId);
+    if (seenCategoryIds.has(category.id) || seenCategoryNames.has(key) || !parentValid || category.id === category.parentId) return false;
+    seenCategoryIds.add(category.id);
+    seenCategoryNames.add(key);
+    categoryIds.add(category.id);
+    return true;
+  });
+  if (JSON.stringify(loadedPantryCategories) !== JSON.stringify(state.pantryCategories)) scheduleSave('pantryCategories');
+
+  const loadedIngredients = Array.isArray(state.ingredients) ? state.ingredients : [];
+  state.ingredients = loadedIngredients
+    .map((ingredient) => normIngredient(ingredient, ingredient))
+    .filter((ingredient) => ingredient && hhIds.has(ingredient.householdId) && pantryCategoryExists(ingredient.householdId, ingredient.categoryId));
+  const seenIngredientIds = new Set();
+  const seenIngredientNames = new Set();
+  state.ingredients = state.ingredients.filter((ingredient) => {
+    const nameKey = `${ingredient.householdId}\0${ingredient.name.toLocaleLowerCase()}`;
+    if (seenIngredientIds.has(ingredient.id) || seenIngredientNames.has(nameKey)) return false;
+    seenIngredientIds.add(ingredient.id);
+    seenIngredientNames.add(nameKey);
+    return true;
+  });
+  if (JSON.stringify(loadedIngredients) !== JSON.stringify(state.ingredients)) scheduleSave('ingredients');
+
   // 历史点餐 / 库存没有 householdId 的，都归到第一个家庭
   state.orders.forEach((o) => {
     if (!hhIds.has(o.householdId)) o.householdId = fallbackH;
@@ -1704,6 +1974,11 @@ function loadState() {
     }
   });
   if (pantryChanged) scheduleSave('pantry');
+
+  const ingredientLinks = linkHouseholdIngredientReferences();
+  if (ingredientLinks.dishesChanged) scheduleSave('dishes');
+  if (ingredientLinks.pantryChanged) scheduleSave('pantry');
+  if (ingredientLinks.ingredientsChanged) scheduleSave('ingredients');
 
   // 本周计划：同样拉回有效家庭，周一归一
   const seenPl = new Set();
@@ -2075,6 +2350,8 @@ function backupPayload() {
     settings: state.settings,
     households: state.households,
     pantry: state.pantry,
+    ingredients: state.ingredients,
+    pantryCategories: state.pantryCategories,
     plans: state.plans,
     shoppingStatus: state.shoppingStatus,
     notes: state.notes,
@@ -2107,6 +2384,22 @@ function applyBackup(src) {
       .filter(Boolean)
       .filter((h) => (seen.has(h.id) ? false : (seen.add(h.id), true)));
     if (!state.households.length) state.households = defaultState().households;
+  }
+  const backupHouseholdIds = new Set(state.households.map((household) => household.id));
+  if (Array.isArray(src.pantryCategories)) {
+    const seen = new Set();
+    state.pantryCategories = src.pantryCategories
+      .map((category) => (category && typeof category === 'object' ? normPantryCategory(category, undefined) : null))
+      .filter((category) => category && backupHouseholdIds.has(category.householdId))
+      .filter((category) => (seen.has(category.id) ? false : (seen.add(category.id), true)));
+  }
+  if (Array.isArray(src.ingredients)) {
+    const seen = new Set();
+    state.ingredients = src.ingredients
+      .map((ingredient) => (ingredient && typeof ingredient === 'object' ? normIngredient(ingredient, undefined) : null))
+      .filter((ingredient) => ingredient && backupHouseholdIds.has(ingredient.householdId))
+      .filter((ingredient) => (seen.has(ingredient.id) ? false : (seen.add(ingredient.id), true)))
+      .filter((ingredient) => pantryCategoryExists(ingredient.householdId, ingredient.categoryId));
   }
   if (Array.isArray(src.pantry)) {
     const seen = new Set();
@@ -2176,6 +2469,8 @@ function applyBackup(src) {
   state.pantry.forEach((p) => {
     if (!hhIds.has(p.householdId)) p.householdId = state.households[0].id;
   });
+  state.ingredients = state.ingredients.filter((ingredient) => hhIds.has(ingredient.householdId));
+  state.pantryCategories = state.pantryCategories.filter((category) => hhIds.has(category.householdId));
   state.plans.forEach((pl) => {
     if (!hhIds.has(pl.householdId)) pl.householdId = state.households[0].id;
   });
@@ -2183,11 +2478,15 @@ function applyBackup(src) {
     if (!hhIds.has(n.householdId)) n.householdId = state.households[0].id;
   });
 
+  linkHouseholdIngredientReferences();
+
   saveNow();
   return {
     dishes: state.dishes.length,
     households: state.households.length,
     pantry: state.pantry.length,
+    ingredients: state.ingredients.length,
+    pantryCategories: state.pantryCategories.length,
     plans: state.plans.length,
     notes: state.notes.notes.length,
   };
@@ -2396,6 +2695,7 @@ function normDish(input, prev, keepInputId) {
         return {
           name: safeText(s && s.name, 30).trim(),
           amount: safeText(s && s.amount, 30).trim(),
+          ...(safeText(s && s.ingredientId, 80) ? { ingredientId: safeText(s.ingredientId, 80) } : {}),
           ...(purchaseType ? { purchaseType } : {}),
         };
       })
@@ -2415,6 +2715,7 @@ function normDish(input, prev, keepInputId) {
             return {
               name: safeText(s && s.name, 30).trim(),
               amount: safeText(s && s.amount, 30).trim(),
+              ...(safeText(s && s.ingredientId, 80) ? { ingredientId: safeText(s.ingredientId, 80) } : {}),
               ...(purchaseType ? { purchaseType } : {}),
             };
           })
@@ -3477,8 +3778,14 @@ async function handleAPI(req, res, url) {
         system:
           '你是家庭备菜计划解释助手。输入中已经包含程序计算的需求、库存和缺口。' +
           '只解释结果、指出需要人工确认的分类或单位，不要重新计算数量，不要修改库存或采购状态。' +
+          '需要标准化或分类的原料放入 proposals，仅提出建议，不能输出数量、库存值、采购状态或完成状态。' +
+          'proposals 每项必须对应输入中的材料，优先复用输入提供的 ingredientId 和 categoryId；' +
+          '分类 ID 只能从输入给定的家庭分类树选择，不要自行编造 ID。' +
           '请只输出 JSON：{"summary":"简短总结","flags":[{"name":"材料名",' +
-          '"reason":"需要注意的原因","suggestion":"可执行的人工建议"}]}。',
+          '"reason":"需要注意的原因","suggestion":"可执行的人工建议"}],"proposals":' +
+          '[{"inputName":"原录入名","ingredientId":"已有原料 ID 或空字符串","name":"标准名",' +
+          '"aliases":["明确同义名"],"categoryId":"输入中有效的分类 ID","trackingMode":"presence|quantity",' +
+          '"confidence":0.0,"reason":"建议理由"}]}。没有需要建议的原料时 proposals 返回空数组。',
         wantJSON: true,
       },
       'cook-plan': {
@@ -3555,7 +3862,8 @@ async function handleAPI(req, res, url) {
     } else if (task === 'plan-analysis') {
       const summary = r.json && typeof r.json.summary === 'string' ? safeText(r.json.summary, 500).trim() : '';
       const flags = r.json && Array.isArray(r.json.flags) ? r.json.flags : null;
-      if (!summary || !flags) {
+      const proposals = r.json && Array.isArray(r.json.proposals) ? r.json.proposals : null;
+      if (!summary || !flags || !proposals) {
         return sendJSON(res, 200, { ok: true, data: { ok: false, error: 'AI 计划分析结果结构不完整' } });
       }
       result = {
@@ -3566,6 +3874,24 @@ async function handleAPI(req, res, url) {
             reason: safeText(flag.reason, 240).trim(),
             suggestion: safeText(flag.suggestion, 240).trim(),
           })),
+        proposals: proposals.slice(0, 50).filter((proposal) =>
+          proposal && typeof proposal.inputName === 'string' && typeof proposal.name === 'string' &&
+          ['presence', 'quantity'].includes(proposal.trackingMode) &&
+          Number.isFinite(Number(proposal.confidence)) && Number(proposal.confidence) >= 0 && Number(proposal.confidence) <= 1 &&
+          typeof proposal.categoryId === 'string')
+          .map((proposal) => ({
+            inputName: safeText(proposal.inputName, 80).trim(),
+            ingredientId: safeText(proposal.ingredientId, 80).trim(),
+            name: safeText(proposal.name, 80).trim(),
+            aliases: Array.isArray(proposal.aliases)
+              ? [...new Set(proposal.aliases.map((alias) => safeText(alias, 80).trim()).filter(Boolean))].slice(0, 20)
+              : [],
+            categoryId: safeText(proposal.categoryId, 80).trim(),
+            trackingMode: proposal.trackingMode,
+            confidence: Number(proposal.confidence),
+            reason: safeText(proposal.reason, 240).trim(),
+          }))
+          .filter((proposal) => proposal.inputName && proposal.name && proposal.categoryId),
       };
     }
     return sendJSON(res, 200, {
@@ -3581,6 +3907,244 @@ async function handleAPI(req, res, url) {
       ok: true,
       data: { version: APP_VERSION, releases: RELEASES },
     });
+  }
+
+  // Household-owned pantry dictionary. Built-in roots are generated in memory;
+  // only custom child nodes and ingredients are written to their JSON files.
+  if (route[0] === 'pantry-categories') {
+    const id = route[1];
+    const queryHouseholdId = safeText(url.searchParams.get('householdId'), 40);
+    if (method === 'GET' && !id) {
+      if (!queryHouseholdId) return sendError(res, 400, '缺少家庭 ID');
+      if (!state.households.some((household) => household.id === queryHouseholdId)) return sendError(res, 404, '家庭不存在');
+      if (!requirePantryDictionaryAccess(req, res, queryHouseholdId)) return;
+      return sendJSON(res, 200, {
+        ok: true,
+        data: pantryRootCategories().concat(state.pantryCategories.filter((category) => category.householdId === queryHouseholdId)),
+      });
+    }
+    if (method === 'POST' && !id) {
+      const body = await readBody(req);
+      const householdId = queryHouseholdId || safeText(body.householdId, 40);
+      if (!householdId) return sendError(res, 400, '缺少家庭 ID');
+      if (body.householdId && body.householdId !== householdId) return sendError(res, 400, '家庭 ID 不一致');
+      if (!state.households.some((household) => household.id === householdId)) return sendError(res, 404, '家庭不存在');
+      if (!requirePantryDictionaryAccess(req, res, householdId)) return;
+      if (!isHouseAdmin(req, householdId)) return sendError(res, 403, '只有家庭管理员能维护分类');
+      const category = normPantryCategory({ ...body, householdId });
+      const parentId = category && category.parentId;
+      if (!category || !parentId || !pantryCategoryExists(householdId, parentId)) return sendError(res, 400, '请选择本家庭有效的父分类');
+      if (pantryCategoryNameExists(householdId, category.name)) {
+        return sendError(res, 409, '这个家庭已经有同名分类');
+      }
+      state.pantryCategories.push(category);
+      scheduleSave('pantryCategories');
+      return sendJSON(res, 200, { ok: true, data: category });
+    }
+    if ((method === 'PUT' || method === 'DELETE') && id) {
+      const index = state.pantryCategories.findIndex((category) => category.id === id);
+      if (index < 0) return sendError(res, 404, '自定义分类不存在');
+      const existing = state.pantryCategories[index];
+      if (queryHouseholdId && queryHouseholdId !== existing.householdId) return sendError(res, 403, '不能操作其他家庭的分类');
+      if (!requirePantryDictionaryAccess(req, res, existing.householdId)) return;
+      if (!isHouseAdmin(req, existing.householdId)) return sendError(res, 403, '只有家庭管理员能维护分类');
+      if (method === 'PUT') {
+        const body = await readBody(req);
+        if (body.householdId && body.householdId !== existing.householdId) return sendError(res, 400, '不能更改分类所属家庭');
+        const category = normPantryCategory({ ...existing, ...body, householdId: existing.householdId }, existing);
+        if (!category || !category.parentId || !pantryCategoryExists(existing.householdId, category.parentId)) return sendError(res, 400, '请选择本家庭有效的父分类');
+        if (pantryCategoryWouldCycle(existing.householdId, id, category.parentId)) {
+          return sendError(res, 400, '分类不能设置为自己的子分类');
+        }
+        if (pantryCategoryNameExists(existing.householdId, category.name, id)) {
+          return sendError(res, 409, '这个家庭已经有同名分类');
+        }
+        state.pantryCategories[index] = category;
+        scheduleSave('pantryCategories');
+        return sendJSON(res, 200, { ok: true, data: category });
+      }
+      if (state.pantryCategories.some((category) => category.parentId === id && category.householdId === existing.householdId)) {
+        return sendError(res, 409, '请先删除或移动这个分类下的子分类');
+      }
+      if (state.ingredients.some((ingredient) => ingredient.householdId === existing.householdId && ingredient.categoryId === id)) {
+        return sendError(res, 409, '这个分类仍被原料使用，请先迁移原料');
+      }
+      state.pantryCategories.splice(index, 1);
+      scheduleSave('pantryCategories');
+      return sendJSON(res, 200, { ok: true, data: existing });
+    }
+  }
+
+  if (route[0] === 'ingredients') {
+    const id = route[1];
+    const queryHouseholdId = safeText(url.searchParams.get('householdId'), 40);
+    if (method === 'POST' && id === 'apply-proposals') {
+      const body = await readBody(req);
+      const householdId = safeText(body.householdId, 40);
+      if (!householdId) return sendError(res, 400, '缺少家庭 ID');
+      if (!state.households.some((household) => household.id === householdId)) return sendError(res, 404, '家庭不存在');
+      if (!requirePantryDictionaryAccess(req, res, householdId)) return;
+      if (!Array.isArray(body.proposals) || body.proposals.length < 1 || body.proposals.length > 50) {
+        return sendError(res, 400, '请选择 1 到 50 条原料建议');
+      }
+
+      const prepared = [];
+      const plannedByName = new Map();
+      for (const raw of body.proposals) {
+        const inputName = safeText(raw && raw.inputName, 80).trim();
+        const name = safeText(raw && raw.name, 80).trim();
+        const trackingMode = safeText(raw && raw.trackingMode, 20);
+        const aliases = Array.isArray(raw && raw.aliases)
+          ? [...new Set(raw.aliases.map((alias) => safeText(alias, 80).trim()).filter(Boolean))].slice(0, 20)
+          : [];
+        const categoryId = safeText(raw && raw.categoryId, 80);
+        if (!inputName || !name) return sendError(res, 400, '原料建议缺少输入名或标准名');
+        if (!['presence', 'quantity'].includes(trackingMode)) return sendError(res, 400, '原料建议的库存方式无效');
+        if (!categoryId || !pantryCategoryExists(householdId, categoryId)) return sendError(res, 400, '原料分类不属于当前家庭');
+
+        const requestedId = safeText(raw && raw.ingredientId, 80);
+        let ingredient = requestedId
+          ? state.ingredients.find((item) => item.id === requestedId && item.householdId === householdId)
+          : null;
+        if (requestedId && !ingredient) return sendError(res, 400, '原料 ID 不属于当前家庭');
+        ingredient = ingredient || findHouseholdIngredient(householdId, name) ||
+          findHouseholdIngredient(householdId, inputName) ||
+          aliases.map((alias) => findHouseholdIngredient(householdId, alias)).find(Boolean) || null;
+
+        const nameKey = name.toLocaleLowerCase();
+        const pendingSameName = plannedByName.get(nameKey);
+        if (pendingSameName && ingredient && pendingSameName.id !== ingredient.id) {
+          return sendError(res, 409, `「${name}」对应多个原料，请分开确认`);
+        }
+        if (!ingredient && pendingSameName) ingredient = pendingSameName;
+        if (!ingredient) {
+          const collision = state.ingredients.find((item) => item.householdId === householdId && item.name.toLocaleLowerCase() === nameKey);
+          if (collision) ingredient = collision;
+        }
+        const nameCollision = state.ingredients.find((item) => item.householdId === householdId &&
+          item.id !== (ingredient && ingredient.id) && item.name.toLocaleLowerCase() === nameKey);
+        if (nameCollision) return sendError(res, 409, `标准名「${name}」已属于另一个原料`);
+
+        const nextAliases = [...new Set([
+          ...((ingredient && ingredient.aliases) || []),
+          inputName,
+          ...aliases,
+        ].map((alias) => safeText(alias, 80).trim()).filter((alias) => alias && alias.toLocaleLowerCase() !== nameKey))].slice(0, 30);
+        const next = ingredient
+          ? { ...ingredient, name, aliases: nextAliases, categoryId, defaultTrackingMode: trackingMode, updatedAt: nowISO() }
+          : normIngredient({ householdId, name, aliases: nextAliases, categoryId, defaultTrackingMode: trackingMode, defaultUnit: '' });
+        if (!next) return sendError(res, 400, '无法保存原料建议');
+        plannedByName.set(nameKey, next);
+        prepared.push({ inputName, aliases, ingredient: next });
+      }
+
+      const changedRows = [];
+      const inputKeys = prepared.map((proposal) => new Set([
+        proposal.inputName,
+        ...proposal.aliases,
+      ].map((name) => name.toLocaleLowerCase())));
+      const targetByInput = new Map();
+      for (let index = 0; index < prepared.length; index++) {
+        for (const key of inputKeys[index]) {
+          const previous = targetByInput.get(key);
+          if (previous && previous !== prepared[index].ingredient.id) {
+            return sendError(res, 409, `输入名「${key}」被映射到多个原料，请重新确认`);
+          }
+          targetByInput.set(key, prepared[index].ingredient.id);
+        }
+      }
+      const matchedProposals = new Set();
+      for (const dish of state.dishes) {
+        if (!dish || dish.householdId !== householdId) continue;
+        const rows = [
+          ...(Array.isArray(dish.seasonings) ? dish.seasonings : []),
+          ...((Array.isArray(dish.methods) ? dish.methods : []).flatMap((method) => Array.isArray(method && method.seasonings) ? method.seasonings : [])),
+        ];
+        for (const row of rows) {
+          const key = safeText(row && row.name, 80).trim().toLocaleLowerCase();
+          const index = prepared.findIndex((proposal, proposalIndex) => inputKeys[proposalIndex].has(key));
+          if (index >= 0) {
+            matchedProposals.add(index);
+            changedRows.push({ row, ingredient: prepared[index].ingredient });
+          }
+        }
+      }
+      if (matchedProposals.size !== prepared.length) return sendError(res, 409, '部分建议已过期或没有对应菜谱材料，请重新分析后再应用');
+      if (!changedRows.length) return sendError(res, 409, '建议已过期，没有找到仍存在的菜谱原料');
+
+      const nextIngredients = [...state.ingredients];
+      const updated = new Map();
+      for (const proposal of prepared) updated.set(proposal.ingredient.id, proposal.ingredient);
+      for (const [ingredientId, ingredient] of updated) {
+        const index = nextIngredients.findIndex((item) => item.id === ingredientId);
+        if (index < 0) nextIngredients.push(ingredient);
+        else nextIngredients[index] = ingredient;
+      }
+      state.ingredients = nextIngredients;
+      changedRows.forEach(({ row, ingredient }) => { row.ingredientId = ingredient.id; });
+      state.pantry.forEach((item) => {
+        const ingredient = updated.get(item.ingredientId);
+        if (!ingredient || item.householdId !== householdId) return;
+        item.name = ingredient.name;
+        item.category = pantryCategoryLabel(householdId, ingredient.categoryId) || item.category;
+      });
+      scheduleSave('ingredients');
+      scheduleSave('dishes');
+      scheduleSave('pantry');
+      return sendJSON(res, 200, { ok: true, data: { applied: updated.size, linkedRows: changedRows.length } });
+    }
+    if (method === 'GET' && !id) {
+      if (!queryHouseholdId) return sendError(res, 400, '缺少家庭 ID');
+      if (!state.households.some((household) => household.id === queryHouseholdId)) return sendError(res, 404, '家庭不存在');
+      if (!requirePantryDictionaryAccess(req, res, queryHouseholdId)) return;
+      return sendJSON(res, 200, { ok: true, data: state.ingredients.filter((ingredient) => ingredient.householdId === queryHouseholdId) });
+    }
+    if (method === 'POST' && !id) {
+      const body = await readBody(req);
+      const householdId = queryHouseholdId || safeText(body.householdId, 40);
+      if (!householdId) return sendError(res, 400, '缺少家庭 ID');
+      if (body.householdId && body.householdId !== householdId) return sendError(res, 400, '家庭 ID 不一致');
+      if (!state.households.some((household) => household.id === householdId)) return sendError(res, 404, '家庭不存在');
+      if (!requirePantryDictionaryAccess(req, res, householdId)) return;
+      const ingredient = normIngredient({ ...body, householdId });
+      if (!ingredient || !ingredient.categoryId || !pantryCategoryExists(householdId, ingredient.categoryId)) return sendError(res, 400, '请选择本家庭有效分类');
+      if (state.ingredients.some((item) => item.householdId === householdId && item.name.toLocaleLowerCase() === ingredient.name.toLocaleLowerCase())) {
+        return sendError(res, 409, '这个家庭已经有同名原料');
+      }
+      state.ingredients.push(ingredient);
+      scheduleSave('ingredients');
+      return sendJSON(res, 200, { ok: true, data: ingredient });
+    }
+    if ((method === 'PUT' || method === 'DELETE') && id) {
+      const index = state.ingredients.findIndex((ingredient) => ingredient.id === id);
+      if (index < 0) return sendError(res, 404, '原料不存在');
+      const existing = state.ingredients[index];
+      if (queryHouseholdId && queryHouseholdId !== existing.householdId) return sendError(res, 403, '不能操作其他家庭的原料');
+      if (!requirePantryDictionaryAccess(req, res, existing.householdId)) return;
+      if (method === 'PUT') {
+        const body = await readBody(req);
+        if (body.householdId && body.householdId !== existing.householdId) return sendError(res, 400, '不能更改原料所属家庭');
+        const ingredient = normIngredient({ ...existing, ...body, householdId: existing.householdId }, existing);
+        if (!ingredient || !ingredient.categoryId || !pantryCategoryExists(existing.householdId, ingredient.categoryId)) return sendError(res, 400, '请选择本家庭有效分类');
+        if (state.ingredients.some((item) => item.id !== id && item.householdId === existing.householdId && item.name.toLocaleLowerCase() === ingredient.name.toLocaleLowerCase())) {
+          return sendError(res, 409, '这个家庭已经有同名原料');
+        }
+        state.ingredients[index] = ingredient;
+        scheduleSave('ingredients');
+        return sendJSON(res, 200, { ok: true, data: ingredient });
+      }
+      const referencedByDish = state.dishes.some((dish) =>
+        [...dish.seasonings, ...dish.methods.flatMap((method) => method.seasonings || [])]
+          .some((seasoning) => seasoning.ingredientId === id)
+      );
+      const referencedByPantry = state.pantry.some((item) => item.ingredientId === id);
+      if (referencedByDish || referencedByPantry) {
+        return sendError(res, 409, '原料仍被菜谱或库存使用，请先重新分配引用');
+      }
+      state.ingredients.splice(index, 1);
+      scheduleSave('ingredients');
+      return sendJSON(res, 200, { ok: true, data: existing });
+    }
   }
 
   // GET /api/state —— 全量状态（家庭规模数据很小，一次取完最省事）
@@ -3602,6 +4166,8 @@ async function handleAPI(req, res, url) {
     // 账户登录后默认没有当前家庭；只有显式传入已加入家庭（或公开家庭）才进入家庭上下文。
     // 超级管理员也可以保持无家庭上下文，此时只看全局共享菜单和平台数据。
     const visibleHouseholdId = allowedRequested && requestedHousehold ? requestedHousehold.id : '';
+    const canReadHouseholdDictionary = !!visibleHouseholdId && !readOnlyExternal &&
+      canAccessPantryDictionary(req, visibleHouseholdId);
     // 没设口令时是开放超级管理员模式；设了口令后，只有有效授权能看全量状态。
     const fullState = superAccess;
     const visibleDishes = fullState
@@ -3661,6 +4227,12 @@ async function handleAPI(req, res, url) {
           : readOnlyExternal || !visibleHouseholdId
           ? []
           : state.pantry.filter((p) => p.householdId === visibleHouseholdId),
+        ingredients: canReadHouseholdDictionary
+          ? state.ingredients.filter((ingredient) => ingredient.householdId === visibleHouseholdId)
+          : [],
+        pantryCategories: canReadHouseholdDictionary
+          ? state.pantryCategories.filter((category) => category.householdId === visibleHouseholdId)
+          : [],
         plans: fullState
           ? state.plans
           : readOnlyExternal || !visibleHouseholdId
@@ -3884,6 +4456,8 @@ async function handleAPI(req, res, url) {
         }
         const dish = normDish({ ...(await readBody(req)), householdId: hhId });
         if (!dish || !dish.name) return sendError(res, 400, '菜名不能为空');
+        const ingredientProblem = dishIngredientReferenceProblem(dish, hhId);
+        if (ingredientProblem) return sendError(res, 400, ingredientProblem);
         const who = whoami(req, hhId);
         dish.authorId = who.kind === 'member' ? who.memberId : '';
         dish.authorUserId = who.userId || '';
@@ -3905,6 +4479,8 @@ async function handleAPI(req, res, url) {
           return sendError(res, 403, writeDenied(state.dishes[idx]));
         }
         const dish = normDish({ ...(await readBody(req)), householdId: hhId }, state.dishes[idx]);
+        const ingredientProblem = dishIngredientReferenceProblem(dish, hhId);
+        if (ingredientProblem) return sendError(res, 400, ingredientProblem);
         dish.authorId = state.dishes[idx].authorId;
         dish.authorUserId = state.dishes[idx].authorUserId || dishAuthorUserId(state.dishes[idx]);
         dish.authorName = state.dishes[idx].authorName;
@@ -4138,9 +4714,13 @@ async function handleAPI(req, res, url) {
       // 家庭没了，它名下的点餐和库存也一并清掉，免得数据无处安放
       const removedOrders = state.orders.filter((o) => o.householdId === id).length;
       const removedPantry = state.pantry.filter((p) => p.householdId === id).length;
+      const removedIngredients = state.ingredients.filter((ingredient) => ingredient.householdId === id).length;
+      const removedPantryCategories = state.pantryCategories.filter((category) => category.householdId === id).length;
       const removedNotes = state.notes.notes.filter((n) => n.householdId === id).length;
       state.orders = state.orders.filter((o) => o.householdId !== id);
       state.pantry = state.pantry.filter((p) => p.householdId !== id);
+      state.ingredients = state.ingredients.filter((ingredient) => ingredient.householdId !== id);
+      state.pantryCategories = state.pantryCategories.filter((category) => category.householdId !== id);
       state.plans = state.plans.filter((p) => p.householdId !== id);
       delete state.shoppingStatus[id];
       state.notes.notes = state.notes.notes.filter((n) => n.householdId !== id);
@@ -4171,6 +4751,8 @@ async function handleAPI(req, res, url) {
       scheduleSave('households');
       scheduleSave('orders');
       scheduleSave('pantry');
+      scheduleSave('ingredients');
+      scheduleSave('pantryCategories');
       scheduleSave('plans');
       scheduleSave('shoppingStatus');
       scheduleSave('notes');
@@ -4184,9 +4766,11 @@ async function handleAPI(req, res, url) {
           ...gone,
           removedOrders,
           removedPantry,
+          removedIngredients,
           removedNotes,
           removedDishes,
           removedCategories: removedCats,
+          removedPantryCategories,
         },
       });
     }
@@ -4349,6 +4933,8 @@ async function handleAPI(req, res, url) {
       const item = normPantryItem(body);
       if (!item) return sendError(res, 400, '食材名不能为空');
       if (!requireAccountHousehold(req, res, item.householdId)) return;
+      const ingredientProblem = pantryIngredientReferenceProblem(item);
+      if (ingredientProblem) return sendError(res, 400, ingredientProblem);
       if (body.addToExisting) addPantryQuantity(item);
       else state.pantry.unshift(item);
       scheduleSave('pantry');
@@ -4364,6 +4950,8 @@ async function handleAPI(req, res, url) {
       const item = normPantryItem(await readBody(req), state.pantry[idx]);
       if (!item) return sendError(res, 400, '食材名不能为空');
       if (!requireAccountHousehold(req, res, item.householdId)) return;
+      const ingredientProblem = pantryIngredientReferenceProblem(item);
+      if (ingredientProblem) return sendError(res, 400, ingredientProblem);
       state.pantry[idx] = item;
       scheduleSave('pantry');
       return sendJSON(res, 200, { ok: true, data: item });
@@ -4643,6 +5231,8 @@ async function handleAPI(req, res, url) {
       const body = await readBody(req);
       const dish = normDish(body);
       if (!dish) return sendError(res, 400, '菜名不能为空');
+      const ingredientProblem = dishIngredientReferenceProblem(dish, dish.householdId);
+      if (ingredientProblem) return sendError(res, 400, ingredientProblem);
       // 归属和作者都以服务端为准：客户端写了也不算
       if (!dish.householdId && !canWriteShared(req)) {
         return sendError(res, 403, '往共享菜单加菜要管理员');
@@ -4667,6 +5257,8 @@ async function handleAPI(req, res, url) {
         return sendError(res, 403, writeDenied(state.dishes[idx]));
       }
       const dish = normDish(await readBody(req), state.dishes[idx]);
+      const ingredientProblem = dishIngredientReferenceProblem(dish, dish.householdId);
+      if (ingredientProblem) return sendError(res, 400, ingredientProblem);
       // 作者不许改：这条要是你写的，以后就一直是你的
       dish.authorId = state.dishes[idx].authorId;
       dish.authorUserId = state.dishes[idx].authorUserId || dishAuthorUserId(state.dishes[idx]);

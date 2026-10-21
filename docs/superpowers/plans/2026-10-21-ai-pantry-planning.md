@@ -23,7 +23,6 @@
 - 修改 `docs/product/2026-10-18-current-interface-product-logic.md`：记录原料字典、分类层级、计划计算和 AI 确认副作用。
 
 ## Task 1: 建立家庭原料字典与分类树的服务端存储
-
 **Files:**
 - Modify: `server.js`
 - Test: `_selftest.js`
