@@ -2304,6 +2304,88 @@ async function main() {
   eq('解散后账户没有家庭关系', (ctxAfterDissolve.body.data.households || []).length, 0);
   await stop(contextInst);
 
+  /* ---------- 家庭原料字典与自定义分类 ---------- */
+  console.log('\n[29] 家庭原料字典与自定义分类');
+  const ingredientInst = await boot('ingredient-dictionary');
+  const ingredientOwner = await registerAccount('原料字典管理员');
+  const ingredientMember = await registerAccount('原料字典成员');
+  const ingredientHouseA = await req('POST', '/api/households', { name: '原料家庭 A' }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const ingredientHouseB = await req('POST', '/api/households', { name: '原料家庭 B' }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const ingredientHouseAId = ingredientHouseA.body.data.id;
+  const ingredientHouseBId = ingredientHouseB.body.data.id;
+  const memberRequest = await req('POST', '/api/join-requests', { householdId: ingredientHouseAId }, undefined, undefined, undefined, undefined, ingredientMember.token);
+  eq('原料家庭成员申请加入', memberRequest.status, 200);
+  eq('原料家庭管理员批准成员', (await req('PUT', `/api/join-requests/${memberRequest.body.data.id}`, { status: 'ok', role: 'member' }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 200);
+  await req('PUT', '/api/settings', { adminPin: '2468' }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+
+  const rootCategories = await req('GET', `/api/pantry-categories?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('内置分类可用于新增子分类', rootCategories.status, 200);
+  const meatRoot = (rootCategories.body.data || []).find((c) => c.name === '肉类');
+  ok('肉类内置根分类存在', !!meatRoot, rootCategories.body.data);
+  const householdBIngredient = await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseBId)}`, {
+    name: 'B 家独有食材', aliases: [], categoryId: meatRoot && meatRoot.id, defaultTrackingMode: 'quantity',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('另一个家庭能独立创建原料', householdBIngredient.status, 200);
+  const householdBCategory = await req('POST', `/api/pantry-categories?householdId=${encodeURIComponent(ingredientHouseBId)}`, {
+    name: 'B 家肉类子分类', parentId: meatRoot && meatRoot.id,
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('另一家庭能创建自己的子分类', householdBCategory.status, 200);
+  const beefCategory = await req('POST', `/api/pantry-categories?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '牛肉', parentId: meatRoot && meatRoot.id,
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('管理员能创建肉类下的牛肉分类', beefCategory.status, 200);
+  const categoryId = beefCategory.body.data && beefCategory.body.data.id;
+  const tenderloin = await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '牛里脊', aliases: [], categoryId, defaultTrackingMode: 'quantity', defaultUnit: 'g',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const steak = await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '牛排', aliases: [], categoryId, defaultTrackingMode: 'quantity', defaultUnit: 'g',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('管理员能创建家庭原料', tenderloin.status, 200);
+  eq('同分类不同名称可创建原料', steak.status, 200);
+  ok('牛里脊和牛排各自拥有不同原料 ID', tenderloin.body.data?.id && steak.body.data?.id && tenderloin.body.data.id !== steak.body.data.id);
+
+  const memberIngredient = await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '家庭成员新增食材', aliases: [], categoryId, defaultTrackingMode: 'quantity',
+  }, undefined, undefined, undefined, undefined, ingredientMember.token);
+  eq('家庭成员能新增本家庭原料', memberIngredient.status, 200);
+  eq('普通家庭成员不能新增分类', (await req('POST', `/api/pantry-categories?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '家庭成员分类', parentId: meatRoot && meatRoot.id,
+  }, undefined, undefined, undefined, undefined, ingredientMember.token)).status, 403);
+  eq('幽灵家庭原料写入被拒', (await req('POST', '/api/ingredients?householdId=h_missing', {
+    name: '幽灵食材', aliases: [], categoryId, defaultTrackingMode: 'quantity',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 404);
+  eq('跨家庭分类引用被拒', (await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '跨家庭引用食材', aliases: [], categoryId: householdBCategory.body.data.id, defaultTrackingMode: 'quantity',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 400);
+  eq('关联原料的库存行成功保存', (await req('POST', '/api/pantry', {
+    householdId: ingredientHouseAId, name: '牛里脊', ingredientId: tenderloin.body.data.id, category: '肉类', quantity: 500, unit: 'g',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 200);
+  eq('库存引用中的原料不能删除', (await req('DELETE', `/api/ingredients/${tenderloin.body.data.id}?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 409);
+  eq('菜谱引用原料的菜成功保存', (await req('POST', `/api/my-dishes?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '牛排菜谱', category: '家常菜', seasonings: [{ name: '牛排', amount: '200 g', ingredientId: steak.body.data.id }],
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 200);
+  eq('菜谱引用中的原料不能删除', (await req('DELETE', `/api/ingredients/${steak.body.data.id}?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 409);
+  eq('未加入成员不能读取家庭原料', (await req('GET', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, (await registerAccount('原料字典外部账号')).token)).status, 403);
+  const scopedIngredientState = await req('GET', `/api/state?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  ok('家庭状态只含本家庭原料', scopedIngredientState.body.data.ingredients?.some((i) => i.name === '牛里脊') && !scopedIngredientState.body.data.ingredients?.some((i) => i.name === 'B 家独有食材'));
+  eq('未选择家庭状态不暴露家庭原料', (await req('GET', '/api/state', undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).body.data.ingredients, []);
+  eq('未选择家庭状态不暴露自定义分类', (await req('GET', '/api/state', undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).body.data.pantryCategories, []);
+  const ingredientSuper = await authorizeSuper('2468', ingredientOwner.token);
+  DEFAULT_ACCOUNT_TOKEN = ingredientOwner.token;
+  const ingredientBackup = await reqRaw('GET', '/api/export', undefined, ingredientSuper.token);
+  eq('原料字典备份导出成功', ingredientBackup.status, 200);
+  const ingredientRestore = await reqRaw('POST', '/api/import', ingredientBackup.buf, ingredientSuper.token);
+  eq('原料字典备份导入成功', ingredientRestore.status, 200);
+  const restoredIngredientState = await req('GET', `/api/state?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  ok('备份往返保留家庭原料和分类', restoredIngredientState.body.data.ingredients?.some((i) => i.name === '牛里脊') && restoredIngredientState.body.data.pantryCategories?.some((c) => c.id === categoryId));
+  ok('备份往返保留菜谱和库存原料引用', restoredIngredientState.body.data.pantry?.some((p) => p.ingredientId === tenderloin.body.data.id) && restoredIngredientState.body.data.dishes?.some((dish) => dish.seasonings.some((s) => s.ingredientId === steak.body.data.id)));
+  eq('被原料引用的子分类不能删除', (await req('DELETE', `/api/pantry-categories/${categoryId}?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 409);
+  eq('解散家庭时原料和自定义分类一并清理', (await req('DELETE', `/api/households/${ingredientHouseAId}`, undefined, ingredientSuper.token, undefined, undefined, undefined, ingredientOwner.token)).status, 200);
+  const afterIngredientDissolve = await req('GET', `/api/state?householdId=${encodeURIComponent(ingredientHouseBId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  ok('解散家庭后另一家庭原料仍在', afterIngredientDissolve.body.data.ingredients?.some((i) => i.name === 'B 家独有食材') && !afterIngredientDissolve.body.data.ingredients?.some((i) => i.name === '牛里脊'));
+  await stop(ingredientInst);
+
   /* ---------- 收尾 ---------- */
   fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5 });
 
