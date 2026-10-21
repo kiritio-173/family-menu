@@ -855,6 +855,33 @@ async function main() {
           choices: [{ message: { role: 'assistant', content: '<think>想了一下</think>这不是 JSON' } }],
         }));
       }
+      if (body.includes('INGREDIENT_CLASSIFY_INVALID')) {
+        return rs.end(JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: JSON.stringify({ items: [
+            { inputName: '未知材料', name: '未知材料', category: '外星分类', trackingMode: 'maybe', confidence: 2, reason: 'bad' },
+          ] }) } }],
+        }));
+      }
+      if (body.includes('INGREDIENT_CLASSIFY_TEST')) {
+        return rs.end(JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: JSON.stringify({ items: [
+            { inputName: '白砂糖', name: '白砂糖', category: '调味干货', trackingMode: 'presence', confidence: 0.94, reason: '常备调味品' },
+          ] }) } }],
+        }));
+      }
+      if (body.includes('PLAN_ANALYSIS_TEST')) {
+        return rs.end(JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: JSON.stringify({
+            summary: '番茄库存不足，盐需要确认。',
+            flags: [{ name: '番茄', reason: '库存少于本周需求', suggestion: '补足显示的缺口' }],
+          }) } }],
+        }));
+      }
+      if (body.includes('PLAN_ANALYSIS_INVALID')) {
+        return rs.end(JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: JSON.stringify({ summary: 5, flags: 'write pantry' }) } }],
+        }));
+      }
       // 备餐时间轴：结构不一样，单独回一份，别混进 cook-plan 的字段里。
       // 认的是系统提示里独有的 startMinute —— 发给假服务器的是 messages，里面没有 task 名。
       if (body.indexOf('startMinute') >= 0) {
@@ -968,6 +995,34 @@ async function main() {
   const emptyPrompt = await post('/api/ai/chat', { task: 'cook-plan', prompt: '' });
   eq('空内容被拒', emptyPrompt.status, 400);
 
+  const classify = await post('/api/ai/chat', {
+    task: 'ingredient-classify',
+    prompt: 'INGREDIENT_CLASSIFY_TEST 白砂糖',
+  });
+  ok('AI 食材分类任务可调用', classify.status === 200 && classify.body.data.ok === true, classify.body.data);
+  eq('AI 分类返回可确认字段', classify.body.data.result.items[0], {
+    inputName: '白砂糖', name: '白砂糖', category: '调味干货', trackingMode: 'presence', confidence: 0.94, reason: '常备调味品',
+  });
+  const invalidClassify = await post('/api/ai/chat', {
+    task: 'ingredient-classify',
+    prompt: 'INGREDIENT_CLASSIFY_INVALID 未知材料',
+  });
+  eq('非法 AI 分类结果不作为成功建议', invalidClassify.body.data.ok, false);
+  const planAnalysis = await post('/api/ai/chat', {
+    task: 'plan-analysis',
+    prompt: 'PLAN_ANALYSIS_TEST 本周缺口已由程序计算',
+  });
+  ok('AI 计划分析任务可调用', planAnalysis.status === 200 && planAnalysis.body.data.ok === true, planAnalysis.body.data);
+  eq('AI 计划分析仅返回只读说明', planAnalysis.body.data.result, {
+    summary: '番茄库存不足，盐需要确认。',
+    flags: [{ name: '番茄', reason: '库存少于本周需求', suggestion: '补足显示的缺口' }],
+  });
+  const invalidPlanAnalysis = await post('/api/ai/chat', {
+    task: 'plan-analysis',
+    prompt: 'PLAN_ANALYSIS_INVALID',
+  });
+  eq('非法 AI 计划分析不返回成功', invalidPlanAnalysis.body.data.ok, false);
+
   // 备餐时间轴：厨房助手现在用的任务，要能拿到 minutes / parallel / startMinute
   const tl = await post('/api/ai/chat', { task: 'prep-timeline', prompt: '今天做番茄炒蛋和宫保鸡丁' });
   ok('备餐时间轴调用成功', tl.body.data.ok === true, tl.body.data);
@@ -1066,7 +1121,9 @@ async function main() {
   ok('采购入库不调用原生 prompt', !fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8').includes('window.prompt'));
   const appSource = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
   ok('计划采购按调料/普通食材分组', /purchaseShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning\)/.test(appSource) && /stapleShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*it\.isSeasoning\)/.test(appSource));
-  ok('计划调料不汇总菜谱用量', /if\s*\(item\.isSeasoning\)\s*return;/.test(appSource));
+  const pantryLogicSource = fs.readFileSync(path.join(ROOT, 'public', 'pantry-logic.js'), 'utf8');
+  ok('计划有无型食材不汇总菜谱用量', /if\s*\(item\.trackingMode\s*===\s*'presence'\)\s*return;/.test(pantryLogicSource));
+  ok('库存逻辑脚本先于应用脚本加载', /pantry-logic\.js[\s\S]*app\.js/.test(fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8')));
   ok('计划中库存充足食材标记完成', /planMode[\s\S]{0,160}assessment\.key\s*===\s*'enough'/.test(appSource));
   // 版本页不该要口令：网页上任何人都该能看到自己跑的是哪一版
   const noPinVer = (await get('/api/version')).status;

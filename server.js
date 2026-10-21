@@ -3461,6 +3461,26 @@ async function handleAPI(req, res, url) {
           '通用的留在菜品级；只有一个做法时调料一律放菜品级，那个做法的 seasonings 留空数组。',
         wantJSON: true,
       },
+      'ingredient-classify': {
+        system:
+          '你是家庭食材分类助手。用户会给你若干食材名称及现有分类线索。' +
+          '请只输出 JSON，不要 markdown 或解释。格式：' +
+          '{"items":[{"inputName":"原名称","name":"标准名称","category":"分类",' +
+          '"trackingMode":"presence|quantity","confidence":0.0,"reason":"简短理由"}]}。' +
+          `category 只能从 ${PANTRY_CATEGORIES.map((c) => c.name).join('、')} 中选择。` +
+          'presence 仅用于明确的常备调料，表示只需要记录家里有或没有；普通食材使用 quantity。' +
+          '葱、姜、蒜展示分类统一建议为调味干货。' +
+          '不要推断库存数量、单位、采购数量或计划状态。逐项对应输入，不要新增材料。',
+        wantJSON: true,
+      },
+      'plan-analysis': {
+        system:
+          '你是家庭备菜计划解释助手。输入中已经包含程序计算的需求、库存和缺口。' +
+          '只解释结果、指出需要人工确认的分类或单位，不要重新计算数量，不要修改库存或采购状态。' +
+          '请只输出 JSON：{"summary":"简短总结","flags":[{"name":"材料名",' +
+          '"reason":"需要注意的原因","suggestion":"可执行的人工建议"}]}。',
+        wantJSON: true,
+      },
       'cook-plan': {
         system:
           '你是厨房调度助手。用户会给今天要一起做的几道菜。' +
@@ -3510,9 +3530,47 @@ async function handleAPI(req, res, url) {
         data: { ok: false, error: 'AI 的回复看不懂（不是合法 JSON），可以再试一次' },
       });
     }
+    let result = t.wantJSON ? r.json : r.text;
+    if (task === 'ingredient-classify') {
+      const allowedCategories = new Set(PANTRY_CATEGORIES.map((c) => c.name));
+      const source = r.json && Array.isArray(r.json.items) ? r.json.items : [];
+      const items = source.slice(0, 100).filter((item) =>
+        item && typeof item.inputName === 'string' && item.inputName.trim() &&
+        typeof item.name === 'string' && item.name.trim() &&
+        allowedCategories.has(item.category) &&
+        ['presence', 'quantity'].includes(item.trackingMode) &&
+        Number.isFinite(Number(item.confidence)) && Number(item.confidence) >= 0 && Number(item.confidence) <= 1
+      ).map((item) => ({
+        inputName: safeText(item.inputName, 40).trim(),
+        name: safeText(item.name, 40).trim(),
+        category: item.category,
+        trackingMode: item.trackingMode,
+        confidence: Number(item.confidence),
+        reason: safeText(item.reason, 120).trim(),
+      }));
+      if (!items.length) {
+        return sendJSON(res, 200, { ok: true, data: { ok: false, error: 'AI 没有返回可确认的食材分类' } });
+      }
+      result = { items };
+    } else if (task === 'plan-analysis') {
+      const summary = r.json && typeof r.json.summary === 'string' ? safeText(r.json.summary, 500).trim() : '';
+      const flags = r.json && Array.isArray(r.json.flags) ? r.json.flags : null;
+      if (!summary || !flags) {
+        return sendJSON(res, 200, { ok: true, data: { ok: false, error: 'AI 计划分析结果结构不完整' } });
+      }
+      result = {
+        summary,
+        flags: flags.slice(0, 30).filter((flag) => flag && typeof flag.name === 'string' && typeof flag.reason === 'string' && typeof flag.suggestion === 'string')
+          .map((flag) => ({
+            name: safeText(flag.name, 60).trim(),
+            reason: safeText(flag.reason, 240).trim(),
+            suggestion: safeText(flag.suggestion, 240).trim(),
+          })),
+      };
+    }
     return sendJSON(res, 200, {
       ok: true,
-      data: { ok: true, result: t.wantJSON ? r.json : r.text, usage: r.usage, model: r.model },
+      data: { ok: true, result, usage: r.usage, model: r.model },
     });
   }
 

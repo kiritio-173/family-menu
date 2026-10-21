@@ -1597,6 +1597,26 @@ async function setShoppingStatus(name, state) {
 async function stockOne(name, parts, options) {
   const opts = options || {};
   const item = opts.item || (S.shopList || []).find((x) => x.name === name) || null;
+  if (item && item.trackingMode === 'presence') {
+    const stock = findStock(name);
+    if (stock.length) {
+      for (const pantry of stock) await api('PUT', `/api/pantry/${pantry.id}`, { ...pantry, trackingMode: 'presence', hasStock: true });
+    } else {
+      await api('POST', '/api/pantry', {
+        householdId: S.householdId,
+        name,
+        category: item.category || '调味干货',
+        trackingMode: 'presence',
+        hasStock: true,
+        quantity: 0,
+        minQuantity: 0,
+        unit: '',
+        note: '从计划确认家中有',
+      });
+    }
+    await setShoppingStatus(name, 'completed');
+    return { name, hasStock: true };
+  }
   const guessed = guessAmount(parts || []);
   const assessment = item ? stockAssessment(item) : null;
   const defaultQty = assessment && assessment.shortageQty != null
@@ -2359,6 +2379,7 @@ const INGREDIENT_ALIASES = Object.freeze({
 });
 
 function ingredientMatchKey(name) {
+  if (window.PantryLogic && window.PantryLogic.normalizeName) return window.PantryLogic.normalizeName(name);
   const key = String(name || '')
     .toLowerCase()
     .replace(/[\s\u3000、，。；：:（）()【】\[\]\/\\·'"“”‘’\-_.]/g, '');
@@ -2398,65 +2419,23 @@ function collectDishSeasonings(d) {
 
 /** 把一批「菜名 + 调料」汇总成采购条目，同名的合并 */
 function mergeSeasonings(rows) {
-  const map = new Map();
-  rows.forEach((r) => {
-    if (!r.name) return;
-    const mergeKey = ingredientMatchKey(r.name);
-    if (!map.has(mergeKey)) {
-      const category = ingredientCategory(r.name, findStock(r.name));
-      map.set(mergeKey, {
-        name: r.name,
-        parts: [],
-        useCount: 0,
-        requiredQty: null,
-        requiredUnit: '',
-        requiredComparable: true,
-        purchaseType: r.purchaseType || '',
-        isSeasoning: category === '调味干货',
-      });
-    }
-    const item = map.get(mergeKey);
-    item.useCount += 1;
-    // 同一调料有明确“需要采购”的一条时，采购优先；否则保留明确的常备设置。
-    if (r.purchaseType === 'purchase' || (r.purchaseType === 'staple' && !item.purchaseType)) item.purchaseType = r.purchaseType;
-    const parts = item.parts;
-    const tag = r.method ? `${r.dish}（${r.method}） ${r.amount}` : `${r.dish} ${r.amount}`;
-    if (!parts.includes(tag)) parts.push(tag);
-    // 调味干货只用于库存确认，不汇总菜谱用量；瓶、勺、克等单位不参与计划计算。
-    if (item.isSeasoning) return;
-    const amount = parseAmountText(r.amount);
-    if (amount.quantity == null) {
-      item.requiredComparable = false;
-      return;
-    }
-    if (!item.requiredUnit) {
-      item.requiredUnit = amount.unit;
-      item.requiredQty = amount.quantity;
-      return;
-    }
-    if (item.requiredComparable && item.requiredUnit === amount.unit) {
-      item.requiredQty += amount.quantity;
-      return;
-    }
-    item.requiredComparable = false;
-  });
-  return [...map.values()].map((item) => {
-    const stock = findStock(item.name);
-    const category = ingredientCategory(item.name, stock);
-    return {
-      ...item,
-      category,
-      isSeasoning: category === '调味干货',
-      isStaple: item.purchaseType === 'staple' || (item.purchaseType !== 'purchase' && category === '调味干货'),
-      stock,
-      stockQty: stock.reduce((s, p) => s + (p.quantity || 0), 0),
-      // 多条同名但单位不同的时候就不显示数字，免得误导
-      stockUnit:
-        stock.length === 1
-          ? stock[0].unit
-          : stock.map((p) => p.unit).filter((v, i, a) => a.indexOf(v) === i).join('/'),
-    };
-  });
+  return window.PantryLogic.aggregatePlanMaterials(rows, {
+    normalizeName: ingredientMatchKey,
+    inferTrackingMode(row) {
+      const stock = findStock(row.name);
+      const explicit = stock.find((p) => p.trackingMode === 'presence' || p.trackingMode === 'quantity');
+      return window.PantryLogic.inferTrackingMode({ ...row, trackingMode: explicit && explicit.trackingMode });
+    },
+    parseAmount: parseAmountText,
+    stockFor: findStock,
+    categoryFor: ingredientCategory,
+  }).map((item) => ({
+    ...item,
+    stockQty: item.stock.reduce((sum, p) => sum + (Number(p.quantity) || 0), 0),
+    stockUnit: item.stock.length === 1
+      ? item.stock[0].unit
+      : item.stock.map((p) => p.unit).filter((v, i, a) => a.indexOf(v) === i).join('/'),
+  }));
 }
 
 function shoppingIngredientKey(name, unit) {
@@ -2472,6 +2451,7 @@ function roundQty(value) {
 
 /** 根据需求量和当前家庭库存，判断采购条目的真实状态。 */
 function stockAssessment(item) {
+  if (window.PantryLogic) return window.PantryLogic.assessStock(item);
   const stock = Array.isArray(item.stock) ? item.stock : [];
   const positive = stock.filter((p) => Number(p.quantity) > 0);
   if (item.isSeasoning) {
@@ -3062,6 +3042,7 @@ function viewPlan() {
     ? `${purchaseShop.length || stapleShop.length ? `<div class="section-head">
         <h2 class="section-title">食材采购</h2>
         <span class="section-sub">${purchaseShop.length ? `${purchaseShop.length} 样食材${missing.length ? ` · ${missing.length} 样库存不足` : ' · 库存可覆盖'}` : '没有需要采购的食材'}</span>
+        ${isSuper() && aiReady() && shop.length ? `<button class="btn soft sm" style="margin-left:auto" data-act="ai-plan-analysis">✨ AI 备菜分析</button>` : ''}
         ${shop.length ? `<button class="btn soft sm" style="margin-left:auto" data-act="copy-plan-shopping">复制清单</button>` : ''}
       </div>` : ''}
       ${purchaseShop.length
@@ -3175,9 +3156,10 @@ function qtyStep(unit) {
 }
 
 function foodRow(p) {
+  const presence = window.PantryLogic.inferTrackingMode(p) === 'presence';
   const st = shelfStatus(p);
   const low = Number(p.minQuantity) > 0 && Number(p.quantity) < Number(p.minQuantity);
-  const flagText = Number(p.quantity) <= 0
+  const flagText = presence ? (p.hasStock ? '家里有' : '家里没有') : Number(p.quantity) <= 0
     ? '用完，待补'
     : low ? `低于最低量 ${fmtQty(p.minQuantity)}${p.unit}`
     : st.key === 'none' ? (p.expireAt || '未填保质期') : st.label;
@@ -3192,7 +3174,7 @@ function foodRow(p) {
       <span class="pick-box">${on ? '✓' : ''}</span>
       <div class="food-main">
         <div class="food-name">${esc(p.name)}
-          <span class="food-qty-inline">${esc(fmtQty(p.quantity))}${esc(p.unit)}</span>
+          ${presence ? '<span class="food-qty-inline">有 / 无</span>' : `<span class="food-qty-inline">${esc(fmtQty(p.quantity))}${esc(p.unit)}</span>`}
         </div>
         <div class="food-sub">${esc(p.category)} · ${esc(flagText)}</div>
       </div>
@@ -3204,18 +3186,20 @@ function foodRow(p) {
     <div class="food-main" role="button" tabindex="0" data-act="edit-food" data-id="${esc(p.id)}"
       aria-label="编辑 ${esc(p.name)}">
       <div class="food-name">${esc(p.name)}
-        <span class="food-qty-inline">${esc(fmtQty(p.quantity))}${esc(p.unit)}</span>
+        ${presence ? '<span class="food-qty-inline">有 / 无' + '</span>' : `<span class="food-qty-inline">${esc(fmtQty(p.quantity))}${esc(p.unit)}</span>`}
       </div>
       <div class="food-sub">${esc(p.category)}${p.note ? ' · ' + esc(p.note) : ''}</div>
     </div>
     <div class="food-ops">
       <span class="food-flag flag-${flagKey}">${esc(flagText)}</span>
-      <div class="stepper">
+      ${presence
+        ? `<button class="btn soft sm" data-act="toggle-presence" data-id="${esc(p.id)}" data-has="${p.hasStock ? '1' : '0'}">${p.hasStock ? '✓ 家里有' : '标记家里有'}</button>`
+        : `<div class="stepper">
         <button class="step-btn" data-act="qty-dec" data-id="${esc(p.id)}" aria-label="减少 ${esc(p.name)}">−</button>
         <span class="step-val">${esc(fmtQty(p.quantity))}</span>
         <button class="step-btn" data-act="qty-inc" data-id="${esc(p.id)}"
           aria-label="增加 ${esc(p.name)}">${qtyStep(p.unit) === 1 ? '＋' : `+${esc(fmtQty(qtyStep(p.unit)))}`}</button>
-      </div>
+      </div>`}
     </div>
   </div>`;
 }
@@ -3258,7 +3242,9 @@ function pantryGroupHtml(category, items) {
   const ids = items.map((p) => p.id);
   const selected = ids.filter((id) => pickHas('pantry', id));
   const allOn = ids.length > 0 && selected.length === ids.length;
-  const emptyCount = items.filter((p) => Number(p.quantity) <= 0).length;
+  const emptyCount = items.filter((p) => window.PantryLogic.inferTrackingMode(p) === 'presence'
+    ? !p.hasStock
+    : Number(p.quantity) <= 0).length;
   const select = picking('pantry')
     ? `<button class="category-group-select" data-act="select-pantry-group" data-cat="${esc(category)}" data-on="${allOn ? '0' : '1'}" role="checkbox" aria-checked="${allOn}">${allOn ? '☑' : '☐'} 全选</button>`
     : '';
@@ -3442,6 +3428,7 @@ function viewPantry() {
   return `
     ${alertHtml}
     ${pickBar}
+    ${isSuper() && aiReady() && all.length ? `<div class="list-toolbar"><span class="section-sub">分类只用于分组，跟踪方式决定是否比较数量</span><button class="btn soft sm" data-act="ai-pantry-classify">✨ AI 整理分类</button></div>` : ''}
     <div class="stat-row">
       <div class="stat"><div class="stat-num">${all.length}</div><div class="stat-label">样食材</div></div>
       <div class="stat${soon.length ? ' warn' : ''}"><div class="stat-num">${soon.length}</div><div class="stat-label">快过期</div></div>
@@ -3517,6 +3504,8 @@ async function openFoodEditor(item) {
     quantity: 1,
     minQuantity: 0,
     unit: '份',
+    trackingMode: 'quantity',
+    hasStock: false,
     expireAt: '',
     note: '',
   };
@@ -3538,6 +3527,14 @@ async function openFoodEditor(item) {
         ${foodCategoryPickerHtml(p.category)}
       </div>
       <div class="field">
+        <label class="field-label">库存记录方式</label>
+        <select class="input" id="fFoodTracking">
+          <option value="quantity" ${window.PantryLogic.inferTrackingMode(p) === 'quantity' ? 'selected' : ''}>按数量记录</option>
+          <option value="presence" ${window.PantryLogic.inferTrackingMode(p) === 'presence' ? 'selected' : ''}>只记录家里有 / 没有</option>
+        </select>
+      </div>
+      <div id="fFoodQuantityFields" ${window.PantryLogic.inferTrackingMode(p) === 'presence' ? 'hidden' : ''}>
+      <div class="field">
         <label class="field-label">家里还有多少</label>
         <div class="row-2">
           <input class="input" id="fFoodQty" type="number" min="0" step="0.01" value="${esc(fmtQty(p.quantity))}" />
@@ -3551,6 +3548,7 @@ async function openFoodEditor(item) {
           <input class="input" id="fFoodMin" type="number" min="0" step="0.01" value="${esc(fmtQty(p.minQuantity || 0))}" />
           <div class="input" style="background:var(--bg-soft);color:var(--muted)">${esc(p.unit || '份')}</div>
         </div>
+      </div>
       </div>
       <div class="field">
         <label class="field-label">保质期到哪天<span class="field-hint">超过或快到 3 天会自动标红提醒</span></label>
@@ -6394,7 +6392,21 @@ const ACTIONS = {
   async 'toggle-shop'(el) {
     const name = el.dataset.name;
     try {
+      const item = (S.shopList || []).find((row) => row.name === name);
+      if (item && item.trackingMode === 'presence') {
+        const currentlyDone = S.shoppingChecked.has(name);
+        const stock = findStock(name);
+        if (stock.length) {
+          for (const pantry of stock) await api('PUT', `/api/pantry/${pantry.id}`, { ...pantry, trackingMode: 'presence', hasStock: !currentlyDone });
+        } else if (!currentlyDone) {
+          await api('POST', '/api/pantry', {
+            householdId: S.householdId, name, category: item.category || '调味干货',
+            trackingMode: 'presence', hasStock: true, quantity: 0, minQuantity: 0, unit: '',
+          });
+        }
+      }
       await setShoppingStatus(name, S.shoppingChecked.has(name) ? 'needed' : 'completed');
+      await loadState(true);
       render();
     } catch (err) {
       toast(err.message || '采购状态保存失败');
@@ -6891,6 +6903,93 @@ const ACTIONS = {
   'new-food'() {
     openFoodEditor(null);
   },
+  async 'ai-pantry-classify'() {
+    const rows = householdPantry();
+    const result = await askAI('ingredient-classify', JSON.stringify(rows.slice(0, 100).map((p) => ({
+      inputName: p.name,
+      category: p.category,
+      trackingMode: p.trackingMode || window.PantryLogic.inferTrackingMode(p),
+    }))));
+    if (!result || !Array.isArray(result.items)) return;
+    const options = PANTRY_ORDER.map((category) => `<option value="${esc(category)}">${esc(category)}</option>`).join('');
+    const body = result.items.map((proposal, index) => {
+      const pantry = rows.find((p) => ingredientMatchKey(p.name) === ingredientMatchKey(proposal.inputName));
+      if (!pantry) return '';
+      return `<div class="list-row">
+        <input type="checkbox" id="aiPantryCheck${index}" data-pantry-id="${esc(pantry.id)}" />
+        <span class="list-row-main"><span class="list-row-title">${esc(proposal.inputName)} · 标准名建议 ${esc(proposal.name)}</span>
+          <span class="list-row-sub">置信度 ${Math.round(Number(proposal.confidence) * 100)}% · ${esc(proposal.reason || '')}</span></span>
+        <input class="input" id="aiPantryName${index}" value="${esc(proposal.name)}" aria-label="标准名称" />
+        <select class="input" id="aiPantryCategory${index}">${options}</select>
+        <select class="input" id="aiPantryMode${index}"><option value="quantity">按数量</option><option value="presence">有 / 无</option></select>
+      </div>`;
+    }).join('');
+    if (!body) return toast('AI 没有找到可对应的现有库存条目');
+    openSheet({
+      title: '确认 AI 分类建议',
+      body: `<p class="section-sub">只保存勾选的条目；分类和跟踪方式可在保存前调整。</p>${body}`,
+      foot: '<button class="btn ghost" data-act="close-sheet">取消</button><button class="btn" data-act="confirm-pantry-ai">保存勾选项</button>',
+      onMount(root) {
+        result.items.forEach((proposal, index) => {
+          const category = root.querySelector(`#aiPantryCategory${index}`);
+          const mode = root.querySelector(`#aiPantryMode${index}`);
+          if (category && PANTRY_ORDER.includes(proposal.category)) category.value = proposal.category;
+          if (mode && ['presence', 'quantity'].includes(proposal.trackingMode)) mode.value = proposal.trackingMode;
+        });
+      },
+    });
+  },
+  async 'confirm-pantry-ai'() {
+    const selected = [...document.querySelectorAll('#modalRoot [data-pantry-id]:checked')];
+    if (!selected.length) return toast('先勾选要保存的建议');
+    for (const checkbox of selected) {
+      const pantry = householdPantry().find((p) => p.id === checkbox.dataset.pantryId);
+      if (!pantry) continue;
+      const index = checkbox.id.replace('aiPantryCheck', '');
+      const name = $(`#aiPantryName${index}`).value.trim();
+      if (!name) return toast('标准名不能为空');
+      const collision = findStock(name).find((p) => p.id !== pantry.id);
+      if (collision) return toast(`「${name}」已存在库存记录，请先合并后再整理`);
+      const trackingMode = $(`#aiPantryMode${index}`).value;
+      await api('PUT', `/api/pantry/${pantry.id}`, {
+        ...pantry,
+        name,
+        category: $(`#aiPantryCategory${index}`).value,
+        trackingMode,
+        hasStock: trackingMode === 'presence' ? Boolean(pantry.hasStock || Number(pantry.quantity) > 0) : false,
+        quantity: trackingMode === 'presence' ? 0 : pantry.quantity,
+        minQuantity: trackingMode === 'presence' ? 0 : pantry.minQuantity,
+        unit: trackingMode === 'presence' ? '' : pantry.unit,
+      });
+    }
+    closeSheet();
+    await loadState(true);
+    render();
+    toast(`已整理 ${selected.length} 项库存`);
+  },
+  async 'ai-plan-analysis'() {
+    const items = (S.shopList || []).map((item) => {
+      const assessment = stockAssessment(item);
+      return {
+        name: item.name,
+        trackingMode: item.trackingMode,
+        category: item.category,
+        requiredQty: item.requiredQty,
+        requiredUnit: item.requiredUnit,
+        stockQty: assessment.stockQty,
+        shortageQty: assessment.shortageQty,
+        status: assessment.key,
+        unitUncertain: assessment.key === 'uncertain',
+      };
+    });
+    const result = await askAI('plan-analysis', JSON.stringify({ weekOf: planWeek(), items }));
+    if (!result || !result.summary) return;
+    openSheet({
+      title: 'AI 备菜分析',
+      body: `<p>${esc(result.summary)}</p>${(result.flags || []).map((flag) => `<div class="list-row"><span class="list-row-main"><span class="list-row-title">${esc(flag.name)}</span><span class="list-row-sub">${esc(flag.reason)} · ${esc(flag.suggestion)}</span></span></div>`).join('')}<p class="section-sub">分析仅作说明，库存和采购缺口仍按程序计算结果为准。</p>`,
+      foot: '<button class="btn" data-act="close-sheet">关闭</button>',
+    });
+  },
   'edit-food'(el) {
     openFoodEditor(householdPantry().find((p) => p.id === el.dataset.id));
   },
@@ -6927,6 +7026,11 @@ const ACTIONS = {
       syncFoodCategoryPicker(cat);
     }
     if (unit) $('#fFoodUnit').value = unit;
+    if (window.PantryLogic.inferTrackingMode({ name, category: cat }) === 'presence') {
+      $('#fFoodTracking').dataset.manual = '';
+      $('#fFoodTracking').value = 'presence';
+      $('#fFoodQuantityFields').hidden = true;
+    }
     if (exp) $('#fFoodExp').value = exp;
     if (!$('#fFoodNote').value.trim()) $('#fFoodNote').value = '';
     toast(`已填入「${name}」`);
@@ -6945,13 +7049,18 @@ const ACTIONS = {
   async 'save-food'(el) {
     const name = $('#fFoodName').value.trim();
     if (!name) return toast('先写上食材名');
+    const currentItem = householdPantry().find((p) => p.id === el.dataset.id);
     const body = {
       householdId: S.householdId,
       name,
       category: $('#fFoodCat').value,
-      quantity: Number($('#fFoodQty').value) || 0,
-      minQuantity: Number($('#fFoodMin').value) || 0,
-      unit: $('#fFoodUnit').value.trim() || '份',
+      trackingMode: $('#fFoodTracking').value,
+      hasStock: $('#fFoodTracking').value === 'presence'
+        ? Boolean(currentItem && (currentItem.hasStock || Number(currentItem.quantity) > 0))
+        : false,
+      quantity: $('#fFoodTracking').value === 'presence' ? 0 : Number($('#fFoodQty').value) || 0,
+      minQuantity: $('#fFoodTracking').value === 'presence' ? 0 : Number($('#fFoodMin').value) || 0,
+      unit: $('#fFoodTracking').value === 'presence' ? '' : ($('#fFoodUnit').value.trim() || '份'),
       expireAt: $('#fFoodExp').value || '',
       note: $('#fFoodNote').value.trim(),
     };
@@ -6976,6 +7085,13 @@ const ACTIONS = {
   },
   async 'qty-dec'(el) {
     await bumpQty(el.dataset.id, -1);
+  },
+  async 'toggle-presence'(el) {
+    const p = householdPantry().find((row) => row.id === el.dataset.id);
+    if (!p) return;
+    await api('PUT', `/api/pantry/${p.id}`, { ...p, trackingMode: 'presence', hasStock: el.dataset.has !== '1' });
+    await loadState(true);
+    render();
   },
   async 'purge-pantry'(el) {
     const scope = el.dataset.scope || 'expired';
@@ -7946,6 +8062,17 @@ document.addEventListener('toggle', (e) => {
 
 /* 改分类时，常见食材快选跟着换 */
 document.addEventListener('change', (e) => {
+  if (e.target.id === 'fFoodTracking') {
+    e.target.dataset.manual = '1';
+    const presence = e.target.value === 'presence';
+    const fields = $('#fFoodQuantityFields');
+    if (fields) fields.hidden = presence;
+  }
+  if (e.target.id === 'fFoodName' && !$('#fFoodTracking')?.dataset.manual) {
+    const presence = window.PantryLogic.inferTrackingMode({ name: e.target.value }) === 'presence';
+    $('#fFoodTracking').value = presence ? 'presence' : 'quantity';
+    $('#fFoodQuantityFields').hidden = presence;
+  }
   if (e.target.id === 'fFoodCat') renderPresetGrid();
   if (e.target.dataset && e.target.dataset.batchAct === 'batch-import-toggle') {
     const d = S.batchImport[Number(e.target.dataset.i)];

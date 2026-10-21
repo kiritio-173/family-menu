@@ -39,6 +39,7 @@ async function main() {
   const isEmpty = !fs.existsSync(path.join(APP, 'data', 'dishes.json'));
 
   ok('包内有自带 runtime/node.exe', fs.existsSync(NODE));
+  ok('便携版包含库存与计划共享逻辑', fs.existsSync(path.join(APP, 'public', 'pantry-logic.js')));
   ok('没有分发 orders.json', !fs.existsSync(path.join(APP, 'data', 'orders.json')));
   ok('没有分发 pantry.json', !fs.existsSync(path.join(APP, 'data', 'pantry.json')));
   // 便携包是要发出去的：API Key 和管理口令跟着走就是白送。
