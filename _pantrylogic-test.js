@@ -9,8 +9,9 @@ const {
 
 assert.strictEqual(inferTrackingMode({ name: '白砂糖', category: '其他' }), 'presence');
 assert.strictEqual(inferTrackingMode({ name: '蒜末', category: '蔬菜' }), 'presence');
-assert.strictEqual(inferTrackingMode({ name: '食用油', category: '调味干货' }), 'quantity');
-assert.strictEqual(inferTrackingMode({ name: '番茄', category: '调味干货' }), 'quantity');
+assert.strictEqual(inferTrackingMode({ name: '食用油', category: '调味干货' }), 'presence');
+assert.strictEqual(inferTrackingMode({ name: '味精', category: '调味干货', purchaseType: 'purchase' }), 'presence');
+assert.strictEqual(inferTrackingMode({ name: '番茄', category: '调味干货' }), 'presence');
 assert.strictEqual(inferTrackingMode({ name: '鸡肉', category: '肉类' }), 'quantity');
 assert.strictEqual(inferTrackingMode({ name: '食盐', trackingMode: 'quantity' }), 'quantity');
 
@@ -43,6 +44,21 @@ assert.strictEqual(salt.trackingMode, 'presence');
 assert.strictEqual(salt.requiredQty, null);
 assert.strictEqual(salt.requiredUnit, '');
 assert.strictEqual(aggregate.find((item) => item.name === '蒜末').useCount, 2);
+
+const cuminBeef = aggregatePlanMaterials([
+  { name: '食用油', amount: '适量', dish: '孜然牛肉', ingredientId: 'oil', category: '主食粮油', trackingMode: 'quantity', purchaseType: 'purchase' },
+  { name: '味精', amount: '适量', dish: '孜然牛肉', ingredientId: 'msg', category: '调味干货', trackingMode: 'presence', purchaseType: 'purchase' },
+], {
+  inferTrackingMode,
+  parseAmount: () => ({ quantity: null, unit: '' }),
+  stockFor: () => [],
+  categoryFor: (_name, _stock, _id, item) => item.category,
+});
+assert.strictEqual(cuminBeef.find((item) => item.name === '食用油').trackingMode, 'quantity');
+assert.strictEqual(cuminBeef.find((item) => item.name === '食用油').requiredComparable, false);
+assert.strictEqual(assessStock(cuminBeef.find((item) => item.name === '食用油')).key, 'uncertain');
+assert.strictEqual(cuminBeef.find((item) => item.name === '味精').trackingMode, 'presence');
+assert.strictEqual(cuminBeef.find((item) => item.name === '味精').requiredQty, null);
 
 const idAggregate = aggregatePlanMaterials([
   { name: '番茄', amount: '2 个', dish: '炒蛋', ingredientId: 'ing-tomato', categoryId: 'veg-root', trackingMode: 'quantity' },
