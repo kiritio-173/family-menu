@@ -399,6 +399,26 @@ async function main() {
 
   const f2 = (await post('/api/pantry', { householdId: h301.id, name: '牛奶' })).body.data;
   eq('只给名字也能存', [f2.quantity, f2.unit], [1, '份']);
+  const presenceSugar = (await post('/api/pantry', {
+    householdId: h301.id, name: '白砂糖', category: '其他', trackingMode: 'presence', hasStock: true, quantity: 5, unit: '袋',
+  })).body.data;
+  eq('有无模式不保存数量单位', [presenceSugar.trackingMode, presenceSugar.hasStock, presenceSugar.quantity, presenceSugar.minQuantity, presenceSugar.unit], ['presence', true, 0, 0, '']);
+  const quantityOil = (await post('/api/pantry', {
+    householdId: h301.id, name: '食用油', category: '调味干货', trackingMode: 'quantity', quantity: 2, unit: '瓶',
+  })).body.data;
+  eq('显式数量模式不被分类覆盖', [quantityOil.trackingMode, quantityOil.quantity, quantityOil.unit], ['quantity', 2, '瓶']);
+  const starch = (await post('/api/pantry', {
+    householdId: h301.id, name: '淀粉', category: '调味干货', quantity: 2, unit: '包',
+  })).body.data;
+  eq('展示分类不决定淀粉库存方式', [starch.trackingMode, starch.quantity, starch.unit], ['quantity', 2, '包']);
+  const invalidMode = (await post('/api/pantry', {
+    householdId: h301.id, name: '盐', category: '调味干货', trackingMode: 'unknown', quantity: 1, unit: '袋',
+  })).body.data;
+  eq('非法库存方式回退数量模式', invalidMode.trackingMode, 'quantity');
+  await del(`/api/pantry/${presenceSugar.id}`);
+  await del(`/api/pantry/${quantityOil.id}`);
+  await del(`/api/pantry/${starch.id}`);
+  await del(`/api/pantry/${invalidMode.id}`);
   const unclassifiedSugar = (await post('/api/pantry', {
     householdId: h301.id, name: '白糖', category: '其他', quantity: 1,
   })).body.data;
@@ -441,7 +461,7 @@ async function main() {
     householdId: h301.id, name: '白砂糖', category: '调味干货', quantity: 2, unit: '袋',
     addToExisting: true,
   })).body.data;
-  eq('白砂糖合并白糖库存', [sugarAlias.id, sugarAlias.quantity], [whiteSugar.id, 3]);
+  eq('白砂糖合并白糖有无库存', [sugarAlias.id, sugarAlias.trackingMode, sugarAlias.hasStock, sugarAlias.quantity], [whiteSugar.id, 'presence', true, 0]);
   const salt = (await post('/api/pantry', {
     householdId: h301.id, name: '盐', category: '调味干货', quantity: 1, unit: '瓶',
   })).body.data;
@@ -449,7 +469,7 @@ async function main() {
     householdId: h301.id, name: '食盐', category: '调味干货', quantity: 2, unit: '瓶',
     addToExisting: true,
   })).body.data;
-  eq('食盐合并盐库存', [saltAlias.id, saltAlias.quantity], [salt.id, 3]);
+  eq('食盐合并盐有无库存', [saltAlias.id, saltAlias.trackingMode, saltAlias.hasStock, saltAlias.quantity], [salt.id, 'presence', true, 0]);
 
   // 同一计划同一食材只允许入库一次，避免重复点击把库存加两遍。
   const receiveWeek = monday;
@@ -727,6 +747,7 @@ async function main() {
       JSON.stringify([
         { id: 'f_old_salt', name: '盐', category: '其他', quantity: 1, unit: '份' },
         { id: 'f_old_sugar', name: '白糖', category: '其他', quantity: 1, unit: '份' },
+        { id: 'f_old_ambiguous', name: '未知干货', category: '调味干货', quantity: 2, unit: '包' },
       ]),
       'utf8'
     );
@@ -751,6 +772,12 @@ async function main() {
   eq('历史盐和白糖库存迁到调味干货',
     st.pantry.filter((p) => ['盐', '白糖'].includes(p.name)).map((p) => p.category),
     ['调味干货', '调味干货']);
+  eq('旧盐糖按数量迁移有无状态',
+    st.pantry.filter((p) => ['盐', '白糖'].includes(p.name)).map((p) => [p.trackingMode, p.hasStock, p.quantity, p.unit]),
+    [['presence', true, 0, ''], ['presence', true, 0, '']]);
+  eq('模糊旧调味分类保留数量',
+    st.pantry.find((p) => p.name === '未知干货') && [st.pantry.find((p) => p.name === '未知干货').trackingMode, st.pantry.find((p) => p.name === '未知干货').quantity, st.pantry.find((p) => p.name === '未知干货').unit],
+    ['quantity', 2, '包']);
 
   // 迁移结果要真的落盘
   await stop(legacy);

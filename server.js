@@ -1230,7 +1230,7 @@ function normHousehold(input, prev) {
   };
 }
 
-/** 库存条目：{id, householdId, name, category, quantity, unit, expireAt, note} */
+/** 库存条目：quantity 模式记余量；presence 模式只记有/无。 */
 function normPantryItem(input, prev, keepInputId) {
   const base = prev || {};
   const name = safeText(input.name ?? base.name, 24).trim();
@@ -1247,9 +1247,19 @@ function normPantryItem(input, prev, keepInputId) {
 
   const cat = safeText(input.category ?? base.category, 12).trim();
   const known = PANTRY_CATEGORIES.some((c) => c.name === cat);
-  const category = ['盐', '糖'].includes(pantryIngredientKey(name))
+  const category = isKnownSeasoning(name)
     ? '调味干货'
     : known ? cat : '其他';
+  const requestedMode = input.trackingMode ?? base.trackingMode;
+  const hasRequestedMode = requestedMode !== undefined && requestedMode !== null;
+  const trackingMode = hasRequestedMode
+    ? requestedMode === 'presence' ? 'presence' : 'quantity'
+    : isKnownSeasoning(name) ? 'presence' : 'quantity';
+  const hasStock = typeof input.hasStock === 'boolean'
+    ? input.hasStock
+    : typeof base.hasStock === 'boolean'
+    ? base.hasStock
+    : qty > 0;
 
   return {
     id:
@@ -1258,9 +1268,12 @@ function normPantryItem(input, prev, keepInputId) {
     householdId: resolveHouseholdId(input.householdId ?? base.householdId),
     name,
     category,
-    quantity: qty,
-    minQuantity,
-    unit: safeText(input.unit ?? base.unit, 8).trim() || '份',
+    trackingMode,
+    ...(trackingMode === 'presence' ? { hasStock, quantity: 0, minQuantity: 0, unit: '' } : {
+      quantity: qty,
+      minQuantity,
+      unit: safeText(input.unit ?? base.unit, 8).trim() || '份',
+    }),
     expireAt: normDate(input.expireAt ?? base.expireAt),
     note: safeText(input.note ?? base.note, 100),
     createdAt: base.createdAt || input.createdAt || nowISO(),
@@ -1288,6 +1301,16 @@ function pantryIngredientKey(name) {
   return aliases[key] || key;
 }
 
+const PRESENCE_SEASONINGS = new Set([
+  '盐', '糖', '生抽', '老抽', '醋', '香醋', '米醋', '陈醋', '料酒', '黄酒',
+  '蚝油', '豆瓣酱', '辣椒酱', '番茄酱', '沙拉酱', '蜂蜜', '鸡精', '味精',
+  '花椒', '八角', '孜然粒', '干辣椒', '辣椒面', '咖喱块',
+]);
+
+function isKnownSeasoning(name) {
+  return PRESENCE_SEASONINGS.has(pantryIngredientKey(name)) || isSeasoningAromatic(name);
+}
+
 /** 采购累加只在同家庭、同食材、同包装单位的库存条目上进行。 */
 function pantryUnitKey(unit) {
   const key = safeText(unit, 8).trim().toLowerCase();
@@ -1305,12 +1328,18 @@ function isSeasoningAromatic(name) {
 function addPantryQuantity(item) {
   const hit = state.pantry.find(
     (p) => p.householdId === item.householdId &&
+      (p.trackingMode || 'quantity') === item.trackingMode &&
       pantryIngredientKey(p.name) === pantryIngredientKey(item.name) &&
       pantryUnitKey(p.unit) === pantryUnitKey(item.unit)
   );
   if (!hit) {
     state.pantry.unshift(item);
     return item;
+  }
+  if (item.trackingMode === 'presence') {
+    hit.hasStock = hit.hasStock || item.hasStock;
+    hit.updatedAt = nowISO();
+    return hit;
   }
   hit.quantity = Math.min(99999, Math.round((Number(hit.quantity || 0) + Number(item.quantity || 0)) * 1000) / 1000);
   if (!hit.expireAt && item.expireAt) hit.expireAt = item.expireAt;
@@ -1655,25 +1684,26 @@ function loadState() {
   });
 
   const seenF = new Set();
-  state.pantry = (Array.isArray(state.pantry) ? state.pantry : [])
+  const loadedPantry = Array.isArray(state.pantry) ? state.pantry : [];
+  state.pantry = loadedPantry
     .map((p) => (p && typeof p === 'object' ? normPantryItem(p, undefined, true) : null))
     .filter(Boolean)
     .filter((p) => (seenF.has(p.id) ? false : (seenF.add(p.id), true)));
-  let pantryCategoryChanged = false;
+  let pantryChanged = JSON.stringify(loadedPantry) !== JSON.stringify(state.pantry);
   state.pantry.forEach((p) => {
     if (!hhIds.has(p.householdId)) p.householdId = fallbackH;
     // 老版本把葱姜蒜归到了蔬菜；迁移到调味干货后，计划页也会按常备调料提示。
     if (p.category === '蔬菜' && isSeasoningAromatic(p.name)) {
       p.category = '调味干货';
-      pantryCategoryChanged = true;
+      pantryChanged = true;
     }
     // 早期从计划采购入库的盐、白糖没有对应预设分类，曾被保存为“其他”。
     if (['盐', '糖'].includes(pantryIngredientKey(p.name)) && p.category !== '调味干货') {
       p.category = '调味干货';
-      pantryCategoryChanged = true;
+      pantryChanged = true;
     }
   });
-  if (pantryCategoryChanged) scheduleSave('pantry');
+  if (pantryChanged) scheduleSave('pantry');
 
   // 本周计划：同样拉回有效家庭，周一归一
   const seenPl = new Set();
