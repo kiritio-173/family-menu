@@ -2,7 +2,7 @@
   'use strict';
 
   const PRESENCE_NAMES = new Set([
-    '盐', '食盐', '食用盐', '精盐', '盐巴', '白糖', '白砂糖', '糖', '冰糖', '红糖',
+    '盐', '食盐', '食用盐', '精盐', '盐巴', '白糖', '白砂糖', '糖', '冰糖', '红糖', '味精', '鸡精',
     '生抽', '酱油', '生抽酱油', '老抽', '老抽酱油', '醋', '米醋', '陈醋', '香醋',
     '料酒', '黄酒', '蚝油', '豆瓣酱', '甜面酱', '番茄酱', '辣椒酱', '芝麻油', '香油',
     '花椒', '八角', '桂皮', '香叶', '孜然', '胡椒粉', '白胡椒', '黑胡椒', '五香粉',
@@ -21,6 +21,8 @@
   }
 
   function inferTrackingMode(item) {
+    const category = String(item && item.category || '').trim();
+    if (category === '调味干货' || category.startsWith('调味干货 > ')) return 'presence';
     if (item && item.trackingMode === 'presence') return 'presence';
     if (item && item.trackingMode === 'quantity') return 'quantity';
     if (item && item.purchaseType === 'purchase') return 'quantity';

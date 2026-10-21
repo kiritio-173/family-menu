@@ -41,10 +41,20 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.31.1';
+const APP_VERSION = '1.31.2';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.31.2',
+    date: '2026-10-21',
+    title: '调味干货有无管理与入库反馈',
+    items: [
+      '库存移入调味干货后自动切换为有/无记录，并同步家庭原料字典和关联库存',
+      '计划把食用油等数量型食材标成用量不明时，入库后记录确认、从待购项移除并提示仍需人工核实',
+      '调料入库后即时显示确认结果；新增或变更本周计划会清除过期确认并重新计算',
+    ],
+  },
   {
     version: '1.31.1',
     date: '2026-10-21',
@@ -1194,6 +1204,14 @@ function pantryCategoryLabel(householdId, categoryId) {
   return parts.join(' > ');
 }
 
+function pantryCategoryIdByLabel(householdId, label) {
+  const categories = pantryRootCategories().concat(
+    state.pantryCategories.filter((category) => category.householdId === householdId)
+  );
+  const match = categories.find((category) => pantryCategoryLabel(householdId, category.id) === label);
+  return match ? match.id : '';
+}
+
 function pantryCategoryNameExists(householdId, name, excludeId) {
   const key = safeText(name, 40).trim().toLocaleLowerCase();
   return pantryRootCategories().some((category) => category.name.toLocaleLowerCase() === key) ||
@@ -1560,7 +1578,12 @@ function normPantryItem(input, prev, keepInputId) {
     : known ? cat : '其他';
   const requestedMode = input.trackingMode ?? base.trackingMode;
   const hasRequestedMode = requestedMode !== undefined && requestedMode !== null;
-  const trackingMode = hasRequestedMode
+  const categoryChanged = input.category !== undefined && String(input.category).trim() !== String(base.category || '').trim();
+  const seasoningCategory = category.split(' > ')[0] === '调味干货' &&
+    ((!keepInputId && (!base.category || categoryChanged)) || (linkedIngredient && linkedIngredient.defaultTrackingMode === 'presence'));
+  const trackingMode = seasoningCategory
+    ? 'presence'
+    : hasRequestedMode
     ? requestedMode === 'presence' ? 'presence' : 'quantity'
     : linkedIngredient
       ? linkedIngredient.defaultTrackingMode === 'presence' ? 'presence' : 'quantity'
@@ -4228,11 +4251,27 @@ async function handleAPI(req, res, url) {
         if (body.householdId && body.householdId !== existing.householdId) return sendError(res, 400, '不能更改原料所属家庭');
         const ingredient = normIngredient({ ...existing, ...body, householdId: existing.householdId }, existing);
         if (!ingredient || !ingredient.categoryId || !pantryCategoryExists(existing.householdId, ingredient.categoryId)) return sendError(res, 400, '请选择本家庭有效分类');
+        const categoryLabel = pantryCategoryLabel(existing.householdId, ingredient.categoryId);
+        if (categoryLabel.split(' > ')[0] === '调味干货') ingredient.defaultTrackingMode = 'presence';
         if (state.ingredients.some((item) => item.id !== id && item.householdId === existing.householdId && item.name.toLocaleLowerCase() === ingredient.name.toLocaleLowerCase())) {
           return sendError(res, 409, '这个家庭已经有同名原料');
         }
         state.ingredients[index] = ingredient;
         scheduleSave('ingredients');
+        state.pantry.forEach((pantry) => {
+          if (pantry.householdId !== existing.householdId || pantry.ingredientId !== id) return;
+          pantry.name = ingredient.name;
+          pantry.category = categoryLabel || pantry.category;
+          if (ingredient.defaultTrackingMode === 'presence') {
+            pantry.hasStock = pantry.hasStock === true || Number(pantry.quantity) > 0;
+            pantry.trackingMode = 'presence';
+            pantry.quantity = 0;
+            pantry.minQuantity = 0;
+            pantry.unit = '';
+          }
+          pantry.updatedAt = nowISO();
+        });
+        scheduleSave('pantry');
         return sendJSON(res, 200, { ok: true, data: ingredient });
       }
       const referencedByDish = state.dishes.some((dish) =>
@@ -4941,6 +4980,7 @@ async function handleAPI(req, res, url) {
       if (!item) return sendError(res, 400, '要加哪道菜？写个菜名吧');
       const plan = findPlan(body.householdId, body.weekOf, true);
       plan.items.push(item);
+      plan.received = {};
       plan.updatedAt = nowISO();
       scheduleSave('plans');
       return sendJSON(res, 200, { ok: true, data: { plan, item } });
@@ -4968,6 +5008,7 @@ async function handleAPI(req, res, url) {
         : { consumed: [], warnings: ['这是临时菜，没有可读取的菜谱用量，未自动扣库存'] };
       item.status = 'done';
       item.completedAt = nowISO();
+      foundPlan.received = {};
       foundPlan.updatedAt = nowISO();
       scheduleSave('plans');
       if (result.consumed.length) scheduleSave('pantry');
@@ -4990,6 +5031,7 @@ async function handleAPI(req, res, url) {
         if (keep.length !== plan.items.length) {
           removed += plan.items.length - keep.length;
           plan.items = keep;
+          plan.received = {};
           plan.updatedAt = nowISO();
         }
       }
@@ -5006,6 +5048,7 @@ async function handleAPI(req, res, url) {
         const i = plan.items.findIndex((it) => it.id === target);
         if (i >= 0) {
           hit = plan.items.splice(i, 1)[0];
+          plan.received = {};
           plan.updatedAt = nowISO();
           break;
         }
@@ -5066,9 +5109,38 @@ async function handleAPI(req, res, url) {
       const idx = state.pantry.findIndex((p) => p.id === id);
       if (idx < 0) return sendError(res, 404, '库存条目不存在');
       const body = await readBody(req);
+      const existing = state.pantry[idx];
+      if (!requireAccountHousehold(req, res, existing.householdId)) return;
+      const linkedIngredient = existing.ingredientId
+        ? state.ingredients.find((ingredient) => ingredient.id === existing.ingredientId && ingredient.householdId === existing.householdId)
+        : null;
+      const requestedCategory = safeText(body.category, 80).trim();
+      if (linkedIngredient && requestedCategory && requestedCategory !== pantryCategoryLabel(existing.householdId, linkedIngredient.categoryId)) {
+        const categoryId = pantryCategoryIdByLabel(existing.householdId, requestedCategory);
+        if (categoryId) {
+          linkedIngredient.categoryId = categoryId;
+          const categoryRoot = pantryCategoryLabel(existing.householdId, categoryId).split(' > ')[0];
+          if (categoryRoot === '调味干货') linkedIngredient.defaultTrackingMode = 'presence';
+          linkedIngredient.updatedAt = nowISO();
+          state.pantry.filter((pantry) => pantry.householdId === existing.householdId && pantry.ingredientId === linkedIngredient.id)
+            .forEach((pantry) => {
+              pantry.category = pantryCategoryLabel(existing.householdId, categoryId);
+              if (linkedIngredient.defaultTrackingMode === 'presence') {
+                pantry.hasStock = pantry.hasStock === true || Number(pantry.quantity) > 0;
+                pantry.trackingMode = 'presence';
+                pantry.quantity = 0;
+                pantry.minQuantity = 0;
+                pantry.unit = '';
+              }
+              pantry.updatedAt = nowISO();
+            });
+          scheduleSave('ingredients');
+          scheduleSave('pantry');
+        }
+      }
       const item = normPantryItem(body, state.pantry[idx]);
       if (!item) return sendError(res, 400, '食材名不能为空');
-      if (!requireAccountHousehold(req, res, item.householdId)) return;
+      if (item.householdId !== existing.householdId) return sendError(res, 400, '不能更改库存所属家庭');
       const ingredientProblem = pantryIngredientReferenceProblem(item);
       if (ingredientProblem) return sendError(res, 400, ingredientProblem);
       if (item.trackingMode === 'quantity' && body.quantity !== undefined) {

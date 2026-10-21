@@ -35,6 +35,7 @@ const PUBLISH_FILES = [
   'docs/product/2026-10-18-current-interface-product-logic.md',
   'public/index.html',
   'public/app.js',
+  'public/pantry-logic.js',
   'public/styles.css',
 ];
 

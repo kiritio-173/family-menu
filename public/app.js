@@ -2548,7 +2548,13 @@ function mergeSeasonings(rows) {
     inferTrackingMode(row) {
       const stock = findStock(row.name, row.ingredientId);
       const explicit = stock.find((p) => p.trackingMode === 'presence' || p.trackingMode === 'quantity');
-      return window.PantryLogic.inferTrackingMode({ ...row, trackingMode: explicit && explicit.trackingMode });
+      const ingredient = ingredientById(row.ingredientId);
+      const category = ingredient ? pantryCategoryPath(ingredient.categoryId) : row.category;
+      return window.PantryLogic.inferTrackingMode({
+        ...row,
+        category,
+        trackingMode: explicit ? explicit.trackingMode : ingredient && ingredient.defaultTrackingMode,
+      });
     },
     parseAmount: parseAmountText,
     stockFor: (name, ingredientId) => findStock(name, ingredientId),
@@ -2576,6 +2582,10 @@ function mergeSeasonings(rows) {
 function shoppingIngredientKey(name, unit) {
   const key = ingredientMatchKey(name);
   return unit ? `${key}|${normalizeAmountUnit(unit)}` : key;
+}
+
+function planReceiptKey(item) {
+  return item.ingredientId ? `id:${item.ingredientId}` : `name:${ingredientMatchKey(item.name)}`;
 }
 
 /** 采购数量统一保留三位小数，避免浮点误差把 0.3 显示成 0.30000000000000004。 */
@@ -3136,11 +3146,13 @@ function viewPlan() {
   const shop = shoppingFromDishIds(dishIds);
   const received = (planRecord(week) || {}).received || {};
   shop.forEach((it) => {
-    it.received = Boolean(received[shoppingIngredientKey(it.name)]);
+    const keys = [planReceiptKey(it), `name:${ingredientMatchKey(it.name)}`, ingredientMatchKey(it.name)];
+    it.received = keys.some((key) => Boolean(received[key]));
   });
   const purchaseMaterials = shop.filter((it) => !it.isSeasoning);
-  const purchaseShop = shop.filter((it) => !it.isSeasoning && stockAssessment(it).key !== 'enough');
-  const stapleShop = shop.filter((it) => it.isSeasoning);
+  const purchaseShop = shop.filter((it) => !it.isSeasoning && stockAssessment(it).key !== 'enough' &&
+    !(it.received && stockAssessment(it).key === 'uncertain'));
+  const stapleShop = shop.filter((it) => it.isSeasoning && stockAssessment(it).key !== 'enough');
   const missing = purchaseShop.filter((it) => ['needed', 'shortage'].includes(stockAssessment(it).key));
 
   const weekNav = `<div class="week-nav">
@@ -3650,6 +3662,23 @@ function syncFoodCategoryPicker(category, categoryId) {
     btn.classList.toggle('on', on);
     btn.setAttribute('aria-pressed', String(on));
   });
+}
+
+function applyFoodCategoryDefaults(category) {
+  const tracking = $('#fFoodTracking');
+  const fields = $('#fFoodQuantityFields');
+  if (!tracking) return;
+  const presence = String(category || '').split(' > ')[0] === '调味干货';
+  if (presence) {
+    tracking.value = 'presence';
+    tracking.dataset.manual = '1';
+  } else if (tracking.dataset.categoryForced === '1') {
+    const name = ($('#fFoodName') || {}).value || '';
+    tracking.value = window.PantryLogic.inferTrackingMode({ name });
+    tracking.dataset.manual = '';
+  }
+  tracking.dataset.categoryForced = presence ? '1' : '';
+  if (fields) fields.hidden = tracking.value === 'presence';
 }
 
 async function openFoodEditor(item) {
@@ -7260,6 +7289,7 @@ const ACTIONS = {
       const category = householdPantryCategories().find((item) => item.name === cat && !item.parentId);
       $('#fFoodCategoryId').value = category ? category.id : '';
       syncFoodCategoryPicker(cat, category && category.id);
+      applyFoodCategoryDefaults(cat);
     }
     if (unit) $('#fFoodUnit').value = unit;
     if (window.PantryLogic.inferTrackingMode({ name, category: cat }) === 'presence') {
@@ -7279,6 +7309,7 @@ const ACTIONS = {
     const idInput = $('#fFoodCategoryId');
     if (idInput) idInput.value = categoryId;
     syncFoodCategoryPicker(cat, categoryId);
+    applyFoodCategoryDefaults(cat);
     renderPresetGrid();
   },
   'exp-preset'(el) {
@@ -7312,9 +7343,11 @@ const ACTIONS = {
         defaultTrackingMode: $('#fFoodTracking').value,
         defaultUnit: $('#fFoodTracking').value === 'quantity' ? ($('#fFoodUnit').value.trim() || '份') : '',
       });
-    } else if (ingredient.categoryId !== $('#fFoodCategoryId').value) {
+    } else if (ingredient.categoryId !== $('#fFoodCategoryId').value || ingredient.defaultTrackingMode !== trackingMode) {
       ingredient = await api('PUT', `/api/ingredients/${encodeURIComponent(ingredient.id)}?householdId=${encodeURIComponent(S.householdId)}`, {
         categoryId: $('#fFoodCategoryId').value,
+        defaultTrackingMode: trackingMode,
+        defaultUnit: trackingMode === 'quantity' ? ($('#fFoodUnit').value.trim() || '份') : '',
       });
     }
     const body = {
@@ -7965,6 +7998,17 @@ const ACTIONS = {
     if (!await stockOne(name, parts, { item })) return;
     await loadState(true);
     render();
+    const refreshed = (S.shopList || []).find((row) => item?.ingredientId
+      ? row.ingredientId === item.ingredientId
+      : row.name === name);
+    const stillShort = refreshed && ['needed', 'shortage'].includes(stockAssessment(refreshed).key);
+    toast(item?.trackingMode === 'presence'
+      ? `已确认「${name}」家中有`
+      : stillShort
+        ? `「${name}」已入库，但仍低于本周需求，请继续补货`
+        : item && stockAssessment(item).key === 'uncertain'
+          ? `「${name}」已入库；菜谱用量或库存单位不明确，请确认库存是否足够`
+          : `「${name}」已入库，计划已更新`);
   },
 
   /* ---- 买菜清单批量 ---- */

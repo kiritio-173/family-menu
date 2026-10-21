@@ -412,15 +412,15 @@ async function main() {
   const quantityOil = (await post('/api/pantry', {
     householdId: h301.id, name: '食用油', category: '调味干货', trackingMode: 'quantity', quantity: 2, unit: '瓶',
   })).body.data;
-  eq('显式数量模式不被分类覆盖', [quantityOil.trackingMode, quantityOil.quantity, quantityOil.unit], ['quantity', 2, '瓶']);
+  eq('调味干货分类自动使用有无模式', [quantityOil.trackingMode, quantityOil.quantity, quantityOil.unit], ['presence', 0, '']);
   const starch = (await post('/api/pantry', {
     householdId: h301.id, name: '淀粉', category: '调味干货', quantity: 2, unit: '包',
   })).body.data;
-  eq('展示分类不决定淀粉库存方式', [starch.trackingMode, starch.quantity, starch.unit], ['quantity', 2, '包']);
+  eq('调味干货中的淀粉自动使用有无模式', [starch.trackingMode, starch.quantity, starch.unit], ['presence', 0, '']);
   const invalidMode = (await post('/api/pantry', {
     householdId: h301.id, name: '盐', category: '调味干货', trackingMode: 'unknown', quantity: 1, unit: '袋',
   })).body.data;
-  eq('非法库存方式回退数量模式', invalidMode.trackingMode, 'quantity');
+  eq('调味干货分类优先使用有无模式', invalidMode.trackingMode, 'presence');
   await del(`/api/pantry/${presenceSugar.id}`);
   await del(`/api/pantry/${quantityOil.id}`);
   await del(`/api/pantry/${starch.id}`);
@@ -543,6 +543,11 @@ async function main() {
   const repeatReceiptAgain = await post('/api/plans/receive', { ...repeatReceipt, quantity: 3, requestId: 'receipt-request-b' });
   eq('同食材的新入库请求可继续累加返回 200', repeatReceiptAgain.status, 200);
   if (repeatReceiptAgain.status === 200) eq('同食材的新入库请求累加库存', repeatReceiptAgain.body.data.item.quantity, 6);
+  const receivedPlan = await get(`/api/plans?householdId=${encodeURIComponent(h301.id)}&weekOf=${encodeURIComponent(receiveWeek)}`);
+  ok('计划保留本周不确定食材的入库记录', Object.values(receivedPlan.body.data.received || {}).length > 0);
+  await post('/api/plans/items', { householdId: h301.id, weekOf: receiveWeek, name: '新增计划后重算入库状态' });
+  eq('新增计划菜后清除旧入库确认以重算需求',
+    Object.keys((await get(`/api/plans?householdId=${encodeURIComponent(h301.id)}&weekOf=${encodeURIComponent(receiveWeek)}`)).body.data.received || {}).length, 0);
   if (repeatReceiptAgain.status === 200) await del(`/api/pantry/${repeatReceiptAgain.body.data.item.id}`);
   await del(`/api/pantry/${whiteSugar.id}`);
   await del(`/api/pantry/${salt.id}`);
@@ -1177,8 +1182,8 @@ async function main() {
   ok('每条更新记录都列了具体改了什么', v.releases.every((r) => Array.isArray(r.items) && r.items.length), v.releases.map((r) => r.items && r.items.length));
   ok('采购入库不调用原生 prompt', !fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8').includes('window.prompt'));
   const appSource = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
-  ok('计划采购按调料/普通食材分组', /purchaseShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning\s*&&/.test(appSource) && /stapleShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*it\.isSeasoning\)/.test(appSource));
-  ok('计划采购只列当前缺口或需确认项目', /purchaseShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning\s*&&\s*stockAssessment\(it\)\.key\s*!==\s*'enough'\)/.test(appSource));
+  ok('计划采购按调料/普通食材分组并隐藏已确认调料', /purchaseShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning\s*&&/.test(appSource) && /stapleShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*it\.isSeasoning\s*&&\s*stockAssessment\(it\)\.key\s*!==\s*'enough'/.test(appSource));
+  ok('计划采购只列当前缺口或需确认项目', /purchaseShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning[\s\S]{0,160}it\.received[\s\S]{0,80}uncertain/.test(appSource));
   ok('库存已覆盖时仍显示无需采购汇总', /purchaseMaterials\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning\)/.test(appSource) && /没有待购食材 · 库存可覆盖/.test(appSource));
   ok('计划采购状态不受旧的名字勾选或入库标记覆盖', /const stateKey\s*=\s*planMode\s*\?\s*assessment\.key\s*:\s*it\.received/.test(appSource));
   ok('计划批量勾选与家庭已买状态分离', /function activeShopChecks\(\)/.test(appSource) && /return S\.shopContext\s*&&\s*S\.shopContext\.kind\s*===\s*'plan'\s*\?\s*S\.planShopSelected\s*:\s*S\.shoppingChecked/.test(appSource));
@@ -1188,6 +1193,10 @@ async function main() {
   ok('计划选择按家庭和周隔离', /const selectionContext\s*=\s*`\$\{S\.householdId\}::\$\{week\}`/.test(appSource) && /planShopSelectionContext !== selectionContext/.test(appSource));
   ok('计划选择控件说明批量入库用途', /选择 \$\{it\.name\} 批量入库/.test(appSource));
   ok('计划入库携带幂等请求编号', /requestId:\s*\(globalThis\.crypto\s*&&\s*crypto\.randomUUID\)/.test(appSource));
+  ok('单条入库成功后提示结果', /async 'stock-it'\(el\)[\s\S]{0,650}toast\(/.test(appSource));
+  ok('计划收到已入库但用量不明确的状态', /it\.received[\s\S]{0,120}uncertain/.test(appSource));
+  ok('选择调味干货时自动切换有无方式', /function applyFoodCategoryDefaults\(category\)[\s\S]{0,280}调味干货[\s\S]{0,180}tracking\.value\s*=\s*'presence'/.test(appSource));
+  ok('计划模式从家庭原料字典读取库存方式', /const ingredient = ingredientById\(row\.ingredientId\)[\s\S]{0,400}ingredient\.defaultTrackingMode/.test(appSource));
   const pantryLogicSource = fs.readFileSync(path.join(ROOT, 'public', 'pantry-logic.js'), 'utf8');
   ok('计划有无型食材不汇总菜谱用量', /if\s*\(item\.trackingMode\s*===\s*'presence'\)\s*return;/.test(pantryLogicSource));
   ok('库存逻辑脚本先于应用脚本加载', /pantry-logic\.js[\s\S]*app\.js/.test(fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8')));
@@ -2496,6 +2505,52 @@ async function main() {
   }, undefined, undefined, undefined, undefined, ingredientOwner.token);
   eq('新库存继承原料字典有无跟踪方式', presenceIngredientPantry.body.data.trackingMode, 'presence');
   eq('有无库存保留原料字典 ID', presenceIngredientPantry.body.data.ingredientId, presenceIngredient.body.data.id);
+  const oilIngredient = await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '测试食用油', aliases: [], categoryId: 'pantry-root-6', defaultTrackingMode: 'quantity', defaultUnit: '瓶',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const oilPantry = await req('POST', '/api/pantry', {
+    householdId: ingredientHouseAId, name: '测试食用油', ingredientId: oilIngredient.body.data.id,
+    category: '主食粮油', trackingMode: 'quantity', quantity: 2, unit: '瓶',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const oilCategoryIntruder = await registerAccount('油分类未授权账户');
+  eq('未加入成员不能借改分类转换其他家庭库存', (await req('PUT', `/api/pantry/${oilPantry.body.data.id}`, {
+    ...oilPantry.body.data, category: '调味干货', trackingMode: 'quantity',
+  }, undefined, undefined, undefined, undefined, oilCategoryIntruder.token)).status, 403);
+  eq('未授权分类修改不改变库存数量方式', (await req('GET', `/api/state?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).body.data.pantry.find((row) => row.id === oilPantry.body.data.id).trackingMode, 'quantity');
+  await req('PUT', `/api/pantry/${oilPantry.body.data.id}`, {
+    ...oilPantry.body.data, category: '调味干货', trackingMode: 'quantity',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const oilPantryAfterCategoryChange = await req('GET', `/api/state?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const changedOil = oilPantryAfterCategoryChange.body.data.pantry.find((row) => row.id === oilPantry.body.data.id);
+  eq('食用油移入调味干货后库存同步为有无', [changedOil.trackingMode, changedOil.quantity, changedOil.unit], ['presence', 0, '']);
+  eq('食用油移入调味干货后原料字典同步', oilPantryAfterCategoryChange.body.data.ingredients.find((row) => row.id === oilIngredient.body.data.id).defaultTrackingMode, 'presence');
+  const cuminOil = await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '示例食用油', aliases: [], categoryId: 'pantry-root-6', defaultTrackingMode: 'quantity', defaultUnit: '瓶',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const msgIngredient = await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '示例味精', aliases: [], categoryId: 'pantry-root-11', defaultTrackingMode: 'presence',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const cuminRecipe = await req('POST', `/api/my-dishes?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '孜然牛肉', category: '家常菜', seasonings: [
+      { name: '示例食用油', amount: '适量', purchaseType: 'purchase', ingredientId: cuminOil.body.data.id },
+      { name: '示例味精', amount: '适量', purchaseType: 'purchase', ingredientId: msgIngredient.body.data.id },
+    ],
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const cuminPlan = await req('POST', '/api/plans/items', {
+    householdId: ingredientHouseAId, weekOf: monday, dishId: cuminRecipe.body.data.id,
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const cuminOilReceived = await req('POST', '/api/plans/receive', {
+    householdId: ingredientHouseAId, weekOf: monday, name: '示例食用油', ingredientId: cuminOil.body.data.id,
+    trackingMode: 'quantity', quantity: 1, unit: '瓶', requestId: 'cumin-oil-purchase',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('孜然牛肉计划食用油按数量入库成功', cuminOilReceived.status, 200);
+  eq('孜然牛肉食用油入库后计划留有确认记录',
+    (await req('GET', `/api/plans?householdId=${encodeURIComponent(ingredientHouseAId)}&weekOf=${encodeURIComponent(monday)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).body.data.received[`id:${cuminOil.body.data.id}`] !== undefined, true);
+  const cuminMsgStock = await req('POST', '/api/pantry', {
+    householdId: ingredientHouseAId, name: '示例味精', ingredientId: msgIngredient.body.data.id,
+    trackingMode: 'presence', hasStock: true, quantity: 0,
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('孜然牛肉味精按有无确认入库', [cuminMsgStock.body.data.trackingMode, cuminMsgStock.body.data.hasStock, cuminMsgStock.body.data.unit], ['presence', true, '']);
   const ingredientPlanWeek = monday;
   await req('POST', '/api/plans/items', {
     householdId: ingredientHouseAId, weekOf: ingredientPlanWeek, name: '原料 ID 扣库存测试菜',

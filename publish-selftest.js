@@ -6,6 +6,7 @@ const { PUBLISH_FILES, buildPublishPlan, publishDecision } = require('./publish-
 assert.ok(Array.isArray(PUBLISH_FILES), 'publish file list must be exported');
 assert.ok(PUBLISH_FILES.includes('server.js'));
 assert.ok(PUBLISH_FILES.includes('public/app.js'));
+assert.ok(PUBLISH_FILES.includes('public/pantry-logic.js'));
 assert.ok(PUBLISH_FILES.includes('build-package.js'));
 assert.ok(PUBLISH_FILES.includes('docs/product/2026-10-18-family-workspace-flow.md'));
 assert.ok(!PUBLISH_FILES.some((p) => p.startsWith('data/')));
