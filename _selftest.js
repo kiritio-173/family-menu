@@ -835,9 +835,9 @@ async function main() {
   eq('旧盐糖按数量迁移有无状态',
     st.pantry.filter((p) => ['盐', '白糖'].includes(p.name)).map((p) => [p.trackingMode, p.hasStock, p.quantity, p.unit]),
     [['presence', true, 0, ''], ['presence', true, 0, '']]);
-  eq('模糊旧调味分类保留数量',
-    st.pantry.find((p) => p.name === '未知干货') && [st.pantry.find((p) => p.name === '未知干货').trackingMode, st.pantry.find((p) => p.name === '未知干货').quantity, st.pantry.find((p) => p.name === '未知干货').unit],
-    ['quantity', 2, '包']);
+  eq('旧调味干货统一迁移为有无库存',
+    st.pantry.find((p) => p.name === '未知干货') && [st.pantry.find((p) => p.name === '未知干货').trackingMode, st.pantry.find((p) => p.name === '未知干货').hasStock, st.pantry.find((p) => p.name === '未知干货').quantity, st.pantry.find((p) => p.name === '未知干货').unit],
+    ['presence', true, 0, '']);
 
   // 迁移结果要真的落盘
   await stop(legacy);
@@ -2644,6 +2644,7 @@ async function main() {
       { id: 'f_legacy-ingredients', householdId: 'h_legacy-ingredients', name: '牛里脊', category: '肉类', quantity: 500, unit: 'g', note: '真空包装' },
       { id: 'f_legacy-zero', householdId: 'h_legacy-ingredients', name: '旧零库存', category: '蔬菜', trackingMode: 'quantity', quantity: 0, unit: 'g' },
       { id: 'f_legacy-presence', householdId: 'h_legacy-ingredients', name: '旧有无调料', category: '调味干货', trackingMode: 'presence', hasStock: true, quantity: 0, unit: '' },
+      { id: 'f_legacy-seasoning-quantity', householdId: 'h_legacy-ingredients', name: '味精', category: '调味干货', trackingMode: 'quantity', quantity: 3, unit: '份' },
     ]));
     fs.writeFileSync(path.join(dataDir, 'ingredients.json'), JSON.stringify([
       { id: 'ing_other-ingredients', householdId: 'h_other-ingredients', name: '外部牛排', aliases: [], categoryId: 'pantry-root-1', defaultTrackingMode: 'quantity' },
@@ -2654,6 +2655,8 @@ async function main() {
   const migratedPantry = migratedState.body.data.pantry.find((item) => item.id === 'f_legacy-ingredients');
   ok('启动迁移移除历史零数量库存', !migratedState.body.data.pantry.some((item) => item.id === 'f_legacy-zero'));
   ok('启动迁移保留有无型库存状态', migratedState.body.data.pantry.some((item) => item.id === 'f_legacy-presence' && item.hasStock));
+  const migratedSeasoning = migratedState.body.data.pantry.find((item) => item.id === 'f_legacy-seasoning-quantity');
+  eq('启动迁移把调味干货旧份数转换成有无', [migratedSeasoning?.trackingMode, migratedSeasoning?.hasStock, migratedSeasoning?.quantity, migratedSeasoning?.unit], ['presence', true, 0, '']);
   const tenderloinRef = migratedDish?.seasonings.find((row) => row.name === '牛里脊')?.ingredientId;
   const steakRef = migratedDish?.methods[0]?.seasonings.find((row) => row.name === '牛排')?.ingredientId;
   eq('启动迁移为旧菜谱原料补 ingredientId', !!tenderloinRef, true);
@@ -2663,7 +2666,7 @@ async function main() {
   eq('旧库存数量单位备注保留', [migratedPantry?.quantity, migratedPantry?.unit, migratedPantry?.note], [500, 'g', '真空包装']);
   const migrationLogin = await loginAccount('旧用户');
   const migrationIngredients = (await req('GET', '/api/ingredients?householdId=h_legacy-ingredients', undefined, undefined, undefined, undefined, undefined, migrationLogin.token)).body.data || [];
-  eq('不同材料不会因同类而合并', [tenderloinRef !== steakRef, migrationIngredients.length], [true, 3]);
+  eq('不同材料不会因同类而合并', [tenderloinRef !== steakRef, migrationIngredients.length], [true, 4]);
   const migrationForeignIngredient = { id: 'ing_other-ingredients' };
   eq('菜谱不能引用同家庭之外的原料 ID', (await req('POST', '/api/my-dishes?householdId=h_legacy-ingredients', {
     name: '跨家庭材料菜', category: '家常菜', seasonings: [{ name: '外部牛排', amount: '100 g', ingredientId: migrationForeignIngredient.id }],

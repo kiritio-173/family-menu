@@ -41,10 +41,19 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.31.3';
+const APP_VERSION = '1.31.4';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.31.4',
+    date: '2026-10-21',
+    title: '迁移旧调味干货库存为有无管理',
+    items: [
+      '升级启动时将已有调味干货库存统一转换为有/无状态；原数量大于零时保留“家中有”的判断并清除份数和单位',
+      '后续调味干货分类变更同步到计划分类识别，旧菜谱分类不会覆盖当前库存分类',
+    ],
+  },
   {
     version: '1.31.3',
     date: '2026-10-21',
@@ -2099,6 +2108,14 @@ function loadState() {
   let pantryChanged = JSON.stringify(loadedPantry) !== JSON.stringify(state.pantry);
   state.pantry.forEach((p) => {
     if (!hhIds.has(p.householdId)) p.householdId = fallbackH;
+    if (p.category.split(' > ')[0] === '调味干货' && p.trackingMode !== 'presence') {
+      p.trackingMode = 'presence';
+      p.hasStock = Number(p.quantity) > 0;
+      p.quantity = 0;
+      p.minQuantity = 0;
+      p.unit = '';
+      pantryChanged = true;
+    }
     // 老版本把葱姜蒜归到了蔬菜；迁移到调味干货后，计划页也会按常备调料提示。
     if (p.category === '蔬菜' && isSeasoningAromatic(p.name)) {
       p.category = '调味干货';
