@@ -874,6 +874,7 @@ async function main() {
           choices: [{ message: { role: 'assistant', content: JSON.stringify({
             summary: '番茄库存不足，盐需要确认。',
             flags: [{ name: '番茄', reason: '库存少于本周需求', suggestion: '补足显示的缺口' }],
+            proposals: [{ inputName: '白砂糖', ingredientId: 'ing-sugar', name: '白糖', aliases: ['白砂糖'], categoryId: 'pantry-root-11', trackingMode: 'presence', confidence: 0.94, reason: '常备调味品', quantity: 500 }],
           }) } }],
         }));
       }
@@ -1016,6 +1017,7 @@ async function main() {
   eq('AI 计划分析仅返回只读说明', planAnalysis.body.data.result, {
     summary: '番茄库存不足，盐需要确认。',
     flags: [{ name: '番茄', reason: '库存少于本周需求', suggestion: '补足显示的缺口' }],
+    proposals: [{ inputName: '白砂糖', ingredientId: 'ing-sugar', name: '白糖', aliases: ['白砂糖'], categoryId: 'pantry-root-11', trackingMode: 'presence', confidence: 0.94, reason: '常备调味品' }],
   });
   const invalidPlanAnalysis = await post('/api/ai/chat', {
     task: 'plan-analysis',
@@ -2344,6 +2346,9 @@ async function main() {
   eq('内置分类可用于新增子分类', rootCategories.status, 200);
   const meatRoot = (rootCategories.body.data || []).find((c) => c.name === '肉类');
   ok('肉类内置根分类存在', !!meatRoot, rootCategories.body.data);
+  eq('不能新增与内置根分类重名的子分类', (await req('POST', `/api/pantry-categories?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '肉类', parentId: meatRoot && meatRoot.id,
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 409);
   const householdBIngredient = await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseBId)}`, {
     name: 'B 家独有食材', aliases: [], categoryId: meatRoot && meatRoot.id, defaultTrackingMode: 'quantity',
   }, undefined, undefined, undefined, undefined, ingredientOwner.token);
@@ -2357,6 +2362,9 @@ async function main() {
   }, undefined, undefined, undefined, undefined, ingredientOwner.token);
   eq('管理员能创建肉类下的牛肉分类', beefCategory.status, 200);
   const categoryId = beefCategory.body.data && beefCategory.body.data.id;
+  eq('不能把子分类重命名为内置根分类名称', (await req('PUT', `/api/pantry-categories/${categoryId}?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '肉类', parentId: meatRoot && meatRoot.id,
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 409);
   eq('未认证请求不能重命名分类', (await put(`/api/pantry-categories/${categoryId}?householdId=${encodeURIComponent(ingredientHouseAId)}`, { name: '未认证改名' })).status, 403);
   eq('未认证请求不能删除分类', (await del(`/api/pantry-categories/${categoryId}?householdId=${encodeURIComponent(ingredientHouseAId)}`)).status, 403);
   const tenderloin = await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
@@ -2384,9 +2392,11 @@ async function main() {
   eq('跨家庭分类引用被拒', (await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
     name: '跨家庭引用食材', aliases: [], categoryId: householdBCategory.body.data.id, defaultTrackingMode: 'quantity',
   }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 400);
-  eq('关联原料的库存行成功保存', (await req('POST', '/api/pantry', {
+  const linkedIngredientPantry = await req('POST', '/api/pantry', {
     householdId: ingredientHouseAId, name: '牛里脊', ingredientId: tenderloin.body.data.id, category: '肉类', quantity: 500, unit: 'g',
-  }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 200);
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('关联原料的库存行成功保存', linkedIngredientPantry.status, 200);
+  eq('库存分类来自原料字典路径', linkedIngredientPantry.body.data.category, '肉类 > 牛肉');
   eq('库存引用中的原料不能删除', (await req('DELETE', `/api/ingredients/${tenderloin.body.data.id}?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 409);
   eq('菜谱引用原料的菜成功保存', (await req('POST', `/api/my-dishes?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
     name: '牛排菜谱', category: '家常菜', seasonings: [{ name: '牛排', amount: '200 g', ingredientId: steak.body.data.id }],
@@ -2414,6 +2424,74 @@ async function main() {
   const afterIngredientDissolve = await req('GET', `/api/state?householdId=${encodeURIComponent(ingredientHouseBId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
   ok('解散家庭后另一家庭原料仍在', afterIngredientDissolve.body.data.ingredients?.some((i) => i.name === 'B 家独有食材') && !afterIngredientDissolve.body.data.ingredients?.some((i) => i.name === '牛里脊'));
   await stop(ingredientInst);
+
+  /* ---------- 旧菜谱与库存原料关联迁移 ---------- */
+  console.log('\n[30] 旧菜谱与库存原料关联迁移');
+  const migrationInst = await boot('ingredient-migration', (dataDir) => {
+    fs.writeFileSync(path.join(dataDir, 'households.json'), JSON.stringify([{
+      id: 'h_legacy-ingredients', name: '旧数据家庭', emoji: '🏠', status: 'approved',
+      members: [
+        { id: 'm_legacy-ingredients', name: '旧用户', loginId: '旧用户', role: 'owner' },
+        { id: 'm_shared-device-id', name: '本户用户', loginId: '本户用户', role: 'member' },
+      ],
+    }, {
+      id: 'h_other-ingredients', name: '其他家庭', emoji: '🏠', status: 'approved',
+      members: [{ id: 'm_shared-device-id', name: '外户用户', loginId: '外户用户', role: 'owner' }],
+    }]));
+    fs.writeFileSync(path.join(dataDir, 'dishes.json'), JSON.stringify([{
+      id: 'd_legacy-ingredients', householdId: 'h_legacy-ingredients', name: '旧菜谱', category: '家常菜',
+      seasonings: [{ name: '牛里脊', amount: '200 g', purchaseType: 'purchase' }],
+      methods: [{ name: '煎制', steps: ['煎熟'], seasonings: [{ name: '牛排', amount: '1 块' }] }],
+    }]));
+    fs.writeFileSync(path.join(dataDir, 'pantry.json'), JSON.stringify([
+      { id: 'f_legacy-ingredients', householdId: 'h_legacy-ingredients', name: '牛里脊', category: '肉类', quantity: 500, unit: 'g', note: '真空包装' },
+    ]));
+    fs.writeFileSync(path.join(dataDir, 'ingredients.json'), JSON.stringify([
+      { id: 'ing_other-ingredients', householdId: 'h_other-ingredients', name: '外部牛排', aliases: [], categoryId: 'pantry-root-1', defaultTrackingMode: 'quantity' },
+    ]));
+  });
+  const migratedState = await get('/api/state?householdId=h_legacy-ingredients');
+  const migratedDish = migratedState.body.data.dishes.find((dish) => dish.id === 'd_legacy-ingredients');
+  const migratedPantry = migratedState.body.data.pantry.find((item) => item.id === 'f_legacy-ingredients');
+  const tenderloinRef = migratedDish?.seasonings.find((row) => row.name === '牛里脊')?.ingredientId;
+  const steakRef = migratedDish?.methods[0]?.seasonings.find((row) => row.name === '牛排')?.ingredientId;
+  eq('启动迁移为旧菜谱原料补 ingredientId', !!tenderloinRef, true);
+  eq('启动迁移为做法级原料补 ingredientId', !!steakRef, true);
+  eq('启动迁移为旧库存补 ingredientId', migratedPantry?.ingredientId, tenderloinRef);
+  eq('旧数据原料用量和采购方式保留', [migratedDish?.seasonings[0]?.amount, migratedDish?.seasonings[0]?.purchaseType], ['200 g', 'purchase']);
+  eq('旧库存数量单位备注保留', [migratedPantry?.quantity, migratedPantry?.unit, migratedPantry?.note], [500, 'g', '真空包装']);
+  const migrationLogin = await loginAccount('旧用户');
+  const migrationIngredients = (await req('GET', '/api/ingredients?householdId=h_legacy-ingredients', undefined, undefined, undefined, undefined, undefined, migrationLogin.token)).body.data || [];
+  eq('不同材料不会因同类而合并', [tenderloinRef !== steakRef, migrationIngredients.length], [true, 2]);
+  const migrationForeignIngredient = { id: 'ing_other-ingredients' };
+  eq('菜谱不能引用同家庭之外的原料 ID', (await req('POST', '/api/my-dishes?householdId=h_legacy-ingredients', {
+    name: '跨家庭材料菜', category: '家常菜', seasonings: [{ name: '外部牛排', amount: '100 g', ingredientId: migrationForeignIngredient.id }],
+  }, undefined, undefined, undefined, undefined, migrationLogin.token)).status, 400);
+  eq('库存不能引用同家庭之外的原料 ID', (await req('POST', '/api/pantry', {
+    householdId: 'h_legacy-ingredients', name: '外部牛排', ingredientId: migrationForeignIngredient.id, quantity: 1, unit: '份',
+  }, undefined, undefined, undefined, undefined, migrationLogin.token)).status, 400);
+  const mappedSteak = await req('POST', '/api/ingredients/apply-proposals', {
+    householdId: 'h_legacy-ingredients',
+    proposals: [{ inputName: '牛排', name: '牛排', aliases: ['西冷牛排'], categoryId: 'pantry-root-1', trackingMode: 'quantity' }],
+  }, undefined, undefined, undefined, undefined, migrationLogin.token);
+  eq('确认 AI 建议保存原料映射', mappedSteak.status, 200);
+  const mappedState = await req('GET', '/api/state?householdId=h_legacy-ingredients', undefined, undefined, undefined, undefined, undefined, migrationLogin.token);
+  eq('AI 确认更新做法级菜谱原料 ID', mappedState.body.data.dishes.find((dish) => dish.id === 'd_legacy-ingredients')?.methods[0]?.seasonings[0]?.ingredientId, steakRef);
+  eq('AI 确认不修改库存余量', [mappedState.body.data.pantry[0]?.quantity, mappedState.body.data.pantry[0]?.unit], [500, 'g']);
+  const beforeInvalidBatch = await req('GET', '/api/ingredients?householdId=h_legacy-ingredients', undefined, undefined, undefined, undefined, undefined, migrationLogin.token);
+  const invalidBatch = await req('POST', '/api/ingredients/apply-proposals', {
+    householdId: 'h_legacy-ingredients',
+    proposals: [
+      { inputName: '临时新料', name: '临时新料', categoryId: 'pantry-root-1', trackingMode: 'quantity' },
+      { inputName: '无效分类材料', name: '无效分类材料', categoryId: 'category-from-other-house', trackingMode: 'quantity' },
+    ],
+  }, undefined, undefined, undefined, undefined, migrationLogin.token);
+  eq('AI 批量建议遇到无效项整体拒绝', invalidBatch.status, 400);
+  const afterInvalidBatch = await req('GET', '/api/ingredients?householdId=h_legacy-ingredients', undefined, undefined, undefined, undefined, undefined, migrationLogin.token);
+  eq('AI 批量拒绝不留下部分原料', afterInvalidBatch.body.data.length, beforeInvalidBatch.body.data.length);
+  const collidingDevice = await claimByLoginId('h_other-ingredients', '外户用户', '123456');
+  eq('同成员 ID 的其他家庭设备仍不能读取本家庭原料', (await req('GET', '/api/ingredients?householdId=h_legacy-ingredients', undefined, undefined, collidingDevice.token)).status, 403);
+  await stop(migrationInst);
 
   /* ---------- 收尾 ---------- */
   fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5 });

@@ -24,6 +24,8 @@
 
 ## Task 1: 建立家庭原料字典与分类树的服务端存储
 
+**Status: In progress**
+
 **Files:**
 - Modify: `server.js`
 - Test: `_selftest.js`

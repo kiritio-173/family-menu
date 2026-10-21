@@ -23,9 +23,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function main() {
   console.log('\n解压 ' + path.basename(ZIP) + ' …');
   fs.mkdirSync(TMP, { recursive: true });
+  const archive = path.join(TMP, 'package.zip');
+  fs.copyFileSync(ZIP, archive);
   const r = spawnSync(
     path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'),
-    ['-xf', ZIP, '-C', TMP],
+    ['-xf', archive, '-C', TMP],
     { stdio: 'inherit' }
   );
   if (r.status !== 0) throw new Error('解压失败');
