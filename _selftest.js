@@ -2318,6 +2318,28 @@ async function main() {
   eq('原料家庭管理员批准成员', (await req('PUT', `/api/join-requests/${memberRequest.body.data.id}`, { status: 'ok', role: 'member' }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 200);
   await req('PUT', '/api/settings', { adminPin: '2468' }, undefined, undefined, undefined, undefined, ingredientOwner.token);
 
+  const ownerDevice = await claimByLoginId(ingredientHouseAId, '原料字典管理员', '123456');
+  const otherHouseDevice = await claimByLoginId(ingredientHouseBId, '原料字典管理员', '123456');
+  eq('家庭 A 成员设备能认领身份', ownerDevice.status, 200);
+  eq('家庭 B 成员设备能认领身份', otherHouseDevice.status, 200);
+  eq('未认证请求不能读取原料', (await get(`/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`)).status, 403);
+  eq('未认证请求不能读取分类', (await get(`/api/pantry-categories?householdId=${encodeURIComponent(ingredientHouseAId)}`)).status, 403);
+  eq('未认证请求不能新增原料', (await post(`/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '未认证食材', categoryId: 'pantry-root-1', defaultTrackingMode: 'quantity',
+  })).status, 403);
+  eq('未认证请求不能新增分类', (await post(`/api/pantry-categories?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '未认证分类', parentId: 'pantry-root-1',
+  })).status, 403);
+  eq('本家庭设备成员能读取原料', (await req('GET', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, ownerDevice.token)).status, 200);
+  eq('其他家庭设备不能读取原料', (await req('GET', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, otherHouseDevice.token)).status, 403);
+  eq('其他家庭设备不能新增原料', (await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '外家庭设备食材', categoryId: 'pantry-root-1', defaultTrackingMode: 'quantity',
+  }, undefined, otherHouseDevice.token)).status, 403);
+  eq('其他家庭设备不能读取分类', (await req('GET', `/api/pantry-categories?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, otherHouseDevice.token)).status, 403);
+  eq('其他家庭设备不能新增分类', (await req('POST', `/api/pantry-categories?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '外家庭设备分类', parentId: 'pantry-root-1',
+  }, undefined, otherHouseDevice.token)).status, 403);
+
   const rootCategories = await req('GET', `/api/pantry-categories?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
   eq('内置分类可用于新增子分类', rootCategories.status, 200);
   const meatRoot = (rootCategories.body.data || []).find((c) => c.name === '肉类');
@@ -2335,6 +2357,8 @@ async function main() {
   }, undefined, undefined, undefined, undefined, ingredientOwner.token);
   eq('管理员能创建肉类下的牛肉分类', beefCategory.status, 200);
   const categoryId = beefCategory.body.data && beefCategory.body.data.id;
+  eq('未认证请求不能重命名分类', (await put(`/api/pantry-categories/${categoryId}?householdId=${encodeURIComponent(ingredientHouseAId)}`, { name: '未认证改名' })).status, 403);
+  eq('未认证请求不能删除分类', (await del(`/api/pantry-categories/${categoryId}?householdId=${encodeURIComponent(ingredientHouseAId)}`)).status, 403);
   const tenderloin = await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
     name: '牛里脊', aliases: [], categoryId, defaultTrackingMode: 'quantity', defaultUnit: 'g',
   }, undefined, undefined, undefined, undefined, ingredientOwner.token);
@@ -2342,6 +2366,8 @@ async function main() {
     name: '牛排', aliases: [], categoryId, defaultTrackingMode: 'quantity', defaultUnit: 'g',
   }, undefined, undefined, undefined, undefined, ingredientOwner.token);
   eq('管理员能创建家庭原料', tenderloin.status, 200);
+  eq('未认证请求不能编辑原料', (await put(`/api/ingredients/${tenderloin.body.data.id}?householdId=${encodeURIComponent(ingredientHouseAId)}`, { name: '未认证改名' })).status, 403);
+  eq('未认证请求不能删除原料', (await del(`/api/ingredients/${tenderloin.body.data.id}?householdId=${encodeURIComponent(ingredientHouseAId)}`)).status, 403);
   eq('同分类不同名称可创建原料', steak.status, 200);
   ok('牛里脊和牛排各自拥有不同原料 ID', tenderloin.body.data?.id && steak.body.data?.id && tenderloin.body.data.id !== steak.body.data.id);
 
@@ -2366,12 +2392,15 @@ async function main() {
     name: '牛排菜谱', category: '家常菜', seasonings: [{ name: '牛排', amount: '200 g', ingredientId: steak.body.data.id }],
   }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 200);
   eq('菜谱引用中的原料不能删除', (await req('DELETE', `/api/ingredients/${steak.body.data.id}?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 409);
-  eq('未加入成员不能读取家庭原料', (await req('GET', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, (await registerAccount('原料字典外部账号')).token)).status, 403);
+  const externalIngredientAccount = await registerAccount('原料字典外部账号');
+  eq('未加入成员不能读取家庭原料', (await req('GET', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, externalIngredientAccount.token)).status, 403);
   const scopedIngredientState = await req('GET', `/api/state?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
   ok('家庭状态只含本家庭原料', scopedIngredientState.body.data.ingredients?.some((i) => i.name === '牛里脊') && !scopedIngredientState.body.data.ingredients?.some((i) => i.name === 'B 家独有食材'));
   eq('未选择家庭状态不暴露家庭原料', (await req('GET', '/api/state', undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).body.data.ingredients, []);
   eq('未选择家庭状态不暴露自定义分类', (await req('GET', '/api/state', undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).body.data.pantryCategories, []);
   const ingredientSuper = await authorizeSuper('2468', ingredientOwner.token);
+  const externalIngredientSuper = await authorizeSuper('2468', externalIngredientAccount.token);
+  eq('有效超级管理员能跨家庭读取原料', (await req('GET', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, externalIngredientSuper.token, undefined, undefined, undefined, externalIngredientAccount.token)).status, 200);
   DEFAULT_ACCOUNT_TOKEN = ingredientOwner.token;
   const ingredientBackup = await reqRaw('GET', '/api/export', undefined, ingredientSuper.token);
   eq('原料字典备份导出成功', ingredientBackup.status, 200);

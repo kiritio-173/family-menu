@@ -854,6 +854,27 @@ function requireAccountHousehold(req, res, householdId) {
   return false;
 }
 
+function canAccessPantryDictionary(req, householdId) {
+  const household = state.households.find((item) => item.id === householdId);
+  if (!household) return false;
+  const userId = accountUserId(req);
+  const isAccountMember = !!(userId && memberForUser(householdId, userId));
+  const device = deviceMember(req);
+  const isDeviceMember = !!(device && household.members.some((member) => member.id === device.memberId));
+  const hasAuthenticatedSuperAdmin = isSuperAdmin(req) && (!!userId || !!sessionOf(req));
+  return isAccountMember || isDeviceMember || hasAuthenticatedSuperAdmin;
+}
+
+function requirePantryDictionaryAccess(req, res, householdId) {
+  if (canAccessPantryDictionary(req, householdId)) return true;
+  if (!state.households.some((item) => item.id === householdId)) {
+    sendError(res, 404, '家庭不存在');
+    return false;
+  }
+  sendError(res, 403, '请使用已加入家庭的账号或设备访问原料字典');
+  return false;
+}
+
 function seedDishes() {
   return [
     {
@@ -3721,7 +3742,7 @@ async function handleAPI(req, res, url) {
     if (method === 'GET' && !id) {
       if (!queryHouseholdId) return sendError(res, 400, '缺少家庭 ID');
       if (!state.households.some((household) => household.id === queryHouseholdId)) return sendError(res, 404, '家庭不存在');
-      if (!requireAccountHousehold(req, res, queryHouseholdId)) return;
+      if (!requirePantryDictionaryAccess(req, res, queryHouseholdId)) return;
       return sendJSON(res, 200, {
         ok: true,
         data: pantryRootCategories().concat(state.pantryCategories.filter((category) => category.householdId === queryHouseholdId)),
@@ -3733,7 +3754,7 @@ async function handleAPI(req, res, url) {
       if (!householdId) return sendError(res, 400, '缺少家庭 ID');
       if (body.householdId && body.householdId !== householdId) return sendError(res, 400, '家庭 ID 不一致');
       if (!state.households.some((household) => household.id === householdId)) return sendError(res, 404, '家庭不存在');
-      if (!requireAccountHousehold(req, res, householdId)) return;
+      if (!requirePantryDictionaryAccess(req, res, householdId)) return;
       if (!isHouseAdmin(req, householdId)) return sendError(res, 403, '只有家庭管理员能维护分类');
       const category = normPantryCategory({ ...body, householdId });
       const parentId = category && category.parentId;
@@ -3750,7 +3771,7 @@ async function handleAPI(req, res, url) {
       if (index < 0) return sendError(res, 404, '自定义分类不存在');
       const existing = state.pantryCategories[index];
       if (queryHouseholdId && queryHouseholdId !== existing.householdId) return sendError(res, 403, '不能操作其他家庭的分类');
-      if (!requireAccountHousehold(req, res, existing.householdId)) return;
+      if (!requirePantryDictionaryAccess(req, res, existing.householdId)) return;
       if (!isHouseAdmin(req, existing.householdId)) return sendError(res, 403, '只有家庭管理员能维护分类');
       if (method === 'PUT') {
         const body = await readBody(req);
@@ -3785,7 +3806,7 @@ async function handleAPI(req, res, url) {
     if (method === 'GET' && !id) {
       if (!queryHouseholdId) return sendError(res, 400, '缺少家庭 ID');
       if (!state.households.some((household) => household.id === queryHouseholdId)) return sendError(res, 404, '家庭不存在');
-      if (!requireAccountHousehold(req, res, queryHouseholdId)) return;
+      if (!requirePantryDictionaryAccess(req, res, queryHouseholdId)) return;
       return sendJSON(res, 200, { ok: true, data: state.ingredients.filter((ingredient) => ingredient.householdId === queryHouseholdId) });
     }
     if (method === 'POST' && !id) {
@@ -3794,7 +3815,7 @@ async function handleAPI(req, res, url) {
       if (!householdId) return sendError(res, 400, '缺少家庭 ID');
       if (body.householdId && body.householdId !== householdId) return sendError(res, 400, '家庭 ID 不一致');
       if (!state.households.some((household) => household.id === householdId)) return sendError(res, 404, '家庭不存在');
-      if (!requireAccountHousehold(req, res, householdId)) return;
+      if (!requirePantryDictionaryAccess(req, res, householdId)) return;
       const ingredient = normIngredient({ ...body, householdId });
       if (!ingredient || !ingredient.categoryId || !pantryCategoryExists(householdId, ingredient.categoryId)) return sendError(res, 400, '请选择本家庭有效分类');
       if (state.ingredients.some((item) => item.householdId === householdId && item.name.toLocaleLowerCase() === ingredient.name.toLocaleLowerCase())) {
@@ -3809,7 +3830,7 @@ async function handleAPI(req, res, url) {
       if (index < 0) return sendError(res, 404, '原料不存在');
       const existing = state.ingredients[index];
       if (queryHouseholdId && queryHouseholdId !== existing.householdId) return sendError(res, 403, '不能操作其他家庭的原料');
-      if (!requireAccountHousehold(req, res, existing.householdId)) return;
+      if (!requirePantryDictionaryAccess(req, res, existing.householdId)) return;
       if (method === 'PUT') {
         const body = await readBody(req);
         if (body.householdId && body.householdId !== existing.householdId) return sendError(res, 400, '不能更改原料所属家庭');
@@ -3856,7 +3877,7 @@ async function handleAPI(req, res, url) {
     // 超级管理员也可以保持无家庭上下文，此时只看全局共享菜单和平台数据。
     const visibleHouseholdId = allowedRequested && requestedHousehold ? requestedHousehold.id : '';
     const canReadHouseholdDictionary = !!visibleHouseholdId && !readOnlyExternal &&
-      (isMyMember(req, visibleHouseholdId) || isHouseAdmin(req, visibleHouseholdId));
+      canAccessPantryDictionary(req, visibleHouseholdId);
     // 没设口令时是开放超级管理员模式；设了口令后，只有有效授权能看全量状态。
     const fullState = superAccess;
     const visibleDishes = fullState
