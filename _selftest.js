@@ -478,6 +478,34 @@ async function main() {
   })).body.data;
   eq('食盐合并盐有无库存', [saltAlias.id, saltAlias.trackingMode, saltAlias.hasStock, saltAlias.quantity], [salt.id, 'presence', true, 0]);
 
+  const measuredSeasoningDish = (await post('/api/dishes', {
+    name: '调料按有无扣减测试', category: '家常菜',
+    seasonings: [{ name: '盐', amount: '2 克' }, { name: '测试番茄', amount: '1 g' }],
+  })).body.data;
+  const measuredSeasoningPlan = (await post('/api/plans/items', {
+    householdId: h301.id, weekOf: monday, dishId: measuredSeasoningDish.id,
+  })).body.data.item;
+  const testTomatoStock = (await post('/api/pantry', {
+    householdId: h301.id, name: '测试番茄', category: '蔬菜', quantity: 5, unit: 'g',
+  })).body.data;
+  const measuredSeasoningDone = await req('PATCH', `/api/plans/items/${measuredSeasoningPlan.id}`, { status: 'done' });
+  eq('有库存的调料不按菜谱用量扣减或警告', measuredSeasoningDone.body.data.warnings.some((warning) => warning.includes('盐')), false);
+  eq('同菜谱数量型原料仍按用量扣减',
+    (await get(`/api/state?householdId=${encodeURIComponent(h301.id)}`)).body.data.pantry.find((p) => p.id === testTomatoStock.id).quantity, 4);
+  await put(`/api/pantry/${salt.id}`, { hasStock: false, trackingMode: 'presence' });
+  const absentSeasoningPlan = (await post('/api/plans/items', {
+    householdId: h301.id, weekOf: monday, dishId: measuredSeasoningDish.id,
+  })).body.data.item;
+  const absentSeasoningDone = await req('PATCH', `/api/plans/items/${absentSeasoningPlan.id}`, { status: 'done' });
+  ok('未确认有的调料提醒确认而不报数量缺货', absentSeasoningDone.body.data.warnings.some((warning) => warning.includes('盐：完成前请确认家中是否有')) &&
+    !absentSeasoningDone.body.data.warnings.some((warning) => warning.includes('盐：库存还缺')));
+  await put(`/api/pantry/${salt.id}`, { hasStock: true, trackingMode: 'presence' });
+  eq('同一菜再次完成继续扣实际数量原料',
+    (await get(`/api/state?householdId=${encodeURIComponent(h301.id)}`)).body.data.pantry.find((p) => p.id === testTomatoStock.id).quantity, 3);
+  eq('第二次完成后再次提交第一次仍被拒',
+    (await req('PATCH', `/api/plans/items/${measuredSeasoningPlan.id}`, { status: 'done' })).status, 409);
+  await del(`/api/pantry/${testTomatoStock.id}`);
+
   // 同一计划同一食材只允许入库一次，避免重复点击把库存加两遍。
   const receiveWeek = monday;
   await post('/api/plans/items', { householdId: h301.id, weekOf: receiveWeek, name: '采购入库测试菜' });
@@ -509,10 +537,12 @@ async function main() {
     category: '肉类', requestId: 'receipt-request-a',
   };
   eq('计划食材新增缺口允许再次入库', (await post('/api/plans/receive', repeatReceipt)).status, 200);
-  eq('同一入库请求编号重试被拦截', (await post('/api/plans/receive', repeatReceipt)).status, 409);
+  const parallelReceipt = { ...repeatReceipt, quantity: 1, requestId: 'receipt-request-race' };
+  const parallelResults = await Promise.all([post('/api/plans/receive', parallelReceipt), post('/api/plans/receive', parallelReceipt)]);
+  eq('并发重复入库只有一个请求成功', parallelResults.map((response) => response.status).sort(), [200, 409]);
   const repeatReceiptAgain = await post('/api/plans/receive', { ...repeatReceipt, quantity: 3, requestId: 'receipt-request-b' });
   eq('同食材的新入库请求可继续累加返回 200', repeatReceiptAgain.status, 200);
-  if (repeatReceiptAgain.status === 200) eq('同食材的新入库请求累加库存', repeatReceiptAgain.body.data.item.quantity, 5);
+  if (repeatReceiptAgain.status === 200) eq('同食材的新入库请求累加库存', repeatReceiptAgain.body.data.item.quantity, 6);
   if (repeatReceiptAgain.status === 200) await del(`/api/pantry/${repeatReceiptAgain.body.data.item.id}`);
   await del(`/api/pantry/${whiteSugar.id}`);
   await del(`/api/pantry/${salt.id}`);
@@ -1155,6 +1185,8 @@ async function main() {
   ok('采购折叠状态按栏目范围隔离', /function shoppingGroupOpen\(category, scope\)/.test(appSource) && /data-scope="\$\{esc\(scope\s*\|\|\s*'default'\)\}"/.test(appSource));
   ok('计划批量操作按栏目范围筛选条目', /function shopItemsForScope\(scope\)/.test(appSource) && /shopItemsForScope\(scope\)/.test(appSource));
   ok('入库进行中对同一食材加锁', /S\.stocking\.has\(lockKey\)/.test(appSource) && /S\.stocking\.add\(lockKey\)/.test(appSource));
+  ok('计划选择按家庭和周隔离', /const selectionContext\s*=\s*`\$\{S\.householdId\}::\$\{week\}`/.test(appSource) && /planShopSelectionContext !== selectionContext/.test(appSource));
+  ok('计划选择控件说明批量入库用途', /选择 \$\{it\.name\} 批量入库/.test(appSource));
   ok('计划入库携带幂等请求编号', /requestId:\s*\(globalThis\.crypto\s*&&\s*crypto\.randomUUID\)/.test(appSource));
   const pantryLogicSource = fs.readFileSync(path.join(ROOT, 'public', 'pantry-logic.js'), 'utf8');
   ok('计划有无型食材不汇总菜谱用量', /if\s*\(item\.trackingMode\s*===\s*'presence'\)\s*return;/.test(pantryLogicSource));
@@ -2456,6 +2488,36 @@ async function main() {
   }, undefined, undefined, undefined, undefined, ingredientOwner.token);
   eq('关联原料的库存行成功保存', linkedIngredientPantry.status, 200);
   eq('库存分类来自原料字典路径', linkedIngredientPantry.body.data.category, '肉类 > 牛肉');
+  const presenceIngredient = await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '家庭常备香料', aliases: [], categoryId, defaultTrackingMode: 'presence',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const presenceIngredientPantry = await req('POST', '/api/pantry', {
+    householdId: ingredientHouseAId, name: '家庭常备香料', ingredientId: presenceIngredient.body.data.id, quantity: 0,
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('新库存继承原料字典有无跟踪方式', presenceIngredientPantry.body.data.trackingMode, 'presence');
+  eq('有无库存保留原料字典 ID', presenceIngredientPantry.body.data.ingredientId, presenceIngredient.body.data.id);
+  const ingredientPlanWeek = monday;
+  await req('POST', '/api/plans/items', {
+    householdId: ingredientHouseAId, weekOf: ingredientPlanWeek, name: '原料 ID 扣库存测试菜',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const ingredientReceipt = await req('POST', '/api/plans/receive', {
+    householdId: ingredientHouseAId, weekOf: ingredientPlanWeek, name: '里脊切片', ingredientId: tenderloin.body.data.id,
+    category: '肉类', quantity: 100, unit: 'g', requestId: 'ingredient-id-receipt',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('计划入库同 ID 异名合并成功', ingredientReceipt.status, 200);
+  eq('计划入库同 ID 异名累加到原库存', ingredientReceipt.body.data.item.id, linkedIngredientPantry.body.data.id);
+  eq('计划入库保留标准原料 ID', ingredientReceipt.body.data.item.ingredientId, tenderloin.body.data.id);
+  eq('计划入库同 ID 异名库存数量累加', ingredientReceipt.body.data.item.quantity, 600);
+  const idMatchedDish = (await req('POST', `/api/my-dishes?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '原料 ID 扣库存菜谱', category: '家常菜', seasonings: [{ name: '里脊薄片', amount: '200 g', ingredientId: tenderloin.body.data.id }],
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token)).body.data;
+  const idMatchedPlan = await req('POST', '/api/plans/items', {
+    householdId: ingredientHouseAId, weekOf: ingredientPlanWeek, dishId: idMatchedDish.id,
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const idMatchedDone = await req('PATCH', `/api/plans/items/${idMatchedPlan.body.data.item.id}`, { status: 'done' }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('菜谱原料同 ID 异名完成成功', idMatchedDone.status, 200);
+  const afterIdMatchedConsume = await req('GET', `/api/state?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('菜谱原料同 ID 异名扣减正确库存', afterIdMatchedConsume.body.data.pantry.find((row) => row.id === linkedIngredientPantry.body.data.id)?.quantity, 400);
   eq('库存引用中的原料不能删除', (await req('DELETE', `/api/ingredients/${tenderloin.body.data.id}?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 409);
   eq('菜谱引用原料的菜成功保存', (await req('POST', `/api/my-dishes?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
     name: '牛排菜谱', category: '家常菜', seasonings: [{ name: '牛排', amount: '200 g', ingredientId: steak.body.data.id }],

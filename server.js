@@ -41,10 +41,20 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.31.0';
+const APP_VERSION = '1.31.1';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.31.1',
+    date: '2026-10-21',
+    title: '计划库存按原料 ID 精确联动',
+    items: [
+      '计划入库与做菜扣库存优先使用家庭原料 ID，原料改名或使用别名时仍更新同一库存',
+      '计划入库以原料 ID 防止同一原料别名绕过重复提交检查',
+      '新增库存继承原料字典的有无/数量跟踪方式；确认常备调料时保留原料 ID',
+    ],
+  },
   {
     version: '1.31.0',
     date: '2026-10-21',
@@ -1552,7 +1562,9 @@ function normPantryItem(input, prev, keepInputId) {
   const hasRequestedMode = requestedMode !== undefined && requestedMode !== null;
   const trackingMode = hasRequestedMode
     ? requestedMode === 'presence' ? 'presence' : 'quantity'
-    : isKnownSeasoning(name) ? 'presence' : 'quantity';
+    : linkedIngredient
+      ? linkedIngredient.defaultTrackingMode === 'presence' ? 'presence' : 'quantity'
+      : isKnownSeasoning(name) ? 'presence' : 'quantity';
   const hasStock = typeof input.hasStock === 'boolean'
     ? input.hasStock
     : typeof base.hasStock === 'boolean'
@@ -1628,7 +1640,9 @@ function addPantryQuantity(item) {
   const hit = state.pantry.find(
     (p) => p.householdId === item.householdId &&
       (p.trackingMode || 'quantity') === item.trackingMode &&
-      pantryIngredientKey(p.name) === pantryIngredientKey(item.name) &&
+      (item.ingredientId
+        ? p.ingredientId === item.ingredientId
+        : !p.ingredientId && pantryIngredientKey(p.name) === pantryIngredientKey(item.name)) &&
       pantryUnitKey(p.unit) === pantryUnitKey(item.unit)
   );
   if (!hit) {
@@ -1676,13 +1690,29 @@ function consumeDishPantry(householdId, dish) {
   const totals = new Map();
   const warnings = [];
   dishRecipeIngredients(dish).forEach((s) => {
+    const ingredient = s.ingredientId
+      ? state.ingredients.find((row) => row.id === s.ingredientId && row.householdId === householdId)
+      : null;
+    const matchesPantryIngredient = (row) => row.householdId === householdId &&
+      (ingredient ? row.ingredientId === ingredient.id : pantryIngredientKey(row.name) === pantryIngredientKey(s.name));
+    const presenceTracked = (ingredient && ingredient.defaultTrackingMode === 'presence') ||
+      (!ingredient && isKnownSeasoning(s.name)) || state.pantry.some((row) =>
+        matchesPantryIngredient(row) && row.trackingMode === 'presence');
+    if (presenceTracked) {
+      const stock = state.pantry.filter(matchesPantryIngredient);
+      const present = stock.some((row) => row.hasStock === true ||
+        ((row.trackingMode || 'quantity') !== 'presence' && Number(row.quantity) > 0));
+      if (!present) warnings.push(`${s.name}：完成前请确认家中是否有`);
+      return;
+    }
     const amount = parseRecipeAmount(s.amount);
     if (!amount) {
       warnings.push(`${s.name}：用量为“适量”或无法识别，未自动扣除`);
       return;
     }
-    const key = `${pantryIngredientKey(s.name)}|${pantryUnitKey(amount.unit)}`;
-    const current = totals.get(key) || { name: s.name, unit: amount.unit, quantity: 0 };
+    const ingredientKey = ingredient ? `id:${ingredient.id}` : `name:${pantryIngredientKey(s.name)}`;
+    const key = `${ingredientKey}|${pantryUnitKey(amount.unit)}`;
+    const current = totals.get(key) || { name: ingredient ? ingredient.name : s.name, ingredientId: ingredient?.id || '', unit: amount.unit, quantity: 0 };
     current.quantity += amount.quantity;
     totals.set(key, current);
   });
@@ -1691,7 +1721,9 @@ function consumeDishPantry(householdId, dish) {
   for (const need of totals.values()) {
     const rows = state.pantry
       .filter((p) => p.householdId === householdId &&
-        pantryIngredientKey(p.name) === pantryIngredientKey(need.name) &&
+        (need.ingredientId
+          ? p.ingredientId === need.ingredientId
+          : !p.ingredientId && pantryIngredientKey(p.name) === pantryIngredientKey(need.name)) &&
         pantryUnitKey(p.unit) === pantryUnitKey(need.unit))
       .sort((a, b) => String(a.expireAt || '9999-12-31').localeCompare(String(b.expireAt || '9999-12-31')));
     let remain = need.quantity;
@@ -4865,7 +4897,12 @@ async function handleAPI(req, res, url) {
       const plan = findPlan(hid, wk, false);
       if (!plan) return sendError(res, 404, '这一周还没有计划');
       if (!plan.received || typeof plan.received !== 'object') plan.received = {};
-      const receivedKey = pantryIngredientKey(name);
+      const requestedIngredientId = safeText(body.ingredientId, 80).trim();
+      const linkedIngredient = requestedIngredientId
+        ? state.ingredients.find((ingredient) => ingredient.id === requestedIngredientId && ingredient.householdId === hid)
+        : null;
+      if (requestedIngredientId && !linkedIngredient) return sendError(res, 400, '原料不属于当前家庭，请刷新后重试');
+      const receivedKey = linkedIngredient ? `id:${linkedIngredient.id}` : `name:${pantryIngredientKey(name)}`;
       if (!plan.receiveRequests || typeof plan.receiveRequests !== 'object') plan.receiveRequests = {};
       const requestId = safeText(body.requestId, 120).trim();
       const requestKey = requestId || `legacy:${receivedKey}`;
@@ -4873,7 +4910,9 @@ async function handleAPI(req, res, url) {
       const item = normPantryItem({
         householdId: hid,
         name,
+        ...(linkedIngredient ? { ingredientId: linkedIngredient.id } : {}),
         category: body.category,
+        trackingMode: body.trackingMode || linkedIngredient?.defaultTrackingMode,
         quantity: rawQty,
         unit,
         expireAt: body.expireAt,

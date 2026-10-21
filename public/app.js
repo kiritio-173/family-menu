@@ -25,7 +25,7 @@ const S = {
   shopContext: null, // 当前清单来源：计划入库需要带周次，点餐页则为空
   stocking: new Set(), // 正在提交的库存项目，阻止快速重复点击
   planShopSelected: new Set(), // 计划采购仅用于当前周的批量操作选择
-  planShopSelectionWeek: '',
+  planShopSelectionContext: '',
   orderPickSel: new Set(), // 点餐弹层里勾中的几道菜
   planPickSel: new Set(), // 计划弹层里勾中的几道菜
   planPickWeek: '', // 计划弹层是给哪一周开的
@@ -1678,11 +1678,14 @@ async function saveShoppingChecked() {
   S.data.shoppingStatus = data;
 }
 
-async function setShoppingStatus(name, state) {
-  if (!S.householdId) throw new Error('请先选择家庭');
-  const data = await api('PUT', '/api/shopping-status', { householdId: S.householdId, name, state });
-  S.data.shoppingStatus = data;
-  S.shoppingChecked = new Set(Object.entries(data.items || {}).filter(([, item]) => item && item.state === 'completed').map(([n]) => n));
+async function setShoppingStatus(name, state, targetHouseholdId) {
+  const householdId = targetHouseholdId || S.householdId;
+  if (!householdId) throw new Error('请先选择家庭');
+  const data = await api('PUT', '/api/shopping-status', { householdId, name, state });
+  if (householdId === S.householdId) {
+    S.data.shoppingStatus = data;
+    S.shoppingChecked = new Set(Object.entries(data.items || {}).filter(([, item]) => item && item.state === 'completed').map(([n]) => n));
+  }
 }
 
 /**
@@ -1690,7 +1693,7 @@ async function setShoppingStatus(name, state) {
  * 单条「入库」和批量「全部入库」共用这一份，免得两处逻辑走偏。
  */
 async function stockOne(name, parts, options) {
-  const lockKey = `${S.shopContext?.weekOf || 'shopping'}::${ingredientMatchKey(name)}`;
+  const lockKey = `${S.householdId}::${S.shopContext?.weekOf || 'shopping'}::${ingredientMatchKey(name)}`;
   if (S.stocking.has(lockKey)) return null;
   S.stocking.add(lockKey);
   try {
@@ -1701,16 +1704,19 @@ async function stockOne(name, parts, options) {
 }
 
 async function stockOneUnlocked(name, parts, options) {
+  const householdId = S.householdId;
+  const shopContext = S.shopContext ? { ...S.shopContext } : null;
   const opts = options || {};
   const item = opts.item || (S.shopList || []).find((x) => x.name === name) || null;
   if (item && item.trackingMode === 'presence') {
-    const stock = findStock(name);
+    const stock = findStock(name, item.ingredientId);
     if (stock.length) {
       for (const pantry of stock) await api('PUT', `/api/pantry/${pantry.id}`, { ...pantry, trackingMode: 'presence', hasStock: true });
     } else {
       await api('POST', '/api/pantry', {
-        householdId: S.householdId,
+        householdId,
         name,
+        ...(item.ingredientId ? { ingredientId: item.ingredientId } : {}),
         category: item.category || '调味干货',
         trackingMode: 'presence',
         hasStock: true,
@@ -1720,7 +1726,7 @@ async function stockOneUnlocked(name, parts, options) {
         note: '从计划确认家中有',
       });
     }
-    await setShoppingStatus(name, 'completed');
+    if (shopContext?.kind !== 'plan') await setShoppingStatus(name, 'completed', householdId);
     return { name, hasStock: true };
   }
   const guessed = guessAmount(parts || []);
@@ -1744,12 +1750,13 @@ async function stockOneUnlocked(name, parts, options) {
     const hit = S.presets.presets.find((p) => p.name === name);
     if (hit) category = hit.category;
   }
-  const context = S.shopContext;
-  if (context && context.kind === 'plan' && context.weekOf) {
+  if (shopContext && shopContext.kind === 'plan' && shopContext.weekOf) {
     await api('POST', '/api/plans/receive', {
-      householdId: S.householdId,
-      weekOf: context.weekOf,
+      householdId,
+      weekOf: shopContext.weekOf,
       name,
+      ingredientId: item && item.ingredientId || '',
+      trackingMode: item && item.trackingMode || 'quantity',
       category,
       quantity,
       unit,
@@ -1760,7 +1767,7 @@ async function stockOneUnlocked(name, parts, options) {
     });
   } else {
     await api('POST', '/api/pantry', {
-      householdId: S.householdId,
+      householdId,
       name,
       category,
       quantity,
@@ -1770,10 +1777,10 @@ async function stockOneUnlocked(name, parts, options) {
       addToExisting: true,
     });
   }
-  if (context && context.kind === 'plan') {
+  if (shopContext && shopContext.kind === 'plan') {
     S.planShopSelected.delete(name);
-  } else if (S.householdId) {
-    await api('PUT', '/api/shopping-status', { householdId: S.householdId, name, state: 'needed' });
+  } else if (householdId) {
+    await api('PUT', '/api/shopping-status', { householdId, name, state: 'needed' });
     S.shoppingChecked.delete(name);
   }
   return { name, quantity, unit };
@@ -2728,7 +2735,7 @@ function shopItemHtml(it) {
   const rowDone = planMode ? inventoryComplete : checked || (stateKey === 'completed' && done);
   return `<div class="shop-item ${rowDone ? 'done' : ''} shop-state-${stateKey}">
     <div class="shop-check" role="checkbox" tabindex="0" aria-checked="${checked}"
-      aria-label="${esc(it.name)} 是否已买" data-act="toggle-shop" data-name="${esc(it.name)}">✓</div>
+      aria-label="${esc(planMode ? `选择 ${it.name} 批量入库` : `${it.name} 是否已买`)}" data-act="toggle-shop" data-name="${esc(it.name)}">✓</div>
     <div class="shop-main">
       <div class="shop-name">${esc(it.name)} <span class="tag ${stateKey === 'enough' ? 'own' : stateKey === 'completed' ? 'done' : stateKey}">${stateLabel}</span></div>
       <div class="shop-from">${it.isSeasoning ? '调料 · 只确认家中是否有' : `${it.requiredQty != null ? `本周需 ${esc(fmtQty(it.requiredQty))}${esc(it.requiredUnit)} · ` : ''}${it.useCount > 1 ? `使用 ${it.useCount} 次 · ` : ''}`}${esc(it.isSeasoning ? '' : it.parts.join(' · '))}</div>
@@ -3108,9 +3115,10 @@ function planRow(it) {
 
 function viewPlan() {
   const week = planWeek();
-  if (S.planShopSelectionWeek !== week) {
+  const selectionContext = `${S.householdId}::${week}`;
+  if (S.planShopSelectionContext !== selectionContext) {
     S.planShopSelected.clear();
-    S.planShopSelectionWeek = week;
+    S.planShopSelectionContext = selectionContext;
   }
   S.shopList = [];
   S.shopContext = { kind: 'plan', weekOf: week };
