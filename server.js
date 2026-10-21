@@ -41,10 +41,18 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.31.4';
+const APP_VERSION = '1.31.5';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.31.5',
+    date: '2026-10-21',
+    title: '修复菜单菜谱无法编辑',
+    items: [
+      '修复编辑菜谱表单初始化时管理员权限变量未定义导致按钮点击无反应的问题',
+    ],
+  },
   {
     version: '1.31.4',
     date: '2026-10-21',

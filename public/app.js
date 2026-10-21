@@ -4368,6 +4368,7 @@ function seasoningTypeSelect(type, attrs) {
 }
 
 function openDishEditor(dish) {
+  const admin = isSuper();
   const cats = sortedCategories();
   const newHouseholdId = dish ? dish.householdId : newDishHouseholdId();
   const availableCats = cats.filter((category) => !category.householdId || category.householdId === newHouseholdId);

@@ -1182,6 +1182,8 @@ async function main() {
   ok('每条更新记录都列了具体改了什么', v.releases.every((r) => Array.isArray(r.items) && r.items.length), v.releases.map((r) => r.items && r.items.length));
   ok('采购入库不调用原生 prompt', !fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8').includes('window.prompt'));
   const appSource = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
+  const dishEditorSource = (appSource.match(/function openDishEditor\(dish\) \{[\s\S]*?\n\}/) || [''])[0];
+  ok('编辑表单初始化管理员权限变量', /const admin\s*=\s*isSuper\(\)/.test(dishEditorSource));
   ok('计划采购按调料/普通食材分组并隐藏已确认调料', /purchaseShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning\s*&&/.test(appSource) && /stapleShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*it\.isSeasoning\s*&&\s*stockAssessment\(it\)\.key\s*!==\s*'enough'/.test(appSource));
   ok('计划采购只列当前缺口或需确认项目', /purchaseShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning[\s\S]{0,160}it\.received[\s\S]{0,80}uncertain/.test(appSource));
   ok('库存已覆盖时仍显示无需采购汇总', /purchaseMaterials\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning\)/.test(appSource) && /没有待购食材 · 库存可覆盖/.test(appSource));
