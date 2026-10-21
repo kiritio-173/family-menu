@@ -1196,7 +1196,8 @@ async function main() {
   ok('单条入库成功后提示结果', /async 'stock-it'\(el\)[\s\S]{0,650}toast\(/.test(appSource));
   ok('计划收到已入库但用量不明确的状态', /it\.received[\s\S]{0,120}uncertain/.test(appSource));
   ok('选择调味干货时自动切换有无方式', /function applyFoodCategoryDefaults\(category\)[\s\S]{0,280}调味干货[\s\S]{0,180}tracking\.value\s*=\s*'presence'/.test(appSource));
-  ok('计划模式从家庭原料字典读取库存方式', /const ingredient = ingredientById\(row\.ingredientId\)[\s\S]{0,400}ingredient\.defaultTrackingMode/.test(appSource));
+  ok('计划模式从家庭原料字典读取库存方式', /const ingredient = ingredientById\(row\.ingredientId\)/.test(appSource) && /ingredient && ingredient\.defaultTrackingMode/.test(appSource));
+  ok('旧菜谱无原料 ID 时优先使用当前库存分类', /resolveIngredientCategory\([\s\S]{0,220}stockCategory/.test(appSource));
   const pantryLogicSource = fs.readFileSync(path.join(ROOT, 'public', 'pantry-logic.js'), 'utf8');
   ok('计划有无型食材不汇总菜谱用量', /if\s*\(item\.trackingMode\s*===\s*'presence'\)\s*return;/.test(pantryLogicSource));
   ok('库存逻辑脚本先于应用脚本加载', /pantry-logic\.js[\s\S]*app\.js/.test(fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8')));
@@ -2528,8 +2529,9 @@ async function main() {
     name: '示例食用油', aliases: [], categoryId: 'pantry-root-6', defaultTrackingMode: 'quantity', defaultUnit: '瓶',
   }, undefined, undefined, undefined, undefined, ingredientOwner.token);
   const msgIngredient = await req('POST', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
-    name: '示例味精', aliases: [], categoryId: 'pantry-root-11', defaultTrackingMode: 'presence',
+    name: '示例味精', aliases: [], categoryId: 'pantry-root-11', defaultTrackingMode: 'quantity', defaultUnit: '袋',
   }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('新建调味干货原料强制有无默认方式', [msgIngredient.body.data.defaultTrackingMode, msgIngredient.body.data.defaultUnit], ['presence', '']);
   const cuminRecipe = await req('POST', `/api/my-dishes?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
     name: '孜然牛肉', category: '家常菜', seasonings: [
       { name: '示例食用油', amount: '适量', purchaseType: 'purchase', ingredientId: cuminOil.body.data.id },

@@ -41,10 +41,19 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.31.2';
+const APP_VERSION = '1.31.3';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.31.3',
+    date: '2026-10-21',
+    title: '修正计划中的调味干货分类识别',
+    items: [
+      '旧菜谱的分类不再覆盖家庭原料字典或库存中更新后的分类，调味干货统一按有/无判断',
+      '继续保留数量型食材按周需求与实际库存计算采购缺口；调料只确认家中是否有',
+    ],
+  },
   {
     version: '1.31.2',
     date: '2026-10-21',
@@ -1167,15 +1176,19 @@ function normIngredient(input, base) {
   const aliases = Array.isArray(sourceAliases)
     ? [...new Set(sourceAliases.map((alias) => safeText(alias, 80).trim()).filter((alias) => alias && alias !== name))].slice(0, 30)
     : [];
+  const categoryId = safeText(input.categoryId ?? (base && base.categoryId), 80);
+  const categoryRoot = pantryCategoryLabel(householdId, categoryId).split(' > ')[0];
   const mode = input.defaultTrackingMode ?? (base && base.defaultTrackingMode);
+  const categoryChanged = !base || (input.categoryId !== undefined && input.categoryId !== base.categoryId);
+  const trackingMode = categoryRoot === '调味干货' && categoryChanged ? 'presence' : mode === 'presence' ? 'presence' : 'quantity';
   return {
     id: safeText((base && base.id) || input.id, 80) || uid('ing_'),
     householdId,
     name,
     aliases,
-    categoryId: safeText(input.categoryId ?? (base && base.categoryId), 80),
-    defaultTrackingMode: mode === 'presence' ? 'presence' : 'quantity',
-    defaultUnit: safeText(input.defaultUnit ?? (base && base.defaultUnit), 20).trim(),
+    categoryId,
+    defaultTrackingMode: trackingMode,
+    defaultUnit: trackingMode === 'presence' ? '' : safeText(input.defaultUnit ?? (base && base.defaultUnit), 20).trim(),
     createdAt: (base && base.createdAt) || safeText(input.createdAt, 40) || nowISO(),
     updatedAt: nowISO(),
   };

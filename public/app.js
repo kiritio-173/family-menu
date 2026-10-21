@@ -2549,7 +2549,14 @@ function mergeSeasonings(rows) {
       const stock = findStock(row.name, row.ingredientId);
       const explicit = stock.find((p) => p.trackingMode === 'presence' || p.trackingMode === 'quantity');
       const ingredient = ingredientById(row.ingredientId);
-      const category = ingredient ? pantryCategoryPath(ingredient.categoryId) : row.category;
+      const preset = (S.presets && S.presets.presets || []).find((item) => ingredientMatchKey(item.name) === ingredientMatchKey(row.name));
+      const stockCategory = stock.find((item) => item.category)?.category;
+      const category = window.PantryLogic.resolveIngredientCategory({
+        ingredientCategory: ingredient ? pantryCategoryPath(ingredient.categoryId) : '',
+        stockCategory,
+        presetCategory: preset && preset.category,
+        recipeCategory: row.category,
+      });
       return window.PantryLogic.inferTrackingMode({
         ...row,
         category,

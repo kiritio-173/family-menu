@@ -33,6 +33,11 @@
     return known.has(normalized) ? 'presence' : 'quantity';
   }
 
+  function resolveIngredientCategory(source) {
+    const item = source || {};
+    return String(item.ingredientCategory || item.stockCategory || item.presetCategory || item.recipeCategory || '').trim();
+  }
+
   function aggregatePlanMaterials(rows, options) {
     const opts = options || {};
     const normalizeName = opts.normalizeName || defaultNormalizeName;
@@ -128,7 +133,7 @@
       : { key: 'shortage', stockQty, stockMinQty: minimum, targetQty, shortageQty: targetQty - stockQty };
   }
 
-  const api = { inferTrackingMode, aggregatePlanMaterials, assessStock, normalizeName: defaultNormalizeName };
+  const api = { inferTrackingMode, resolveIngredientCategory, aggregatePlanMaterials, assessStock, normalizeName: defaultNormalizeName };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.PantryLogic = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -3,6 +3,7 @@
 const assert = require('assert');
 const {
   inferTrackingMode,
+  resolveIngredientCategory,
   aggregatePlanMaterials,
   assessStock,
 } = require('./public/pantry-logic');
@@ -11,9 +12,16 @@ assert.strictEqual(inferTrackingMode({ name: '白砂糖', category: '其他' }),
 assert.strictEqual(inferTrackingMode({ name: '蒜末', category: '蔬菜' }), 'presence');
 assert.strictEqual(inferTrackingMode({ name: '食用油', category: '调味干货' }), 'presence');
 assert.strictEqual(inferTrackingMode({ name: '味精', category: '调味干货', purchaseType: 'purchase' }), 'presence');
+assert.strictEqual(inferTrackingMode({ name: '自制干香料', category: '调味干货', purchaseType: 'purchase' }), 'presence');
 assert.strictEqual(inferTrackingMode({ name: '番茄', category: '调味干货' }), 'presence');
 assert.strictEqual(inferTrackingMode({ name: '鸡肉', category: '肉类' }), 'quantity');
 assert.strictEqual(inferTrackingMode({ name: '食盐', trackingMode: 'quantity' }), 'quantity');
+assert.strictEqual(resolveIngredientCategory({
+  ingredientCategory: '', stockCategory: '调味干货', presetCategory: '主食粮油', recipeCategory: '主食粮油',
+}), '调味干货');
+assert.strictEqual(resolveIngredientCategory({
+  ingredientCategory: '调味干货 > 香料', stockCategory: '主食粮油', presetCategory: '调味干货', recipeCategory: '蔬菜',
+}), '调味干货 > 香料');
 
 const rows = [
   { name: '番茄', amount: '2 个', dish: '炒蛋', category: '蔬菜' },
@@ -59,6 +67,16 @@ assert.strictEqual(cuminBeef.find((item) => item.name === '食用油').requiredC
 assert.strictEqual(assessStock(cuminBeef.find((item) => item.name === '食用油')).key, 'uncertain');
 assert.strictEqual(cuminBeef.find((item) => item.name === '味精').trackingMode, 'presence');
 assert.strictEqual(cuminBeef.find((item) => item.name === '味精').requiredQty, null);
+const legacyMsg = aggregatePlanMaterials([
+  { name: '味精', amount: '适量', dish: '孜然牛肉', purchaseType: 'purchase', category: '调味干货' },
+], {
+  inferTrackingMode,
+  parseAmount: () => ({ quantity: null, unit: '' }),
+  stockFor: () => [],
+  categoryFor: () => '调味干货',
+});
+assert.strictEqual(legacyMsg[0].trackingMode, 'presence');
+assert.strictEqual(legacyMsg[0].requiredQty, null);
 
 const idAggregate = aggregatePlanMaterials([
   { name: '番茄', amount: '2 个', dish: '炒蛋', ingredientId: 'ing-tomato', categoryId: 'veg-root', trackingMode: 'quantity' },
