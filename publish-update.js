@@ -30,6 +30,8 @@ const PUBLISH_FILES = [
   'docs/superpowers/plans/2026-10-16-role-workspaces.md',
   'docs/superpowers/plans/2026-10-16-permissions-publish-plan.md',
   'docs/superpowers/specs/2026-10-16-permissions-publish-design.md',
+  'docs/product/2026-10-18-family-workspace-flow.md',
+  'docs/product/2026-10-18-current-interface-product-logic.md',
   'public/index.html',
   'public/app.js',
   'public/styles.css',

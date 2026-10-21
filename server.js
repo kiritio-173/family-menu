@@ -41,10 +41,20 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.27.0';
+const APP_VERSION = '1.28.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.28.0',
+    date: '2026-10-21',
+    title: '计划食材缺口与调料确认',
+    items: [
+      '盐、白糖等历史库存自动归入调味干货，采购页不再落在其他分类',
+      '计划按普通食材整周用量和库存计算缺口，库存充足的食材自动标记完成',
+      '调味干货只确认家中是否有，不汇总菜谱用量或比较不统一的单位；可手动确认或按实际购买量入库',
+    ],
+  },
   {
     version: '1.27.0',
     date: '2026-10-20',
@@ -1237,6 +1247,9 @@ function normPantryItem(input, prev, keepInputId) {
 
   const cat = safeText(input.category ?? base.category, 12).trim();
   const known = PANTRY_CATEGORIES.some((c) => c.name === cat);
+  const category = ['盐', '糖'].includes(pantryIngredientKey(name))
+    ? '调味干货'
+    : known ? cat : '其他';
 
   return {
     id:
@@ -1244,7 +1257,7 @@ function normPantryItem(input, prev, keepInputId) {
       (keepInputId && typeof input.id === 'string' && input.id ? input.id : uid('f_')),
     householdId: resolveHouseholdId(input.householdId ?? base.householdId),
     name,
-    category: known ? cat : '其他',
+    category,
     quantity: qty,
     minQuantity,
     unit: safeText(input.unit ?? base.unit, 8).trim() || '份',
@@ -1651,6 +1664,11 @@ function loadState() {
     if (!hhIds.has(p.householdId)) p.householdId = fallbackH;
     // 老版本把葱姜蒜归到了蔬菜；迁移到调味干货后，计划页也会按常备调料提示。
     if (p.category === '蔬菜' && isSeasoningAromatic(p.name)) {
+      p.category = '调味干货';
+      pantryCategoryChanged = true;
+    }
+    // 早期从计划采购入库的盐、白糖没有对应预设分类，曾被保存为“其他”。
+    if (['盐', '糖'].includes(pantryIngredientKey(p.name)) && p.category !== '调味干货') {
       p.category = '调味干货';
       pantryCategoryChanged = true;
     }

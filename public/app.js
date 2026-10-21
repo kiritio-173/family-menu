@@ -1482,9 +1482,11 @@ function ingredientCategory(name, stock) {
   const rows = Array.isArray(stock) ? stock : findStock(name);
   const own = rows.find((p) => p && p.category && p.category !== '其他');
   if (own) return own.category;
+  const key = ingredientMatchKey(name);
   const preset = S.presets && Array.isArray(S.presets.presets)
-    ? S.presets.presets.find((p) => p && p.name === name)
+    ? S.presets.presets.find((p) => p && ingredientMatchKey(p.name) === key)
     : null;
+  if (['盐', '糖'].includes(key)) return '调味干货';
   return (preset && preset.category) || (rows[0] && rows[0].category) || '其他';
 }
 
@@ -1599,8 +1601,15 @@ async function stockOne(name, parts, options) {
   const assessment = item ? stockAssessment(item) : null;
   const defaultQty = assessment && assessment.shortageQty != null
     ? assessment.shortageQty
-    : (item && item.requiredQty != null ? item.requiredQty : guessed.quantity);
-  const defaultUnit = (item && item.requiredUnit) || guessed.unit || '份';
+    : (item && item.isSeasoning ? 1 : item && item.requiredQty != null ? item.requiredQty : guessed.quantity);
+  const preset = S.presets && S.presets.presets
+    ? S.presets.presets.find((p) => ingredientMatchKey(p.name) === ingredientMatchKey(name))
+    : null;
+  const defaultUnit = (item && item.isSeasoning && item.stock.find((p) => p.quantity > 0)?.unit)
+    || (item && item.requiredUnit)
+    || (item && item.isSeasoning && preset && preset.unit)
+    || guessed.unit
+    || '份';
   const entered = await askStockInput(name, defaultQty, defaultUnit);
   if (!entered) return null;
   const { quantity, unit } = entered;
@@ -2394,6 +2403,7 @@ function mergeSeasonings(rows) {
     if (!r.name) return;
     const mergeKey = ingredientMatchKey(r.name);
     if (!map.has(mergeKey)) {
+      const category = ingredientCategory(r.name, findStock(r.name));
       map.set(mergeKey, {
         name: r.name,
         parts: [],
@@ -2402,6 +2412,7 @@ function mergeSeasonings(rows) {
         requiredUnit: '',
         requiredComparable: true,
         purchaseType: r.purchaseType || '',
+        isSeasoning: category === '调味干货',
       });
     }
     const item = map.get(mergeKey);
@@ -2411,6 +2422,8 @@ function mergeSeasonings(rows) {
     const parts = item.parts;
     const tag = r.method ? `${r.dish}（${r.method}） ${r.amount}` : `${r.dish} ${r.amount}`;
     if (!parts.includes(tag)) parts.push(tag);
+    // 调味干货只用于库存确认，不汇总菜谱用量；瓶、勺、克等单位不参与计划计算。
+    if (item.isSeasoning) return;
     const amount = parseAmountText(r.amount);
     if (amount.quantity == null) {
       item.requiredComparable = false;
@@ -2433,6 +2446,7 @@ function mergeSeasonings(rows) {
     return {
       ...item,
       category,
+      isSeasoning: category === '调味干货',
       isStaple: item.purchaseType === 'staple' || (item.purchaseType !== 'purchase' && category === '调味干货'),
       stock,
       stockQty: stock.reduce((s, p) => s + (p.quantity || 0), 0),
@@ -2460,6 +2474,15 @@ function roundQty(value) {
 function stockAssessment(item) {
   const stock = Array.isArray(item.stock) ? item.stock : [];
   const positive = stock.filter((p) => Number(p.quantity) > 0);
+  if (item.isSeasoning) {
+    return {
+      key: positive.length ? 'enough' : 'staple',
+      stockQty: null,
+      stockMinQty: 0,
+      targetQty: null,
+      shortageQty: null,
+    };
+  }
   const requiredUnit = normalizeAmountUnit(item.requiredUnit);
   const stockQty = positive.reduce((sum, p) => sum + Number(p.quantity || 0), 0);
   const unitRows = positive.length ? positive : stock;
@@ -2556,15 +2579,23 @@ function shoppingGroupOpen(category) {
 function shopItemHtml(it) {
   const done = S.shoppingChecked.has(it.name);
   const assessment = stockAssessment(it);
-  const stateKey = it.received ? 'received' : assessment.key === 'needed' && done ? 'completed' : assessment.key;
+  const planMode = S.shopContext && S.shopContext.kind === 'plan';
+  const inventoryComplete = planMode && assessment.key === 'enough';
+  const stateKey = it.received
+    ? 'received'
+    : inventoryComplete || (done && ['needed', 'staple', 'uncertain'].includes(assessment.key))
+      ? 'completed'
+      : assessment.key;
   const stateLabel = {
-    enough: '已有', shortage: '库存不足', uncertain: '需确认', staple: '请确认', completed: '已完成', received: '已入库', needed: '待购买',
+    enough: planMode ? '已完成' : '已有', shortage: '库存不足', uncertain: '需确认', staple: '请确认', completed: '已完成', received: '已入库', needed: '待购买',
   }[stateKey];
   const displayUnit = it.stockUnit || it.requiredUnit || '';
   const reserveHint = assessment.stockMinQty > 0
     ? `（最低保有量 ${esc(fmtQty(assessment.stockMinQty))}${esc(displayUnit)}）`
     : '';
-  const stockHtml = it.stock.length || ['needed', 'staple'].includes(stateKey)
+  const stockHtml = it.isSeasoning
+    ? `<span class="shop-stock">${stateKey === 'staple' ? '🧂 家中没有库存记录 · 请确认是否需要补充' : '🧂 已确认家中有，无需比较用量'}</span>`
+    : it.stock.length || ['needed', 'staple'].includes(stateKey)
     ? `<span class="shop-stock" title="家里已经有 ${esc(it.stock.map((p) => p.name + ' ' + p.quantity + p.unit).join('、') || '暂无库存')}">
         ${stateKey === 'needed'
           ? `⚠️ 库存已用完${assessment.shortageQty != null ? `，还需 ${esc(fmtQty(assessment.shortageQty))}${esc(displayUnit)}` : ''}`
@@ -2580,13 +2611,14 @@ function shopItemHtml(it) {
     ? ''
     : `<button class="btn soft sm" data-act="stock-it" data-name="${esc(it.name)}"
          data-parts="${esc(it.parts.join('|'))}">入库</button>`;
-  const rowDone = done && stateKey === 'completed' || stateKey === 'received';
+  const checked = done || inventoryComplete || stateKey === 'received';
+  const rowDone = checked || (stateKey === 'completed' && done);
   return `<div class="shop-item ${rowDone ? 'done' : ''} shop-state-${stateKey}">
-    <div class="shop-check" role="checkbox" tabindex="0" aria-checked="${done}"
+    <div class="shop-check" role="checkbox" tabindex="0" aria-checked="${checked}"
       aria-label="${esc(it.name)} 是否已买" data-act="toggle-shop" data-name="${esc(it.name)}">✓</div>
     <div class="shop-main">
       <div class="shop-name">${esc(it.name)} <span class="tag ${stateKey === 'enough' ? 'own' : stateKey === 'completed' ? 'done' : stateKey}">${stateLabel}</span></div>
-      <div class="shop-from">${it.requiredQty != null ? `本周需 ${esc(fmtQty(it.requiredQty))}${esc(it.requiredUnit)} · ` : ''}${it.useCount > 1 ? `使用 ${it.useCount} 次 · ` : ''}${esc(it.parts.join(' · '))}</div>
+      <div class="shop-from">${it.isSeasoning ? '调料 · 只确认家中是否有' : `${it.requiredQty != null ? `本周需 ${esc(fmtQty(it.requiredQty))}${esc(it.requiredUnit)} · ` : ''}${it.useCount > 1 ? `使用 ${it.useCount} 次 · ` : ''}`}${esc(it.isSeasoning ? '' : it.parts.join(' · '))}</div>
     </div>
     <div class="shop-side">${stockHtml}${restockHtml}</div>
   </div>`;
@@ -2980,8 +3012,8 @@ function viewPlan() {
   shop.forEach((it) => {
     it.received = Boolean(received[shoppingIngredientKey(it.name)]);
   });
-  const purchaseShop = shop.filter((it) => !it.isStaple);
-  const stapleShop = shop.filter((it) => it.isStaple);
+  const purchaseShop = shop.filter((it) => !it.isSeasoning);
+  const stapleShop = shop.filter((it) => it.isSeasoning);
   const missing = purchaseShop.filter((it) => ['needed', 'shortage'].includes(stockAssessment(it).key));
 
   const weekNav = `<div class="week-nav">
@@ -3028,8 +3060,8 @@ function viewPlan() {
 
   const shopSection = items.length
     ? `${purchaseShop.length || stapleShop.length ? `<div class="section-head">
-        <h2 class="section-title">一次买齐</h2>
-        <span class="section-sub">${purchaseShop.length ? `${purchaseShop.length} 样需要采购${missing.length ? ` · ${missing.length} 样待补` : ' · 库存可覆盖'}` : '没有需要采购的食材'}</span>
+        <h2 class="section-title">食材采购</h2>
+        <span class="section-sub">${purchaseShop.length ? `${purchaseShop.length} 样食材${missing.length ? ` · ${missing.length} 样库存不足` : ' · 库存可覆盖'}` : '没有需要采购的食材'}</span>
         ${shop.length ? `<button class="btn soft sm" style="margin-left:auto" data-act="copy-plan-shopping">复制清单</button>` : ''}
       </div>` : ''}
       ${purchaseShop.length
@@ -3040,14 +3072,14 @@ function viewPlan() {
           })
         : ''}
       ${stapleShop.length ? `<div class="section-head" style="margin-top:18px">
-        <h3 class="section-title" style="font-size:1.05rem">常备调料确认</h3>
-        <span class="section-sub">${stapleShop.length} 样 · 默认“调味干货”</span>
+        <h3 class="section-title" style="font-size:1.05rem">调料库存确认</h3>
+        <span class="section-sub">${stapleShop.length} 样 · 不累计菜谱用量</span>
       </div>${shopListHtml(stapleShop, {
         bare: true,
         remember: false,
-        hint: '常备调料只提示确认家中是否有；没有时可填写实际购买数量后手动入库。',
+        hint: '调料只确认家中是否有；没有时可手动勾选完成，或按实际购买数量入库。',
       })}` : ''}
-      ${!shop.length ? '<p class="section-sub">给计划里的菜补上「调料用量」，这里就会自动汇总成采购清单。</p>' : ''}`
+      ${!shop.length ? '<p class="section-sub">给计划里的菜谱补充食材和调料名称，这里会按食材用量计算缺口，并单独提示调料库存。</p>' : ''}`
     : '';
 
   return `
@@ -6849,8 +6881,10 @@ const ACTIONS = {
   async 'copy-plan-shopping'() {
     const dishIds = planItems(planWeek()).filter((it) => it.status !== 'done').map((it) => it.dishId).filter(Boolean);
     const list = shoppingFromDishIds(dishIds);
-    if (!list.length) return toast('计划里的菜还没写调料用量');
-    await copyText(list.map((i) => `□ ${i.name}（${i.parts.join(' + ')}）`).join('\n'));
+    if (!list.length) return toast('计划里的菜还没有记录食材');
+    await copyText(list.map((i) => i.isSeasoning
+      ? `□ ${i.name}（调料，确认库存）`
+      : `□ ${i.name}（${i.parts.join(' + ')}）`).join('\n'));
   },
 
   /* 库存 */

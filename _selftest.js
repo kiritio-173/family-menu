@@ -250,6 +250,9 @@ async function main() {
   eq('葱姜蒜默认归调味干货',
     ['大葱', '生姜', '大蒜'].map((name) => (pre.presets.find((p) => p.name === name) || {}).category),
     ['调味干货', '调味干货', '调味干货']);
+  eq('盐和白糖预设归调味干货',
+    ['食盐', '白砂糖'].map((name) => (pre.presets.find((p) => p.name === name) || {}).category),
+    ['调味干货', '调味干货']);
   const cats = new Set(pre.presets.map((p) => p.category));
   ok('预设分类都在分类表里', [...cats].every((c) => pre.categories.some((x) => x.name === c)), [...cats]);
   ok('预设名不重复', new Set(pre.presets.map((p) => p.name)).size === pre.presets.length);
@@ -396,6 +399,16 @@ async function main() {
 
   const f2 = (await post('/api/pantry', { householdId: h301.id, name: '牛奶' })).body.data;
   eq('只给名字也能存', [f2.quantity, f2.unit], [1, '份']);
+  const unclassifiedSugar = (await post('/api/pantry', {
+    householdId: h301.id, name: '白糖', category: '其他', quantity: 1,
+  })).body.data;
+  eq('新录入白糖强制归调味干货', unclassifiedSugar.category, '调味干货');
+  const unclassifiedSalt = (await post('/api/pantry', {
+    householdId: h301.id, name: '盐', category: '其他', quantity: 1,
+  })).body.data;
+  eq('新录入盐强制归调味干货', unclassifiedSalt.category, '调味干货');
+  await del(`/api/pantry/${unclassifiedSugar.id}`);
+  await del(`/api/pantry/${unclassifiedSalt.id}`);
   eq('非法日期当没填', (await post('/api/pantry', { name: 'x', expireAt: '2024/13/45' })).body.data.expireAt, '');
   eq('非法日期 2', (await post('/api/pantry', { name: 'y', expireAt: 'tomorrow' })).body.data.expireAt, '');
   eq('非法分类归到「其他」', (await post('/api/pantry', { name: 'z', category: '外星食物' })).body.data.category, '其他');
@@ -709,6 +722,14 @@ async function main() {
       ]),
       'utf8'
     );
+    fs.writeFileSync(
+      path.join(dataDir, 'pantry.json'),
+      JSON.stringify([
+        { id: 'f_old_salt', name: '盐', category: '其他', quantity: 1, unit: '份' },
+        { id: 'f_old_sugar', name: '白糖', category: '其他', quantity: 1, unit: '份' },
+      ]),
+      'utf8'
+    );
     // 老版本的设置：成员是字符串数组，且没有 currentHouseholdId
     fs.writeFileSync(
       path.join(dataDir, 'settings.json'),
@@ -727,6 +748,9 @@ async function main() {
   eq('老点餐数量不变', st.orders.length, 2);
   eq('账户状态不自动选择家庭', st.settings.currentHouseholdId, '');
   ok('菜单没丢', st.dishes.length === 2, st.dishes.length);
+  eq('历史盐和白糖库存迁到调味干货',
+    st.pantry.filter((p) => ['盐', '白糖'].includes(p.name)).map((p) => p.category),
+    ['调味干货', '调味干货']);
 
   // 迁移结果要真的落盘
   await stop(legacy);
@@ -1013,6 +1037,10 @@ async function main() {
   ok('每条更新记录都有标题和日期', v.releases.every((r) => r.title && /^\d{4}-\d{2}-\d{2}$/.test(r.date)), v.releases.map((r) => r.version));
   ok('每条更新记录都列了具体改了什么', v.releases.every((r) => Array.isArray(r.items) && r.items.length), v.releases.map((r) => r.items && r.items.length));
   ok('采购入库不调用原生 prompt', !fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8').includes('window.prompt'));
+  const appSource = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
+  ok('计划采购按调料/普通食材分组', /purchaseShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning\)/.test(appSource) && /stapleShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*it\.isSeasoning\)/.test(appSource));
+  ok('计划调料不汇总菜谱用量', /if\s*\(item\.isSeasoning\)\s*return;/.test(appSource));
+  ok('计划中库存充足食材标记完成', /planMode[\s\S]{0,160}assessment\.key\s*===\s*'enough'/.test(appSource));
   // 版本页不该要口令：网页上任何人都该能看到自己跑的是哪一版
   const noPinVer = (await get('/api/version')).status;
   eq('没口令也能看版本', noPinVer, 200);
