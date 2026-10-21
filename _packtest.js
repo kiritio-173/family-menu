@@ -42,6 +42,11 @@ async function main() {
 
   ok('包内有自带 runtime/node.exe', fs.existsSync(NODE));
   ok('便携版包含库存与计划共享逻辑', fs.existsSync(path.join(APP, 'public', 'pantry-logic.js')));
+  const bundledServer = fs.readFileSync(path.join(APP, 'server.js'), 'utf8');
+  const bundledApp = fs.readFileSync(path.join(APP, 'public', 'app.js'), 'utf8');
+  ok('便携版包含私房到共享的复制接口', bundledServer.includes('copy-to-shared'));
+  ok('便携版菜谱编辑器不再提供归属切换', !bundledApp.includes('id="fScope"'));
+  ok('便携版菜单包含添加到共享入口', bundledApp.includes('＋ 添加到共享'));
   ok('没有分发 orders.json', !fs.existsSync(path.join(APP, 'data', 'orders.json')));
   ok('没有分发 pantry.json', !fs.existsSync(path.join(APP, 'data', 'pantry.json')));
   // 便携包是要发出去的：API Key 和管理口令跟着走就是白送。

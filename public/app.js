@@ -412,6 +412,12 @@ function canWriteShared() {
   return anyHouseAdmin();
 }
 
+function newDishHouseholdId() {
+  if (S.dishScope === 'own' && S.householdId) return S.householdId;
+  if (canWriteShared()) return null;
+  return S.householdId || null;
+}
+
 /**
  * 这道菜 / 这个分类能不能改、能删。
  *
@@ -455,7 +461,18 @@ function adoptBtn(d, cls) {
   if (!d || d.householdId || !S.householdId) return '';
   // 收进我家只能落到当前已加入的家庭；超级管理员在当前选定家庭中也可代办。
   if (!isMemberOf(S.householdId) && !isHouseAdmin(S.householdId)) return '';
+  if ((S.data.dishes || []).some((item) => item.householdId === S.householdId && item.copySourceDishId === d.id)) {
+    return `<button class="${cls || 'btn ghost'}" disabled>已收进我家</button>`;
+  }
   return `<button class="${cls || 'btn ghost'}" data-act="adopt-dish" data-id="${esc(d.id)}">👇 收进我家</button>`;
+}
+
+function copyToSharedBtn(d, cls) {
+  if (!d || !d.householdId || d.householdId !== S.householdId || !isHouseAdmin(d.householdId)) return '';
+  if ((S.data.dishes || []).some((item) => !item.householdId && item.copySourceDishId === d.id)) {
+    return `<button class="${cls || 'btn ghost'}" disabled>已添加到共享</button>`;
+  }
+  return `<button class="${cls || 'btn ghost'}" data-act="copy-dish-to-shared" data-id="${esc(d.id)}">＋ 添加到共享</button>`;
 }
 
 function canManageDishStatus(d) {
@@ -1939,6 +1956,7 @@ function dishCard(d, folded) {
   const iWant = v.want.includes(me);
   const iCook = v.cook.includes(me);
   const cookBy = v.cook.length ? v.cook[0] : '';
+  const scopeAction = d.householdId ? copyToSharedBtn(d, 'ib') : adoptBtn(d, 'ib');
   const interact = `<div class="card-interact" data-stop="1">
       <button class="ib ${iWant ? 'on' : ''}" data-act="dish-vote" data-id="${esc(d.id)}" data-role="want"
         title="${esc(v.want.length ? reactWho(v.want) : '点一下表示想吃')}">🍽 想吃 ${v.want.length || ''}</button>
@@ -1948,6 +1966,7 @@ function dishCard(d, folded) {
         👩‍🍳 ${iCook ? '我来做' : cookBy ? cookBy + ' 来做' : '我来做'}</button>
       <button class="ib ${dn ? 'has' : ''}" data-act="open-dish-notes" data-id="${esc(d.id)}"
         aria-label="${dn ? dn + ' 条留言' : '留个言'}">💬${dn ? ' ' + dn : ''}</button>
+      ${scopeAction}
       ${dishStatusAction(d)}
     </div>`;
   const renderedInteract = S.householdId
@@ -2077,7 +2096,7 @@ function viewMenu() {
         : ''
     }
     ${body}
-    <button class="fab" data-act="new-dish">${canWriteShared() ? '＋ 记一道菜' : '＋ 记我家私菜'}</button>`;
+    <button class="fab" data-act="new-dish">${S.dishScope === 'own' || !canWriteShared() ? '＋ 记我家私菜' : '＋ 记共享菜'}</button>`;
 }
 
 /* ---------------- 菜品详情 ---------------- */
@@ -2335,6 +2354,7 @@ function openDish(id) {
           ? `<button class="btn ghost" data-act="edit-dish" data-id="${esc(d.id)}">编辑</button>`
           : adoptBtn(d, 'btn ghost')
       }
+      ${copyToSharedBtn(d, 'btn ghost')}
       ${S.householdId ? `<button class="btn soft" data-act="toggle-plan-dish" data-id="${esc(d.id)}" data-week="${esc(planWeek())}">${inPlan ? '✓ 已在计划里' : '＋ 加入计划'}</button>${dishStatusAction(d)}${d.dishStatus === 'paused' ? '<button class="btn" disabled title="暂停供应，暂时不能新建点餐">⏸ 暂停供应</button>' : `<button class="btn" data-act="order-dish" data-id="${esc(d.id)}">今天想吃这个</button>`}` : '<button class="btn ghost" data-act="open-account-home">返回账户首页</button>'}`,
   });
 }
@@ -3288,9 +3308,10 @@ async function bumpQty(id, delta) {
   const step = qtyStep(p.unit);
   const next = Math.max(0, Math.round((p.quantity + delta * step) * 1000) / 1000);
   if (next === p.quantity) return toast(delta < 0 ? '已经没有更多了' : '');
-  await api('PUT', `/api/pantry/${p.id}`, { ...p, quantity: next });
+  const result = await api('PUT', `/api/pantry/${p.id}`, { ...p, quantity: next });
   await loadState(true);
   render();
+  if (result.deleted) toast(`${p.name}已用完，已从库存移除`);
 }
 
 /**
@@ -3826,6 +3847,7 @@ function viewManageMember() {
              <button class="icon-mini" data-act="del-dish" data-id="${esc(x.id)}" title="删除">🗑️</button>`
           : adoptBtn(x, 'btn soft sm')
       }
+      ${copyToSharedBtn(x, 'btn soft sm')}
     </div>`;
   };
 
@@ -4259,17 +4281,16 @@ function seasoningTypeSelect(type, attrs) {
 
 function openDishEditor(dish) {
   const cats = sortedCategories();
-  // 家里人记的菜一律是自家私菜：往公共菜谱里加东西是管理员的活儿
-  const admin = canWriteShared();
+  const newHouseholdId = dish ? dish.householdId : newDishHouseholdId();
+  const availableCats = cats.filter((category) => !category.householdId || category.householdId === newHouseholdId);
   const d =
     dish ||
     {
       id: null,
       name: '',
-      category: cats[0] ? cats[0].name : '家常菜',
-      // 管理员新菜默认共享 —— 升级前的行为就是全体家庭共享；
-      // 家里人新菜只能是私菜，这是权限规则决定的
-      householdId: admin ? null : S.householdId || null,
+      category: availableCats[0] ? availableCats[0].name : '家常菜',
+      // 新菜归属由当前菜单栏目决定；已有菜编辑时保留原归属。
+      householdId: newHouseholdId,
       description: '',
       images: [],
       servings: '',
@@ -4299,7 +4320,7 @@ function openDishEditor(dish) {
     },
   };
 
-  const catList = cats.slice();
+  const catList = cats.filter((category) => !category.householdId || category.householdId === d.householdId);
   // 分类可能已经不存在了（老数据、或手工改过 json）。
   // 少了这一项的话 select 会静默显示第一项，用户随便改个别的字段保存，这道菜的分类就被偷偷改掉了
   if (d.category && !catList.some((c) => c.name === d.category)) {
@@ -4312,8 +4333,6 @@ function openDishEditor(dish) {
     )
     .join('');
 
-  const houseName = (currentHousehold() || {}).name || '当前家庭';
-
   openSheet({
     title: dish ? '编辑菜品' : '记一道菜',
     body: `
@@ -4324,26 +4343,6 @@ function openDishEditor(dish) {
       <div class="field">
         <label class="field-label">分类</label>
         <select class="select" id="fCat">${catOptions}<option value="其他">其他</option></select>
-      </div>
-      <div class="field">
-        <label class="field-label">谁看得见<span class="field-hint">${
-          admin
-            ? '共享的菜所有家庭都能翻到；私的只有「' + esc(houseName) + '」看得见'
-            : '你记的菜只有本家看得见。想放进公共菜谱，得找管理员'
-        }</span></label>
-        ${
-          admin
-            ? `<select class="select" id="fScope">
-                 <option value="shared" ${isPrivate(d) ? '' : 'selected'}>🌏 共享 · 所有家庭</option>
-                 <option value="own" ${isPrivate(d) ? 'selected' : ''} ${S.householdId ? '' : 'disabled'}>🔒 仅本家 · ${esc(houseName)}</option>
-               </select>
-               ${
-                 cats.some((c) => isPrivate(c))
-                   ? `<p class="field-hint" style="margin-top:6px">共享的菜只能放进共享分类。要放进标了「仅本家」的分类，得把上面「谁看得见」也改成仅本家。</p>`
-                   : ''
-               }`
-            : `<div class="scope-fixed">🔒 仅本家 · ${esc(houseName)}</div>`
-        }
       </div>
       <div class="field">
         <label class="field-label">一句话介绍<span class="field-hint">家人一看就知道是什么</span></label>
@@ -4494,9 +4493,10 @@ async function recognizeDishFromImage(file) {
 
 function batchDishFromAI(result, imageUrl) {
   const r = result || {};
-  const cats = sortedCategories();
+  const householdId = newDishHouseholdId();
+  const cats = sortedCategories().filter((category) => !category.householdId || category.householdId === householdId);
   const wantedCat = String(r.category || '').trim();
-  const category = cats.some((c) => c.name === wantedCat) ? wantedCat : '其他';
+  const category = cats.some((c) => c.name === wantedCat) ? wantedCat : cats[0]?.name || '家常菜';
   const toText = (v, max) => String(v == null ? '' : v).trim().slice(0, max);
   const tags = Array.isArray(r.tags)
     ? r.tags.map((x) => toText(x, 24)).filter(Boolean).slice(0, 12)
@@ -4527,7 +4527,7 @@ function batchDishFromAI(result, imageUrl) {
     methods,
     notes: toText(r.notes, 500),
     isFavorite: false,
-    householdId: canWriteShared() ? null : S.householdId,
+    householdId,
     _selected: true,
   };
 }
@@ -4748,16 +4748,6 @@ function collectDish() {
   const d = S.draft.dish;
   d.name = g('fName').value.trim();
   d.category = g('fCat').value;
-  // 非管理员没有「谁看得见」这个选择权：写死成本家私菜。
-  // 改动一道菜的归属等于往共享菜单搬东西，那要 canWriteShared —— 放在服务端兜底，
-  // 这里只是不让界面给出做不到的选项。
-  const scopeSel = g('fScope');
-  d.householdId =
-    scopeSel && scopeSel.value === 'own' && S.householdId
-      ? S.householdId
-      : canWriteShared()
-      ? null
-      : S.householdId || null;
   d.description = g('fDesc').value.trim();
   d.servings = g('fServ').value.trim();
   d.duration = Number(g('fDur').value) || 0;
@@ -6164,14 +6154,13 @@ const ACTIONS = {
   async 'batch-import-save'() {
     const list = S.batchImport.filter((d) => d._selected && String(d.name || '').trim());
     if (!list.length) return toast('至少勾选一道并填写菜名');
-    const mine = !canWriteShared();
     const q = `?householdId=${encodeURIComponent(S.householdId)}`;
     let saved = 0; let failed = 0;
     for (const d of list) {
       try {
         const body = { ...d, name: String(d.name).trim() };
         delete body._selected;
-        if (mine) await api('POST', `/api/my-dishes${q}`, body);
+        if (body.householdId) await api('POST', `/api/my-dishes${q}`, body);
         else await api('POST', '/api/dishes', body);
         saved += 1;
       } catch (_) { failed += 1; }
@@ -6296,6 +6285,26 @@ const ACTIONS = {
       toast('收不进来：' + err.message);
     }
   },
+  async 'copy-dish-to-shared'(el) {
+    const src = dishById(el.dataset.id);
+    if (!src || !src.householdId || src.householdId !== S.householdId) return toast('这道私房菜已经不在当前家庭了');
+    if (!isHouseAdmin(src.householdId)) return toast('只有当前家庭管理员可以添加到共享菜单');
+    try {
+      const r = await api(
+        'POST',
+        `/api/dishes/${encodeURIComponent(src.id)}/copy-to-shared?householdId=${encodeURIComponent(src.householdId)}`,
+        {}
+      );
+      await loadState(true);
+      render();
+      closeSheet();
+      toast(r.category === src.category
+        ? `「${r.name}」已复制到共享菜单，原私房菜保留不变`
+        : `「${r.name}」已复制到共享菜单，分类调整为「${r.category}」，原私房菜保留不变`, 4200);
+    } catch (err) {
+      toast('添加到共享失败：' + err.message);
+    }
+  },
   async 'toggle-dish-status'(el) {
     const d = dishById(el.dataset.id);
     if (!d) return;
@@ -6368,11 +6377,11 @@ const ACTIONS = {
   async 'save-dish'() {
     const d = collectDish();
     if (!d.name) return toast('先给这道菜起个名字吧');
-    // 新菜：能管共享就往共享里放，否则只能记成自家私菜。
+    // 新菜沿用打开编辑器时的栏目范围；跨范围通过独立副本操作完成。
     // 改菜：本来是共享的、或我家我能当管理员的，走 /api/dishes；
     //       普通成员改自己写的那几道，走 /api/my-dishes（服务端再验一遍作者）
     const target = S.draft.isNew ? null : dishById(S.draft.id);
-    const mine = target ? !(!target.householdId || isHouseAdmin(target.householdId)) : !canWriteShared();
+    const mine = target ? !!target.householdId : !!d.householdId;
     const q = `?householdId=${encodeURIComponent(S.householdId)}`;
     try {
       if (S.draft.isNew) {
@@ -7221,6 +7230,19 @@ const ACTIONS = {
   async 'save-food'(el) {
     const name = $('#fFoodName').value.trim();
     if (!name) return toast('先写上食材名');
+    const id = el.dataset.id;
+    const trackingMode = $('#fFoodTracking').value;
+    const quantity = Number($('#fFoodQty').value);
+    if (trackingMode === 'quantity' && (!Number.isFinite(quantity) || quantity < 0)) return toast('库存数量不能小于 0');
+    if (trackingMode === 'quantity' && quantity === 0) {
+      if (!id) return toast('数量为 0，无需新增库存条目');
+      await api('PUT', `/api/pantry/${id}`, { quantity: 0 });
+      closeSheet();
+      await loadState(true);
+      render();
+      toast(`${name}数量为 0，已从库存移除`);
+      return;
+    }
     const currentItem = householdPantry().find((p) => p.id === el.dataset.id);
     let ingredient = ingredientById($('#fFoodIngredientId').value) || ingredientByName(name);
     if (!ingredient) {
@@ -7242,17 +7264,16 @@ const ACTIONS = {
       name,
       ingredientId: ingredient.id,
       category: $('#fFoodCat').value,
-      trackingMode: $('#fFoodTracking').value,
-      hasStock: $('#fFoodTracking').value === 'presence'
+      trackingMode,
+      hasStock: trackingMode === 'presence'
         ? Boolean(currentItem && (currentItem.hasStock || Number(currentItem.quantity) > 0))
         : false,
-      quantity: $('#fFoodTracking').value === 'presence' ? 0 : Number($('#fFoodQty').value) || 0,
-      minQuantity: $('#fFoodTracking').value === 'presence' ? 0 : Number($('#fFoodMin').value) || 0,
-      unit: $('#fFoodTracking').value === 'presence' ? '' : ($('#fFoodUnit').value.trim() || '份'),
+      quantity: trackingMode === 'presence' ? 0 : quantity,
+      minQuantity: trackingMode === 'presence' ? 0 : Number($('#fFoodMin').value) || 0,
+      unit: trackingMode === 'presence' ? '' : ($('#fFoodUnit').value.trim() || '份'),
       expireAt: $('#fFoodExp').value || '',
       note: $('#fFoodNote').value.trim(),
     };
-    const id = el.dataset.id;
     await (id ? api('PUT', `/api/pantry/${id}`, body) : api('POST', '/api/pantry', body));
     closeSheet();
     await loadState(true);

@@ -253,6 +253,12 @@ async function main() {
   eq('盐和白糖预设归调味干货',
     ['食盐', '白砂糖'].map((name) => (pre.presets.find((p) => p.name === name) || {}).category),
     ['调味干货', '调味干货']);
+  eq('花生和花生米作为菜用原料归豆制品',
+    ['花生', '花生米', '油酥花生米'].map((name) => (pre.presets.find((p) => p.name === name) || {}).category),
+    ['豆制品', '豆制品', '豆制品']);
+  eq('薯片瓜子仍归零食',
+    ['薯片', '瓜子'].map((name) => (pre.presets.find((p) => p.name === name) || {}).category),
+    ['零食', '零食']);
   const cats = new Set(pre.presets.map((p) => p.category));
   ok('预设分类都在分类表里', [...cats].every((c) => pre.categories.some((x) => x.name === c)), [...cats]);
   ok('预设名不重复', new Set(pre.presets.map((p) => p.name)).size === pre.presets.length);
@@ -357,12 +363,12 @@ async function main() {
   // 拿掉一道
   const target = planThis.items[0];
   const tomatoStock = (await post('/api/pantry', {
-    householdId: h301.id, name: '番茄', category: '蔬菜', quantity: 5, unit: '个',
+    householdId: h301.id, name: '番茄', category: '蔬菜', quantity: 2, unit: '个',
   })).body.data;
   const completedPlanItem = await req('PATCH', `/api/plans/items/${target.id}`, { status: 'done' });
   eq('管理员完成计划菜返回 200', completedPlanItem.status, 200);
-  eq('完成计划菜会扣对应库存',
-    (await get(`/api/state?householdId=${encodeURIComponent(h301.id)}`)).body.data.pantry.find((p) => p.id === tomatoStock.id).quantity, 3);
+  eq('计划扣完数量型库存后移除记录',
+    (await get(`/api/state?householdId=${encodeURIComponent(h301.id)}`)).body.data.pantry.some((p) => p.id === tomatoStock.id), false);
   eq('同一计划菜不能重复扣库存',
     (await req('PATCH', `/api/plans/items/${target.id}`, { status: 'done' })).status, 409);
   const rm = (await del(`/api/plans/items/${target.id}`)).body.data;
@@ -432,7 +438,8 @@ async function main() {
   eq('非法日期当没填', (await post('/api/pantry', { name: 'x', expireAt: '2024/13/45' })).body.data.expireAt, '');
   eq('非法日期 2', (await post('/api/pantry', { name: 'y', expireAt: 'tomorrow' })).body.data.expireAt, '');
   eq('非法分类归到「其他」', (await post('/api/pantry', { name: 'z', category: '外星食物' })).body.data.category, '其他');
-  eq('负数数量裁到 0', (await post('/api/pantry', { name: 'w', quantity: -5 })).body.data.quantity, 0);
+  eq('新建零数量库存被拒绝', (await post('/api/pantry', { name: 'w-zero', quantity: 0, unit: 'g' })).status, 400);
+  eq('新建负数库存被拒绝', (await post('/api/pantry', { name: 'w-negative', quantity: -5, unit: 'g' })).status, 400);
   eq('小数数量保留', (await post('/api/pantry', { name: 'v', quantity: 1.25 })).body.data.quantity, 1.25);
   eq('超大量封顶', (await post('/api/pantry', { name: 'u', quantity: 1e9 })).body.data.quantity, 99999);
   eq('空名被拒', (await post('/api/pantry', { name: '  ' })).status, 400);
@@ -507,6 +514,14 @@ async function main() {
   st = (await get('/api/state')).body.data;
   eq('临期的留下了', st.pantry.filter((p) => p.id === f2.id).length, 1);
 
+  const zeroOnSave = (await post('/api/pantry', {
+    householdId: h301.id, name: '归零测试食材', category: '蔬菜', quantity: 2, unit: 'g',
+  })).body.data;
+  const zeroSaved = await put(`/api/pantry/${zeroOnSave.id}`, { quantity: 0 });
+  eq('手动保存数量为 0 会移除库存', zeroSaved.body.data.deleted, true);
+  eq('手动归零后状态中没有该库存',
+    (await get(`/api/state?householdId=${encodeURIComponent(h301.id)}`)).body.data.pantry.some((p) => p.id === zeroOnSave.id), false);
+
   eq('删不存在的库存返回 404', (await del('/api/pantry/nope')).status, 404);
 
   /* ---------- 家庭采购状态 ---------- */
@@ -523,7 +538,7 @@ async function main() {
   const delRes = (await del(`/api/households/${h301.id}`)).body.data;
   eq('级联删掉点餐', delRes.removedOrders, 0);
   // 302 室里被「清理过期」干掉一个，只剩 f2 了
-  eq('级联删掉库存', delRes.removedPantry, 2);
+  eq('级联删掉库存', delRes.removedPantry, 1);
   st = (await get('/api/state')).body.data;
   eq('302 室已消失', st.households.some((h) => h.id === h301.id), false);
   eq('它的库存也没了', st.pantry.filter((p) => p.householdId === h301.id).length, 0);
@@ -1742,8 +1757,34 @@ async function main() {
   eq('收进我家后生成当前家庭私菜', adopted.body.data.householdId, hhA);
   eq('收进我家后的菜默认正常供应', adopted.body.data.dishStatus, 'active');
   eq('收进我家不修改原共享菜', (await get('/api/state', tokX)).body.data.dishes.find((d) => d.id === ppDish.id).householdId, null);
+  eq('收进我家的副本记录来源菜谱 ID', adopted.body.data.copySourceDishId, ppDish.id);
+  eq('同一共享菜不能重复收进同一家',
+    (await post('/api/my-dishes/' + ppDish.id + '/adopt?householdId=' + hhA, {}, undefined, devA)).status, 409);
+  const adoptedEdit = await put('/api/my-dishes/' + adopted.body.data.id + '?householdId=' + hhA,
+    { ...adopted.body.data, description: '私房独立修改' }, undefined, devA);
+  eq('修改私房副本不改共享源菜',
+    (await get('/api/state', tokX)).body.data.dishes.find((d) => d.id === ppDish.id).description, '');
+  eq('私房副本能独立修改', adoptedEdit.body.data.description, '私房独立修改');
   eq('未加入家庭不能收进我家',
     (await post('/api/my-dishes/' + ppDish.id + '/adopt?householdId=' + hhB, {}, undefined, devA)).status, 403);
+
+  // 私房加入共享是反向的独立复制；只有源家庭管理员能发布，普通成员不可越权。
+  const publishSource = mwDish2B;
+  eq('未认证用户不能将私房发布到共享',
+    (await post('/api/dishes/' + publishSource.id + '/copy-to-shared?householdId=' + hhA, {})).status, 401);
+  const published = await post('/api/dishes/' + publishSource.id + '/copy-to-shared?householdId=' + hhA, {}, tokX);
+  ok('管理员可把本家私房复制到共享', published.status === 200, published);
+  eq('发布副本归属共享菜单', published.body.data.householdId, null);
+  eq('发布副本记录来源菜谱 ID', published.body.data.copySourceDishId, publishSource.id);
+  eq('发布到共享不改私房源菜',
+    (await get('/api/state', tokX)).body.data.dishes.find((d) => d.id === publishSource.id).householdId, hhA);
+  eq('同一私房不能重复加入共享',
+    (await post('/api/dishes/' + publishSource.id + '/copy-to-shared?householdId=' + hhA, {}, tokX)).status, 409);
+  const publishedEdit = await put('/api/dishes/' + published.body.data.id,
+    { ...published.body.data, description: '共享独立修改' }, tokX);
+  eq('修改共享副本不改私房源菜',
+    (await get('/api/state', tokX)).body.data.dishes.find((d) => d.id === publishSource.id).description, '');
+  eq('共享副本能独立修改', publishedEdit.body.data.description, '共享独立修改');
 
   // 菜品供应状态独立于点餐状态：管理员能切换，普通成员只能查看。
   const paused = await req('PATCH', '/api/dishes/' + ppDish.id + '/status', { dishStatus: 'paused' }, tokX);
@@ -2402,6 +2443,24 @@ async function main() {
     name: '牛排菜谱', category: '家常菜', seasonings: [{ name: '牛排', amount: '200 g', ingredientId: steak.body.data.id }],
   }, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 200);
   eq('菜谱引用中的原料不能删除', (await req('DELETE', `/api/ingredients/${steak.body.data.id}?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 409);
+  const householdRecipeCategory = await req('POST', `/api/my-categories?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '家庭私有菜谱分类',
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const scopedSource = await req('POST', `/api/my-dishes?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
+    name: '跨范围复制原菜', category: householdRecipeCategory.body.data.name,
+    seasonings: [{ name: '牛排', amount: '200 g', ingredientId: steak.body.data.id }],
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('普通家庭成员不能将私房发布到共享', (await req('POST', `/api/dishes/${scopedSource.body.data.id}/copy-to-shared?householdId=${encodeURIComponent(ingredientHouseAId)}`, {}, undefined, undefined, undefined, undefined, ingredientMember.token)).status, 401);
+  const scopedCopyToShared = await req('POST', `/api/dishes/${scopedSource.body.data.id}/copy-to-shared?householdId=${encodeURIComponent(ingredientHouseAId)}`, {}, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('家庭管理员可发布私有分类菜谱', scopedCopyToShared.status, 200);
+  eq('私有分类发布时映射到共享分类', scopedCopyToShared.body.data.category, '家常菜');
+  eq('发布到共享清除家庭原料 ID 但保留原料名称',
+    [scopedCopyToShared.body.data.seasonings[0].ingredientId || '', scopedCopyToShared.body.data.seasonings[0].name], ['', '牛排']);
+  const sharedIngredientRecipe = await req('POST', '/api/dishes', {
+    name: '共享原料菜谱', category: '家常菜', seasonings: [{ name: '牛排', amount: '200 g' }],
+  }, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  const adoptedIngredientRecipe = await req('POST', `/api/my-dishes/${sharedIngredientRecipe.body.data.id}/adopt?householdId=${encodeURIComponent(ingredientHouseAId)}`, {}, undefined, undefined, undefined, undefined, ingredientOwner.token);
+  eq('共享菜加入家庭时按名称映射家庭原料', adoptedIngredientRecipe.body.data.seasonings[0].ingredientId, steak.body.data.id);
   const externalIngredientAccount = await registerAccount('原料字典外部账号');
   eq('未加入成员不能读取家庭原料', (await req('GET', `/api/ingredients?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, externalIngredientAccount.token)).status, 403);
   const scopedIngredientState = await req('GET', `/api/state?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
@@ -2419,6 +2478,7 @@ async function main() {
   const restoredIngredientState = await req('GET', `/api/state?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
   ok('备份往返保留家庭原料和分类', restoredIngredientState.body.data.ingredients?.some((i) => i.name === '牛里脊') && restoredIngredientState.body.data.pantryCategories?.some((c) => c.id === categoryId));
   ok('备份往返保留菜谱和库存原料引用', restoredIngredientState.body.data.pantry?.some((p) => p.ingredientId === tenderloin.body.data.id) && restoredIngredientState.body.data.dishes?.some((dish) => dish.seasonings.some((s) => s.ingredientId === steak.body.data.id)));
+  ok('备份往返保留双向复制来源关系', restoredIngredientState.body.data.dishes?.some((dish) => dish.id === scopedCopyToShared.body.data.id && dish.copySourceDishId === scopedSource.body.data.id));
   eq('被原料引用的子分类不能删除', (await req('DELETE', `/api/pantry-categories/${categoryId}?householdId=${encodeURIComponent(ingredientHouseAId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token)).status, 409);
   eq('解散家庭时原料和自定义分类一并清理', (await req('DELETE', `/api/households/${ingredientHouseAId}`, undefined, ingredientSuper.token, undefined, undefined, undefined, ingredientOwner.token)).status, 200);
   const afterIngredientDissolve = await req('GET', `/api/state?householdId=${encodeURIComponent(ingredientHouseBId)}`, undefined, undefined, undefined, undefined, undefined, ingredientOwner.token);
@@ -2445,6 +2505,8 @@ async function main() {
     }]));
     fs.writeFileSync(path.join(dataDir, 'pantry.json'), JSON.stringify([
       { id: 'f_legacy-ingredients', householdId: 'h_legacy-ingredients', name: '牛里脊', category: '肉类', quantity: 500, unit: 'g', note: '真空包装' },
+      { id: 'f_legacy-zero', householdId: 'h_legacy-ingredients', name: '旧零库存', category: '蔬菜', trackingMode: 'quantity', quantity: 0, unit: 'g' },
+      { id: 'f_legacy-presence', householdId: 'h_legacy-ingredients', name: '旧有无调料', category: '调味干货', trackingMode: 'presence', hasStock: true, quantity: 0, unit: '' },
     ]));
     fs.writeFileSync(path.join(dataDir, 'ingredients.json'), JSON.stringify([
       { id: 'ing_other-ingredients', householdId: 'h_other-ingredients', name: '外部牛排', aliases: [], categoryId: 'pantry-root-1', defaultTrackingMode: 'quantity' },
@@ -2453,6 +2515,8 @@ async function main() {
   const migratedState = await get('/api/state?householdId=h_legacy-ingredients');
   const migratedDish = migratedState.body.data.dishes.find((dish) => dish.id === 'd_legacy-ingredients');
   const migratedPantry = migratedState.body.data.pantry.find((item) => item.id === 'f_legacy-ingredients');
+  ok('启动迁移移除历史零数量库存', !migratedState.body.data.pantry.some((item) => item.id === 'f_legacy-zero'));
+  ok('启动迁移保留有无型库存状态', migratedState.body.data.pantry.some((item) => item.id === 'f_legacy-presence' && item.hasStock));
   const tenderloinRef = migratedDish?.seasonings.find((row) => row.name === '牛里脊')?.ingredientId;
   const steakRef = migratedDish?.methods[0]?.seasonings.find((row) => row.name === '牛排')?.ingredientId;
   eq('启动迁移为旧菜谱原料补 ingredientId', !!tenderloinRef, true);
@@ -2462,7 +2526,7 @@ async function main() {
   eq('旧库存数量单位备注保留', [migratedPantry?.quantity, migratedPantry?.unit, migratedPantry?.note], [500, 'g', '真空包装']);
   const migrationLogin = await loginAccount('旧用户');
   const migrationIngredients = (await req('GET', '/api/ingredients?householdId=h_legacy-ingredients', undefined, undefined, undefined, undefined, undefined, migrationLogin.token)).body.data || [];
-  eq('不同材料不会因同类而合并', [tenderloinRef !== steakRef, migrationIngredients.length], [true, 2]);
+  eq('不同材料不会因同类而合并', [tenderloinRef !== steakRef, migrationIngredients.length], [true, 3]);
   const migrationForeignIngredient = { id: 'ing_other-ingredients' };
   eq('菜谱不能引用同家庭之外的原料 ID', (await req('POST', '/api/my-dishes?householdId=h_legacy-ingredients', {
     name: '跨家庭材料菜', category: '家常菜', seasonings: [{ name: '外部牛排', amount: '100 g', ingredientId: migrationForeignIngredient.id }],

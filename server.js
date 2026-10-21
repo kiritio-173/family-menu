@@ -41,10 +41,20 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.29.0';
+const APP_VERSION = '1.30.0';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.30.0',
+    date: '2026-10-21',
+    title: '共享菜与私房菜双向复制',
+    items: [
+      '共享菜可直接收进我家，家庭管理员可把私房菜独立复制到共享菜单；源菜保留，两份互不联动',
+      '菜谱编辑不再切换共享/私房归属；新菜和批量导入跟随当前菜单栏目',
+      '重复添加会提示已存在；跨范围复制会匹配目标家庭原料，并将私有分类映射到共享分类',
+    ],
+  },
   {
     version: '1.29.0',
     date: '2026-10-21',
@@ -1262,6 +1272,47 @@ function dishIngredientReferenceProblem(dish, householdId) {
     : '';
 }
 
+function copyDishToScope(source, householdId, req) {
+  const visibleCategory = state.categories.find((category) =>
+    category.name === source.category &&
+    (!category.householdId || category.householdId === householdId)
+  );
+  let category = visibleCategory ? source.category : source.category;
+  if (!householdId && (!visibleCategory || visibleCategory.householdId)) {
+    category = state.categories.find((item) => !item.householdId && item.name === '其他')?.name ||
+      state.categories.find((item) => !item.householdId)?.name || '家常菜';
+  }
+
+  const mapRows = (rows) => (Array.isArray(rows) ? rows : []).map((row) => {
+    const mapped = { ...row };
+    delete mapped.ingredientId;
+    if (householdId) {
+      const ingredient = findHouseholdIngredient(householdId, mapped.name);
+      if (ingredient) mapped.ingredientId = ingredient.id;
+    }
+    return mapped;
+  });
+  const copy = normDish({
+    ...source,
+    id: '',
+    householdId: householdId || null,
+    category,
+    dishStatus: 'active',
+    seasonings: mapRows(source.seasonings),
+    methods: (Array.isArray(source.methods) ? source.methods : []).map((method) => ({
+      ...method,
+      seasonings: mapRows(method.seasonings),
+    })),
+  });
+  if (!copy) return null;
+  copy.copySourceDishId = source.id;
+  const who = whoami(req, householdId);
+  copy.authorId = who.kind === 'member' ? who.memberId : '';
+  copy.authorUserId = who.userId || accountUserId(req) || '';
+  copy.authorName = who.name || (who.userId && userById(who.userId)?.displayName) || '';
+  return copy;
+}
+
 function pantryIngredientReferenceProblem(item) {
   if (!item || !item.ingredientId) return '';
   return state.ingredients.some((ingredient) => ingredient.id === item.ingredientId && ingredient.householdId === item.householdId)
@@ -1354,7 +1405,8 @@ const FOOD_PRESETS = [
   ['孜然粒', '调味干货', '包', 180], ['辣椒面', '调味干货', '包', 180],
   // 零食
   ['薯片', '零食', '袋', 180], ['巧克力', '零食', '块', 365], ['饼干', '零食', '袋', 180],
-  ['瓜子', '零食', '包', 180], ['花生', '零食', '包', 180], ['混合坚果', '零食', '罐', 180],
+  ['瓜子', '零食', '包', 180], ['花生', '豆制品', '包', 180], ['花生米', '豆制品', 'g', 180], ['油酥花生米', '豆制品', 'g', 180],
+  ['混合坚果', '零食', '罐', 180],
   ['糖果', '零食', '袋', 180],
   // 其他
   ['保鲜膜', '其他', '卷', 0], ['厨房纸', '其他', '卷', 0], ['洗洁精', '其他', '瓶', 1080],
@@ -1608,7 +1660,7 @@ function dishRecipeIngredients(dish) {
   return rows;
 }
 
-/** 完成计划菜时实际扣库存；同名同单位库存可跨多条记录扣减，不足时保留到 0 并返回提醒。 */
+/** 完成计划菜时实际扣库存；扣完的数量型库存行会删除，不足时仍返回缺货提醒。 */
 function consumeDishPantry(householdId, dish) {
   const totals = new Map();
   const warnings = [];
@@ -1636,10 +1688,12 @@ function consumeDishPantry(householdId, dish) {
       if (remain <= 0) break;
       const before = Number(row.quantity) || 0;
       const used = Math.min(before, remain);
-      row.quantity = Math.round((before - used) * 1000) / 1000;
+      const after = Math.round((before - used) * 1000) / 1000;
       row.updatedAt = nowISO();
       remain = Math.round((remain - used) * 1000) / 1000;
       if (used > 0) consumed.push({ name: row.name, quantity: used, unit: row.unit });
+      if (after <= 0) state.pantry.splice(state.pantry.indexOf(row), 1);
+      else row.quantity = after;
     }
     if (remain > 0) warnings.push(`${need.name}：库存还缺 ${remain}${need.unit}`);
   }
@@ -1958,6 +2012,7 @@ function loadState() {
   state.pantry = loadedPantry
     .map((p) => (p && typeof p === 'object' ? normPantryItem(p, undefined, true) : null))
     .filter(Boolean)
+    .filter((item) => item.trackingMode === 'presence' || Number(item.quantity) > 0)
     .filter((p) => (seenF.has(p.id) ? false : (seenF.add(p.id), true)));
   let pantryChanged = JSON.stringify(loadedPantry) !== JSON.stringify(state.pantry);
   state.pantry.forEach((p) => {
@@ -2668,6 +2723,7 @@ function normDish(input, prev, keepInputId) {
     authorId: safeText(input.authorId ?? base.authorId, 40),
     authorUserId: safeText(input.authorUserId ?? base.authorUserId, 80),
     authorName: safeText(input.authorName ?? base.authorName, 20),
+    copySourceDishId: safeText(keepInputId ? input.copySourceDishId : base.copySourceDishId, 40),
     // 菜品供应状态独立于点餐状态：暂停时仍可查看，但不能新建点餐。
     dishStatus: ['active', 'paused'].includes(input.dishStatus)
       ? input.dishStatus
@@ -4434,14 +4490,15 @@ async function handleAPI(req, res, url) {
         if (!isMyMember(req, hhId) && !isHouseAdmin(req, hhId)) {
           return sendError(res, 403, '请先加入这个家庭，再把共享菜收进我家');
         }
-        const copy = normDish({ ...src, id: '', householdId: hhId, dishStatus: 'active' });
+        if (state.dishes.some((dish) => dish.householdId === hhId && dish.copySourceDishId === src.id)) {
+          return sendError(res, 409, '这道共享菜已经收进我家了');
+        }
+        const copy = copyDishToScope(src, hhId, req);
         if (!copy) return sendError(res, 400, '菜品无法复制');
-        const who = whoami(req, hhId);
-        copy.authorId = who.kind === 'member' ? who.memberId : '';
-        copy.authorUserId = who.userId || accountUserId(req) || '';
-        copy.authorName = who.name || (who.userId && userById(who.userId)?.displayName) || '';
         const bad = categoryProblem(copy);
         if (bad) return sendError(res, 400, bad);
+        const ingredientProblem = dishIngredientReferenceProblem(copy, hhId);
+        if (ingredientProblem) return sendError(res, 400, ingredientProblem);
         state.dishes.unshift(copy);
         scheduleSave('dishes');
         return sendJSON(res, 200, { ok: true, data: publicDish(copy) });
@@ -4932,6 +4989,11 @@ async function handleAPI(req, res, url) {
       const body = await readBody(req);
       const item = normPantryItem(body);
       if (!item) return sendError(res, 400, '食材名不能为空');
+      if (item.trackingMode === 'quantity' && body.quantity !== undefined) {
+        const quantity = Number(body.quantity);
+        if (!Number.isFinite(quantity) || quantity < 0) return sendError(res, 400, '库存数量不能小于 0');
+        if (quantity === 0) return sendError(res, 400, '数量为 0，无需新增库存条目');
+      }
       if (!requireAccountHousehold(req, res, item.householdId)) return;
       const ingredientProblem = pantryIngredientReferenceProblem(item);
       if (ingredientProblem) return sendError(res, 400, ingredientProblem);
@@ -4947,11 +5009,21 @@ async function handleAPI(req, res, url) {
     if (method === 'PUT' && id) {
       const idx = state.pantry.findIndex((p) => p.id === id);
       if (idx < 0) return sendError(res, 404, '库存条目不存在');
-      const item = normPantryItem(await readBody(req), state.pantry[idx]);
+      const body = await readBody(req);
+      const item = normPantryItem(body, state.pantry[idx]);
       if (!item) return sendError(res, 400, '食材名不能为空');
       if (!requireAccountHousehold(req, res, item.householdId)) return;
       const ingredientProblem = pantryIngredientReferenceProblem(item);
       if (ingredientProblem) return sendError(res, 400, ingredientProblem);
+      if (item.trackingMode === 'quantity' && body.quantity !== undefined) {
+        const quantity = Number(body.quantity);
+        if (!Number.isFinite(quantity) || quantity < 0) return sendError(res, 400, '库存数量不能小于 0');
+        if (quantity === 0) {
+          const [deleted] = state.pantry.splice(idx, 1);
+          scheduleSave('pantry');
+          return sendJSON(res, 200, { ok: true, data: { deleted: true, id: deleted.id, item: deleted } });
+        }
+      }
       state.pantry[idx] = item;
       scheduleSave('pantry');
       return sendJSON(res, 200, { ok: true, data: item });
@@ -5211,6 +5283,28 @@ async function handleAPI(req, res, url) {
   // 普通成员只能改自己添加的那几条。
   if (route[0] === 'dishes') {
     const id = route[1];
+    if (method === 'POST' && route[2] === 'copy-to-shared' && id) {
+      const src = state.dishes.find((dish) => dish.id === id);
+      if (!src) return sendError(res, 404, '菜品不存在');
+      const householdId = url.searchParams.get('householdId');
+      if (!src.householdId || householdId !== src.householdId) {
+        return sendError(res, 400, '请从当前家庭私房菜复制到共享菜单');
+      }
+      if (!requireAccountHousehold(req, res, householdId)) return;
+      if (!isHouseAdmin(req, householdId)) return sendError(res, 403, '只有这个家庭的管理员可以添加菜谱到共享菜单');
+      if (state.dishes.some((dish) => !dish.householdId && dish.copySourceDishId === src.id)) {
+        return sendError(res, 409, '这道私房菜已经添加到共享菜单了');
+      }
+      const copy = copyDishToScope(src, null, req);
+      if (!copy) return sendError(res, 400, '菜品无法复制');
+      const bad = categoryProblem(copy);
+      if (bad) return sendError(res, 400, bad);
+      const ingredientProblem = dishIngredientReferenceProblem(copy, null);
+      if (ingredientProblem) return sendError(res, 400, ingredientProblem);
+      state.dishes.unshift(copy);
+      scheduleSave('dishes');
+      return sendJSON(res, 200, { ok: true, data: publicDish(copy) });
+    }
     if (method === 'PATCH' && route[2] === 'status' && id) {
       const idx = state.dishes.findIndex((d) => d.id === id);
       if (idx < 0) return sendError(res, 404, '菜品不存在');
