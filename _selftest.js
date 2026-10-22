@@ -212,6 +212,22 @@ async function boot(label, writeData) {
 async function main() {
   const pantryLogic = require(path.join(ROOT, 'public', 'pantry-logic.js'));
   const recipeIngredientLogic = require(path.join(ROOT, 'public', 'recipe-ingredient-logic.js'));
+  assert.deepStrictEqual(pantryLogic.materialsForCookingEvent({
+    name: '牛肉菜', dishId: 'd1', methodId: 'stew', servings: '2',
+  }, {
+    id: 'd1', name: '牛肉菜', servings: '4', seasonings: [{ name: '旧通用材料', amount: '1 份' }],
+    methods: [
+      { id: 'stew', name: '炖煮', seasonings: [{ name: '牛肉', amount: '400 g' }] },
+      { id: 'fry', name: '快炒', seasonings: [{ name: '牛肉', amount: '200 g' }, { name: '青椒', amount: '2 个' }] },
+    ],
+  }), [
+    { name: '牛肉', amount: '400 g', method: '炖煮', dish: '牛肉菜', quantityScale: 0.5 },
+    { name: '待分配旧材料：牛肉菜', amount: '', method: '炖煮', dish: '牛肉菜', uncertain: true },
+  ], '计划只汇总选择的做法，并按基准份数缩放材料');
+  const unknownMethodRows = pantryLogic.materialsForCookingEvent({ name: '牛肉菜', dishId: 'd1' }, {
+    id: 'd1', name: '牛肉菜', methods: [{ id: 'stew', name: '炖煮', seasonings: [] }],
+  });
+  assert.strictEqual(unknownMethodRows[0].uncertain, true, '未选做法必须明确要求确认，不可猜算');
   const ingredientRows = [
     { id: 'ing-beef', householdId: 'h1', categoryId: 'cat-beef' },
     { id: 'ing-steak', householdId: 'h1', categoryId: 'cat-steak' },
@@ -400,6 +416,11 @@ async function main() {
   /* ---------- 点餐分家 ---------- */
   console.log('\n[4] 点餐按家庭分开');
   const o1 = (await post('/api/orders', { dishId: DISH.id, dishName: DISH.name, requester: '我', people: 2 })).body.data;
+  eq('新点餐默认午餐和一份', [o1.meal, o1.servings], ['lunch', 1]);
+  const invalidMealOrder = await post('/api/orders', {
+    householdId: h301.id, dishId: DISH.id, dishName: DISH.name, meal: 'snack',
+  });
+  eq('点餐拒绝午晚餐以外的餐次', invalidMealOrder.status, 400);
   eq('不传 householdId → 落到默认家庭', o1.householdId, st.households[0].id);
   const o2 = (await post('/api/orders', { dishId: DISH.id, dishName: DISH.name, householdId: h301.id })).body.data;
   eq('指定家庭就记到那个家', o2.householdId, h301.id);
@@ -446,11 +467,15 @@ async function main() {
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   })();
 
-  const add1 = (await post('/api/plans/items', { householdId: h301.id, weekOf: wednesday, dishId: DISH.id })).body.data;
+  const add1 = (await post('/api/plans/items', {
+    householdId: h301.id, weekOf: wednesday, dishId: DISH.id, methodId: DISH.methods[0].id, meal: 'dinner',
+  })).body.data;
+  eq('计划保存餐次和空做法待选状态', [add1.item.meal, add1.item.methodId], ['dinner', '']);
   ok('加菜进计划', add1.item && add1.item.name === DISH.name, add1);
   eq('周三归到本周一', add1.plan.weekOf, monday);
   eq('自动带出份量', add1.item.servings, DISH.servings);
   eq('菜谱 id 也记下来', add1.item.dishId, DISH.id);
+
 
   const dupDish = await post('/api/plans/items', { householdId: h301.id, weekOf: wednesday, plannedFor: tuesday, dishId: DISH.id });
   eq('同一道菜允许重复安排', dupDish.status, 200);
@@ -483,8 +508,10 @@ async function main() {
   })).body.data;
   const completedPlanItem = await req('PATCH', `/api/plans/items/${target.id}`, { status: 'done' });
   eq('管理员完成计划菜返回 200', completedPlanItem.status, 200);
-  eq('计划扣完数量型库存后移除记录',
-    (await get(`/api/state?householdId=${encodeURIComponent(h301.id)}`)).body.data.pantry.some((p) => p.id === tomatoStock.id), false);
+  eq('未选择做法时不猜扣库存并提示确认', [
+    (await get(`/api/state?householdId=${encodeURIComponent(h301.id)}`)).body.data.pantry.some((p) => p.id === tomatoStock.id),
+    completedPlanItem.body.data.warnings.some((warning) => warning.includes('未选择有效做法')),
+  ], [true, true]);
   eq('同一计划菜不能重复扣库存',
     (await req('PATCH', `/api/plans/items/${target.id}`, { status: 'done' })).status, 409);
   const rm = (await del(`/api/plans/items/${target.id}`)).body.data;
@@ -595,11 +622,11 @@ async function main() {
   eq('食盐合并盐有无库存', [saltAlias.id, saltAlias.trackingMode, saltAlias.hasStock, saltAlias.quantity], [salt.id, 'presence', true, 0]);
 
   const measuredSeasoningDish = (await post('/api/dishes', {
-    name: '调料按有无扣减测试', category: '家常菜',
-    seasonings: [{ name: '盐', amount: '2 克' }, { name: '测试番茄', amount: '1 g' }],
+    name: '调料按有无扣减测试', category: '家常菜', servings: '1 份',
+    methods: [{ name: '炒制', seasonings: [{ name: '盐', amount: '2 克' }, { name: '测试番茄', amount: '1 g' }], steps: ['炒熟'] }],
   })).body.data;
   const measuredSeasoningPlan = (await post('/api/plans/items', {
-    householdId: h301.id, weekOf: monday, dishId: measuredSeasoningDish.id,
+    householdId: h301.id, weekOf: monday, dishId: measuredSeasoningDish.id, methodId: measuredSeasoningDish.methods[0].id,
   })).body.data.item;
   const testTomatoStock = (await post('/api/pantry', {
     householdId: h301.id, name: '测试番茄', category: '蔬菜', quantity: 5, unit: 'g',
@@ -610,7 +637,7 @@ async function main() {
     (await get(`/api/state?householdId=${encodeURIComponent(h301.id)}`)).body.data.pantry.find((p) => p.id === testTomatoStock.id).quantity, 4);
   await put(`/api/pantry/${salt.id}`, { hasStock: false, trackingMode: 'presence' });
   const absentSeasoningPlan = (await post('/api/plans/items', {
-    householdId: h301.id, weekOf: monday, dishId: measuredSeasoningDish.id,
+    householdId: h301.id, weekOf: monday, dishId: measuredSeasoningDish.id, methodId: measuredSeasoningDish.methods[0].id,
   })).body.data.item;
   const absentSeasoningDone = await req('PATCH', `/api/plans/items/${absentSeasoningPlan.id}`, { status: 'done' });
   ok('未确认有的调料提醒确认而不报数量缺货', absentSeasoningDone.body.data.warnings.some((warning) => warning.includes('盐：完成前请确认家中是否有')) &&
@@ -699,7 +726,7 @@ async function main() {
   const delRes = (await del(`/api/households/${h301.id}`)).body.data;
   eq('级联删掉点餐', delRes.removedOrders, 0);
   // 302 室里被「清理过期」干掉一个，只剩 f2 了
-  eq('级联删掉库存', delRes.removedPantry, 1);
+  eq('级联删掉库存', delRes.removedPantry, 2);
   st = (await get('/api/state')).body.data;
   eq('302 室已消失', st.households.some((h) => h.id === h301.id), false);
   eq('它的库存也没了', st.pantry.filter((p) => p.householdId === h301.id).length, 0);
@@ -1274,7 +1301,7 @@ async function main() {
     seasonings: [{ name: '盐', amount: '适量' }],
     methods: [{ name: '唯一做法', steps: ['炒一下'] }],
   });
-  eq('老格式自动补空数组', JSON.stringify(oldStyle.body.data.methods[0].seasonings), '[]');
+  eq('老单做法材料自动迁入唯一做法', [oldStyle.body.data.seasonings.length, oldStyle.body.data.methods[0].seasonings], [0, [{ name: '盐', amount: '适量' }]]);
   eq('老格式的步骤没丢', oldStyle.body.data.methods[0].steps[0], '炒一下');
   // 没有调料名的空行不能进 JSON
   const withBlank = await put('/api/dishes/' + mzId, {
@@ -2732,10 +2759,11 @@ async function main() {
   eq('计划入库保留标准原料 ID', ingredientReceipt.body.data.item.ingredientId, tenderloin.body.data.id);
   eq('计划入库同 ID 异名库存数量累加', ingredientReceipt.body.data.item.quantity, 600);
   const idMatchedDish = (await req('POST', `/api/my-dishes?householdId=${encodeURIComponent(ingredientHouseAId)}`, {
-    name: '原料 ID 扣库存菜谱', category: '家常菜', seasonings: [{ name: '里脊薄片', amount: '200 g', ingredientId: tenderloin.body.data.id }],
+    name: '原料 ID 扣库存菜谱', category: '家常菜', servings: '1 份',
+    methods: [{ name: '快炒', seasonings: [{ name: '里脊薄片', amount: '200 g', ingredientId: tenderloin.body.data.id }], steps: ['炒熟'] }],
   }, undefined, undefined, undefined, undefined, ingredientOwner.token)).body.data;
   const idMatchedPlan = await req('POST', '/api/plans/items', {
-    householdId: ingredientHouseAId, weekOf: ingredientPlanWeek, dishId: idMatchedDish.id,
+    householdId: ingredientHouseAId, weekOf: ingredientPlanWeek, dishId: idMatchedDish.id, methodId: idMatchedDish.methods[0].id,
   }, undefined, undefined, undefined, undefined, ingredientOwner.token);
   const idMatchedDone = await req('PATCH', `/api/plans/items/${idMatchedPlan.body.data.item.id}`, { status: 'done' }, undefined, undefined, undefined, undefined, ingredientOwner.token);
   eq('菜谱原料同 ID 异名完成成功', idMatchedDone.status, 200);
@@ -2819,6 +2847,7 @@ async function main() {
         { name: '牛里脊', amount: '200 g', purchaseType: 'purchase' },
         { name: '牛排', amount: '1 块', purchaseType: 'staple' },
         { name: '食盐', amount: '适量', purchaseType: 'purchase' },
+        { name: '模板牛腩', amount: '300 g', ingredientId: 'ing-global-template' },
       ],
       methods: [{ name: '煎制', steps: ['煎熟'], seasonings: [{ name: '牛排', amount: '1 块' }] }],
     }]));
@@ -2827,9 +2856,11 @@ async function main() {
       { id: 'f_legacy-zero', householdId: 'h_legacy-ingredients', name: '旧零库存', category: '蔬菜', trackingMode: 'quantity', quantity: 0, unit: 'g' },
       { id: 'f_legacy-presence', householdId: 'h_legacy-ingredients', name: '旧有无调料', category: '调味干货', trackingMode: 'presence', hasStock: true, quantity: 0, unit: '' },
       { id: 'f_legacy-seasoning-quantity', householdId: 'h_legacy-ingredients', name: '味精', category: '调味干货', trackingMode: 'quantity', quantity: 3, unit: '份' },
+      { id: 'f_global-template', householdId: 'h_legacy-ingredients', name: '模板牛腩', ingredientId: 'ing-global-template', category: '肉类', quantity: 750, unit: 'g' },
     ]));
     fs.writeFileSync(path.join(dataDir, 'ingredients.json'), JSON.stringify([
       { id: 'ing_other-ingredients', householdId: 'h_other-ingredients', name: '外部牛排', aliases: [], categoryId: 'pantry-root-1', defaultTrackingMode: 'quantity' },
+      { id: 'ing-global-template', scope: 'global', householdId: null, name: '模板牛腩', aliases: ['牛腩块'], categoryId: 'pantry-root-1', defaultTrackingMode: 'quantity', defaultUnit: 'g' },
     ]));
   });
   const migratedState = await get('/api/state?householdId=h_legacy-ingredients');
@@ -2850,10 +2881,14 @@ async function main() {
   const legacyDishSaved = await req('PUT', `/api/my-dishes/${migratedDish.id}?householdId=h_legacy-ingredients`, migratedDish, undefined, undefined, undefined, undefined, migrationLogin.token);
   eq('旧菜谱下一次保存时移除逐行采购方式', [legacyDishSaved.body.data?.seasonings[0]?.purchaseType, legacyDishSaved.body.data?.seasonings[1]?.purchaseType], [undefined, undefined]);
   const migrationIngredients = (await req('GET', '/api/ingredients?householdId=h_legacy-ingredients', undefined, undefined, undefined, undefined, undefined, migrationLogin.token)).body.data || [];
+  const localTemplate = migrationIngredients.find((item) => item.name === '模板牛腩' && item.scope === 'household');
+  ok('家庭引用的全局模板会复制成家庭原料', localTemplate && localTemplate.householdId === 'h_legacy-ingredients' && localTemplate.id !== 'ing-global-template');
+  ok('菜谱和库存统一改指本家模板副本且保留库存', migratedDish.seasonings.some((row) => row.name === '模板牛腩' && row.ingredientId === localTemplate?.id) && migratedState.body.data.pantry.some((item) => item.id === 'f_global-template' && item.ingredientId === localTemplate?.id && item.quantity === 750 && item.unit === 'g'));
+  eq('家庭模板副本保留已知别名和数量模式', [localTemplate?.aliases, localTemplate?.defaultTrackingMode, localTemplate?.defaultUnit], [['牛腩块'], 'quantity', 'g']);
   eq('旧家庭原料仍保留家庭本地作用域', migrationIngredients.find((item) => item.name === '牛里脊')?.scope, 'household');
   eq('旧 purchaseType 不能覆盖牛排的数量管理方式', migrationIngredients.find((item) => item.name === '牛排')?.defaultTrackingMode, 'quantity');
   eq('旧 purchaseType 不能覆盖食盐的有无管理方式', migrationIngredients.find((item) => item.name === '食盐')?.defaultTrackingMode, 'presence');
-  eq('不同材料不会因同类而合并', [tenderloinRef !== steakRef, migrationIngredients.length], [true, 5]);
+  eq('不同材料不会因同类而合并', [tenderloinRef !== steakRef, migrationIngredients.length], [true, 7]);
   const migrationForeignIngredient = { id: 'ing_other-ingredients' };
   eq('菜谱不能引用同家庭之外的原料 ID', (await req('POST', '/api/my-dishes?householdId=h_legacy-ingredients', {
     name: '跨家庭材料菜', category: '家常菜', seasonings: [{ name: '外部牛排', amount: '100 g', ingredientId: migrationForeignIngredient.id }],
@@ -2883,6 +2918,40 @@ async function main() {
   const collidingDevice = await claimByLoginId('h_other-ingredients', '外户用户', '123456');
   eq('同成员 ID 的其他家庭设备仍不能读取本家庭原料', (await req('GET', '/api/ingredients?householdId=h_legacy-ingredients', undefined, undefined, collidingDevice.token)).status, 403);
   await stop(migrationInst);
+
+  const orderPlanInst = await boot('order-plan-link');
+  const linkOwner = await registerAccount('点餐计划管理员');
+  const linkHouse = await req('POST', '/api/households', { name: '点餐计划联动家' }, undefined, undefined, undefined, undefined, linkOwner.token);
+  const linkHouseId = linkHouse.body.data.id;
+  const linkState = await req('GET', `/api/state?householdId=${encodeURIComponent(linkHouseId)}`, undefined, undefined, undefined, undefined, undefined, linkOwner.token);
+  const linkDish = linkState.body.data.dishes[0];
+  const date = new Date().toISOString().slice(0, 10);
+  const ownerOrder = await req('POST', '/api/orders', {
+    householdId: linkHouseId, dishId: linkDish.id, dishName: linkDish.name, date, meal: 'dinner',
+  }, undefined, undefined, undefined, undefined, linkOwner.token);
+  eq('账户点餐自动加入计划', ownerOrder.status, 200);
+  const duplicateOrder = await req('POST', '/api/orders', {
+    householdId: linkHouseId, dishId: linkDish.id, dishName: linkDish.name, date, meal: 'dinner',
+  }, undefined, undefined, undefined, undefined, linkOwner.token);
+  eq('同账户同餐次同菜重试复用点餐', duplicateOrder.body.data.id, ownerOrder.body.data.id);
+  let linkPlan = await req('GET', `/api/plans?householdId=${encodeURIComponent(linkHouseId)}&weekOf=${date}`, undefined, undefined, undefined, undefined, undefined, linkOwner.token);
+  eq('重试不会重复创建计划事件或份数', [linkPlan.body.data.items.length, linkPlan.body.data.items[0].servings], [1, '1']);
+  const linkMember = await registerAccount('点餐计划成员');
+  const linkRequest = await req('POST', '/api/join-requests', { householdId: linkHouseId }, undefined, undefined, undefined, undefined, linkMember.token);
+  eq('第二账户申请家庭成功', linkRequest.status, 200);
+  eq('家庭管理员批准第二账户', (await req('PUT', `/api/join-requests/${linkRequest.body.data.id}`, { status: 'ok' }, undefined, undefined, undefined, undefined, linkOwner.token)).status, 200);
+  const memberOrder = await req('POST', '/api/orders', {
+    householdId: linkHouseId, dishId: linkDish.id, dishName: linkDish.name, date, meal: 'dinner',
+  }, undefined, undefined, undefined, undefined, linkMember.token);
+  linkPlan = await req('GET', `/api/plans?householdId=${encodeURIComponent(linkHouseId)}&weekOf=${date}`, undefined, undefined, undefined, undefined, undefined, linkOwner.token);
+  eq('多人同菜合并计划且保留订单关联', [linkPlan.body.data.items.length, linkPlan.body.data.items[0].servings, linkPlan.body.data.items[0].orderIds.length], [1, '2', 2]);
+  await req('DELETE', `/api/orders/${ownerOrder.body.data.id}`, undefined, undefined, undefined, undefined, undefined, linkOwner.token);
+  linkPlan = await req('GET', `/api/plans?householdId=${encodeURIComponent(linkHouseId)}&weekOf=${date}`, undefined, undefined, undefined, undefined, undefined, linkOwner.token);
+  eq('删除一位成员的订单后回减计划份数', [linkPlan.body.data.items[0].servings, linkPlan.body.data.items[0].orderIds.length], ['1', 1]);
+  await req('DELETE', `/api/orders/${memberOrder.body.data.id}`, undefined, undefined, undefined, undefined, undefined, linkMember.token);
+  linkPlan = await req('GET', `/api/plans?householdId=${encodeURIComponent(linkHouseId)}&weekOf=${date}`, undefined, undefined, undefined, undefined, undefined, linkOwner.token);
+  eq('最后一单删除后移除未完成计划事件', linkPlan.body.data.items.length, 0);
+  await stop(orderPlanInst);
 
   /* ---------- 收尾 ---------- */
   fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5 });

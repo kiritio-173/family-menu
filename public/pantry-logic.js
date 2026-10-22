@@ -36,6 +36,49 @@
     return String(item.ingredientCategory || item.stockCategory || item.presetCategory || item.recipeCategory || '').trim();
   }
 
+  function materialsForCookingEvent(event, dish) {
+    const planItem = event || {};
+    const recipe = dish || null;
+    const method = recipe && Array.isArray(recipe.methods)
+      ? recipe.methods.find((row) => row && row.id === planItem.methodId)
+      : null;
+    if (!recipe || !method) {
+      return [{
+        name: String(planItem.name || (recipe && recipe.name) || '未命名菜品'),
+        amount: '',
+        method: '',
+        dish: String(planItem.name || (recipe && recipe.name) || ''),
+        uncertain: true,
+      }];
+    }
+    const baseServings = Number(String(recipe.servings || '').match(/[\d.]+/)?.[0]);
+    const plannedServings = Number(String(planItem.servings || '').match(/[\d.]+/)?.[0]);
+    const quantityScale = Number.isFinite(baseServings) && baseServings > 0 && Number.isFinite(plannedServings) && plannedServings > 0
+      ? plannedServings / baseServings
+      : null;
+    const rows = (Array.isArray(method.seasonings) ? method.seasonings : []).filter((row) => row && String(row.name || '').trim());
+    if (!rows.length) {
+      return [{ name: recipe.name, amount: '', method: method.name || '', dish: recipe.name, uncertain: true }];
+    }
+    const selectedRows = rows.map((row) => ({
+      ...row,
+      amount: row.amount || '',
+      method: method.name || '',
+      dish: recipe.name || planItem.name || '',
+      quantityScale,
+    }));
+    if (Array.isArray(recipe.seasonings) && recipe.seasonings.some((row) => row && String(row.name || '').trim())) {
+      selectedRows.push({
+        name: `待分配旧材料：${recipe.name || planItem.name || '菜品'}`,
+        amount: '',
+        method: method.name || '',
+        dish: recipe.name || planItem.name || '',
+        uncertain: true,
+      });
+    }
+    return selectedRows;
+  }
+
   function aggregatePlanMaterials(rows, options) {
     const opts = options || {};
     const normalizeName = opts.normalizeName || defaultNormalizeName;
@@ -85,11 +128,17 @@
         item.requiredComparable = false;
         return;
       }
+        const scale = Object.prototype.hasOwnProperty.call(row, 'quantityScale') ? Number(row.quantityScale) : 1;
+        if (row.uncertain === true || !Number.isFinite(scale) || scale <= 0) {
+          item.requiredComparable = false;
+          return;
+        }
+        const scaledQuantity = amount.quantity * scale;
       if (!item.requiredUnit) {
         item.requiredUnit = amount.unit;
-        item.requiredQty = amount.quantity;
+          item.requiredQty = scaledQuantity;
       } else if (item.requiredComparable && item.requiredUnit === amount.unit) {
-        item.requiredQty += amount.quantity;
+          item.requiredQty += scaledQuantity;
       } else {
         item.requiredComparable = false;
       }
@@ -129,7 +178,7 @@
       : { key: 'shortage', stockQty, stockMinQty: minimum, targetQty, shortageQty: targetQty - stockQty };
   }
 
-  const api = { inferTrackingMode, resolveIngredientCategory, aggregatePlanMaterials, assessStock, normalizeName: defaultNormalizeName };
+  const api = { inferTrackingMode, resolveIngredientCategory, materialsForCookingEvent, aggregatePlanMaterials, assessStock, normalizeName: defaultNormalizeName };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.PantryLogic = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

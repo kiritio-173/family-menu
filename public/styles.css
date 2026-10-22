@@ -863,6 +863,11 @@ a { color: var(--primary-dark); }
 .order-name { font-weight: 650; font-size: 14.5px; }
 .order-meta { font-size: 12px; color: var(--muted); }
 .order-note { font-size: 12.5px; color: var(--text-mid); margin-top: 2px; }
+.order-meal-group { margin: 14px 0 20px; }
+.order-dish-group { margin: 0 0 12px; }
+.order-dish-summary { display: flex; align-items: baseline; gap: 8px; padding: 0 2px 6px; font-size: 14px; font-weight: 650; }
+.order-dish-group .order-item { margin-bottom: 5px; }
+.order-date-picker { width: 156px; flex: 0 0 156px; }
 
 .status-pill {
   display: inline-block; padding: 2px 9px; border-radius: 999px;
@@ -990,8 +995,12 @@ a { color: var(--primary-dark); }
 .plan-main { flex: 1; min-width: 0; cursor: pointer; }
 .plan-name { font-weight: 650; font-size: 14.5px; }
 .plan-meta { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-method { display: block; margin-top: 6px; max-width: 240px; cursor: default; }
+.plan-method .select { width: 100%; min-height: 34px; padding: 5px 8px; font-size: 12px; }
 .plan-item .icon-mini { background: var(--bg-soft); }
 .plan-actions { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.legacy-material-review { display: grid; gap: 6px; margin-top: 10px; padding: 10px; border: 1px solid #ead6a7; border-radius: 6px; background: #fff9e9; color: var(--text-mid); font-size: 13px; }
+.legacy-material-review small { color: var(--muted); line-height: 1.5; }
 
 /* ---------- 库存 ---------- */
 
@@ -1525,6 +1534,11 @@ a { color: var(--primary-dark); }
 .batch-progress { padding: 30px 10px; text-align: center; color: var(--muted); line-height: 1.7; }
 
 @media (max-width: 560px) {
+  .order-date-picker { width: 100%; flex: 1 1 100%; }
+  .plan-item { align-items: flex-start; flex-wrap: wrap; }
+  .plan-main { flex-basis: calc(100% - 64px); }
+  .plan-actions { margin-left: 58px; }
+  .plan-method { max-width: none; }
   .join-request-row { flex-wrap: wrap; }
   .join-request-actions { width: 100%; padding-left: 40px; justify-content: flex-start; }
   .dish-tools .btn { padding-left: 7px; padding-right: 7px; }

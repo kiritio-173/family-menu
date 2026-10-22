@@ -1299,39 +1299,109 @@ function findAvailableIngredient(householdId, name) {
   return findHouseholdIngredient(householdId, name) || findGlobalIngredient(name);
 }
 
+function ensureHouseholdCategory(householdId, sourceCategoryId) {
+  const roots = pantryRootCategories();
+  const root = roots.find((category) => category.id === sourceCategoryId);
+  if (root) return root.id;
+  const source = state.pantryCategories.find((category) => category.id === sourceCategoryId && category.scope === 'global');
+  if (!source || !householdId) return ingredientCategoryId(householdId, '', '其他');
+  const parentId = ensureHouseholdCategory(householdId, source.parentId);
+  const existing = state.pantryCategories.find((category) => category.scope === 'household' && category.householdId === householdId &&
+    category.parentId === parentId && category.name === source.name);
+  if (existing) return existing.id;
+  const category = normPantryCategory({ householdId, scope: 'household', parentId, name: source.name });
+  if (!category) return ingredientCategoryId(householdId, '', '其他');
+  state.pantryCategories.push(category);
+  return category.id;
+}
+
 function ensureHouseholdIngredient(householdId, row, pantryCategory) {
   const name = safeText(row && row.name, 80).trim();
   if (!name || !householdId) return null;
   const existing = findHouseholdIngredient(householdId, name);
   if (existing) return existing;
+  const source = row && row.ingredientId
+    ? state.ingredients.find((ingredient) => ingredient.id === row.ingredientId && ingredient.scope === 'global')
+    : findGlobalIngredient(name);
   const stock = state.pantry.find((item) => item.householdId === householdId &&
     item.name.toLocaleLowerCase() === name.toLocaleLowerCase());
-  const categoryId = ingredientCategoryId(householdId, name, pantryCategory || (stock && stock.category));
+  const categoryId = source
+    ? ensureHouseholdCategory(householdId, source.categoryId)
+    : ingredientCategoryId(householdId, name, pantryCategory || (stock && stock.category));
   const categoryRoot = pantryCategoryLabel(householdId, categoryId).split(' > ')[0];
-  const trackingMode = categoryRoot === '调味干货' || isKnownSeasoning(name) ? 'presence' : 'quantity';
+  const trackingMode = source
+    ? source.defaultTrackingMode
+    : categoryRoot === '调味干货' || isKnownSeasoning(name) ? 'presence' : 'quantity';
   const ingredient = normIngredient({
     householdId,
-    name,
-    aliases: [],
+    name: source ? source.name : name,
+    aliases: source ? source.aliases : [],
     categoryId,
     defaultTrackingMode: trackingMode,
-    defaultUnit: trackingMode === 'quantity' && stock ? stock.unit : '',
+    defaultUnit: trackingMode === 'quantity' ? (source && source.defaultUnit || stock && stock.unit || '') : '',
   });
   if (!ingredient) return null;
   state.ingredients.push(ingredient);
   return ingredient;
 }
 
+function localizeDishIngredientRows(input, householdId) {
+  if (!input || !householdId) return { input, ingredientsChanged: false, categoriesChanged: false };
+  const ingredientCount = state.ingredients.length;
+  const categoryCount = state.pantryCategories.length;
+  const localize = (rows) => (Array.isArray(rows) ? rows : []).forEach((row) => {
+    if (!row || !safeText(row.name, 80).trim()) return;
+    const source = row.ingredientId
+      ? state.ingredients.find((ingredient) => ingredient.id === row.ingredientId && ingredient.scope === 'global')
+      : findGlobalIngredient(row.name);
+    if (!source) return;
+    const local = ensureHouseholdIngredient(householdId, { ...row, ingredientId: source.id }, row.categoryId ? pantryCategoryLabel(householdId, row.categoryId) : '');
+    if (local) {
+      row.name = local.name;
+      row.ingredientId = local.id;
+      row.categoryId = local.categoryId;
+    }
+  });
+  localize(input.seasonings);
+  (Array.isArray(input.methods) ? input.methods : []).forEach((method) => localize(method && method.seasonings));
+  return {
+    input,
+    ingredientsChanged: state.ingredients.length !== ingredientCount,
+    categoriesChanged: state.pantryCategories.length !== categoryCount,
+  };
+}
+
+function localizePantryIngredient(input, householdId) {
+  if (!input || !householdId || !input.ingredientId) return { input, ingredientsChanged: false, categoriesChanged: false };
+  const ingredientCount = state.ingredients.length;
+  const categoryCount = state.pantryCategories.length;
+  const source = state.ingredients.find((ingredient) => ingredient.id === input.ingredientId && ingredient.scope === 'global');
+  const local = source ? ensureHouseholdIngredient(householdId, input, input.category) : null;
+  if (local) {
+    input.name = local.name;
+    input.ingredientId = local.id;
+    input.category = pantryCategoryLabel(householdId, local.categoryId);
+    input.trackingMode = local.defaultTrackingMode;
+    input.unit = local.defaultUnit || input.unit;
+  }
+  return {
+    input,
+    ingredientsChanged: state.ingredients.length !== ingredientCount,
+    categoriesChanged: state.pantryCategories.length !== categoryCount,
+  };
+}
+
 function linkHouseholdIngredientReferences() {
   let dishesChanged = false;
   let pantryChanged = false;
   let ingredientsChanged = false;
+  const previousCategoryCount = state.pantryCategories.length;
   const previousIngredientCount = state.ingredients.length;
   const linkRows = (rows, householdId) => {
     if (!householdId || !Array.isArray(rows)) return;
     rows.forEach((row) => {
       if (!row || !safeText(row.name, 80).trim()) return;
-      const current = state.ingredients.find((ingredient) => ingredient.id === row.ingredientId && ingredientAvailableInHousehold(ingredient, householdId));
+      const current = state.ingredients.find((ingredient) => ingredient.id === row.ingredientId && ingredient.scope === 'household' && ingredient.householdId === householdId);
       if (current) return;
       const ingredient = ensureHouseholdIngredient(householdId, row);
       if (ingredient) {
@@ -1367,7 +1437,7 @@ function linkHouseholdIngredientReferences() {
   });
   state.pantry.forEach((item) => {
     if (!item || !item.householdId) return;
-    const ingredient = state.ingredients.find((entry) => entry.id === item.ingredientId && ingredientAvailableInHousehold(entry, item.householdId)) ||
+    const ingredient = state.ingredients.find((entry) => entry.id === item.ingredientId && entry.scope === 'household' && entry.householdId === item.householdId) ||
       ensureHouseholdIngredient(item.householdId, item, item.category);
     if (ingredient && item.ingredientId !== ingredient.id) {
       item.ingredientId = ingredient.id;
@@ -1380,7 +1450,7 @@ function linkHouseholdIngredientReferences() {
     }
   });
   ingredientsChanged = state.ingredients.length !== previousIngredientCount;
-  return { dishesChanged, pantryChanged, ingredientsChanged };
+  return { dishesChanged, pantryChanged, ingredientsChanged, categoriesChanged: state.pantryCategories.length !== previousCategoryCount };
 }
 
 function dishIngredientReferenceProblem(dish, householdId) {
@@ -1803,10 +1873,22 @@ function dishRecipeIngredients(dish) {
 }
 
 /** 完成计划菜时实际扣库存；扣完的数量型库存行会删除，不足时仍返回缺货提醒。 */
-function consumeDishPantry(householdId, dish) {
+function consumeDishPantry(householdId, dish, planItem) {
   const totals = new Map();
   const warnings = [];
-  dishRecipeIngredients(dish).forEach((s) => {
+  const method = (dish.methods || []).find((row) => row.id === (planItem && planItem.methodId));
+  if (!method) return { consumed: [], warnings: ['未选择有效做法，库存未自动扣减'] };
+  if ((dish.seasonings || []).some((row) => row && row.name)) {
+    warnings.push('菜品仍有未分配的旧材料，请整理到具体做法');
+  }
+  const parseServings = (value) => {
+    const match = /\d+(?:\.\d+)?/.exec(String(value || ''));
+    return match ? Number(match[0]) : null;
+  };
+  const baseServings = parseServings(dish.servings);
+  const plannedServings = parseServings(planItem && planItem.servings);
+  const scale = baseServings && plannedServings ? plannedServings / baseServings : null;
+  method.seasonings.forEach((s) => {
     const ingredient = s.ingredientId
       ? state.ingredients.find((row) => row.id === s.ingredientId && ingredientAvailableInHousehold(row, householdId))
       : null;
@@ -1823,14 +1905,14 @@ function consumeDishPantry(householdId, dish) {
       return;
     }
     const amount = parseRecipeAmount(s.amount);
-    if (!amount) {
-      warnings.push(`${s.name}：用量为“适量”或无法识别，未自动扣除`);
+    if (!amount || !scale) {
+      warnings.push(`${s.name}：用量或基准份数无法确认，未自动扣除`);
       return;
     }
     const ingredientKey = ingredient ? `id:${ingredient.id}` : `name:${pantryIngredientKey(s.name)}`;
     const key = `${ingredientKey}|${pantryUnitKey(amount.unit)}`;
     const current = totals.get(key) || { name: ingredient ? ingredient.name : s.name, ingredientId: ingredient?.id || '', unit: amount.unit, quantity: 0 };
-    current.quantity += amount.quantity;
+    current.quantity += amount.quantity * scale;
     totals.set(key, current);
   });
 
@@ -1893,10 +1975,15 @@ function normPlanItem(input, prev, keepInputId, defaultWeek) {
   return {
     id: base.id || (keepInputId && typeof input.id === 'string' && input.id ? input.id : uid('pi_')),
     dishId: safeText(input.dishId ?? base.dishId, 40) || null,
+    methodId: safeText(input.methodId ?? base.methodId, 80),
     name,
     servings: safeText(input.servings ?? base.servings, 30),
     note: safeText(input.note ?? base.note, 100),
     plannedFor,
+    meal: ['lunch', 'dinner'].includes(input.meal ?? base.meal) ? (input.meal ?? base.meal) : 'lunch',
+    orderIds: Array.isArray(input.orderIds ?? base.orderIds)
+      ? [...new Set((input.orderIds ?? base.orderIds).map((orderId) => safeText(orderId, 40)).filter(Boolean))]
+      : [],
     status: (input.status ?? base.status) === 'done' ? 'done' : 'planned',
     completedAt: (input.status ?? base.status) === 'done'
       ? (base.completedAt || input.completedAt || nowISO())
@@ -1939,6 +2026,51 @@ function findPlan(householdId, weekOf, create) {
     state.plans.push(plan);
   }
   return plan || null;
+}
+
+function linkOrderToPlan(order) {
+  const weekOf = mondayOf(order.date);
+  const plan = findPlan(order.householdId, weekOf, true);
+  let item = plan.items.find((row) => row.status !== 'done' && row.dishId === order.dishId &&
+    row.name === order.dishName && row.plannedFor === order.date && row.meal === order.meal);
+  if (!item) {
+    item = normPlanItem({
+      dishId: order.dishId,
+      name: order.dishName,
+      servings: String(order.servings || 1),
+      plannedFor: order.date,
+      meal: order.meal,
+      orderIds: [order.id],
+    }, undefined, false, weekOf);
+    if (item) plan.items.push(item);
+  } else {
+    item.orderIds = [...new Set([...(item.orderIds || []), order.id])];
+    item.servings = String(Math.max(1, Number(item.servings) || 1) + (Number(order.servings) || 1));
+  }
+  plan.received = {};
+  plan.updatedAt = nowISO();
+  scheduleSave('plans');
+  return item;
+}
+
+function unlinkOrderFromPlan(order) {
+  for (const plan of state.plans) {
+    if (plan.householdId !== order.householdId) continue;
+    const item = plan.items.find((row) => Array.isArray(row.orderIds) && row.orderIds.includes(order.id));
+    if (!item) continue;
+    item.orderIds = item.orderIds.filter((orderId) => orderId !== order.id);
+    if (item.status !== 'done') {
+      const remaining = item.orderIds.reduce((sum, orderId) => {
+        const linked = state.orders.find((row) => row.id === orderId);
+        return sum + (linked ? Number(linked.servings) || 1 : 0);
+      }, 0);
+      if (!item.orderIds.length) plan.items = plan.items.filter((row) => row.id !== item.id);
+      else item.servings = String(remaining);
+    }
+    plan.received = {};
+    plan.updatedAt = nowISO();
+    scheduleSave('plans');
+  }
 }
 
 function loadState() {
@@ -2208,6 +2340,7 @@ function loadState() {
   if (ingredientLinks.dishesChanged) scheduleSave('dishes');
   if (ingredientLinks.pantryChanged) scheduleSave('pantry');
   if (ingredientLinks.ingredientsChanged) scheduleSave('ingredients');
+  if (ingredientLinks.categoriesChanged) scheduleSave('pantryCategories');
 
   // 本周计划：同样拉回有效家庭，周一归一
   const seenPl = new Set();
@@ -2931,6 +3064,7 @@ function normDish(input, prev, keepInputId) {
       .slice(0, 40),
     methods: safeList(input.methods)
       .map((m) => ({
+        id: safeText(m && m.id, 80) || uid('rm_'),
         name: safeText(m && m.name, 24).trim() || '做法',
         // 每个做法可以带自己的调料。
         // 一道菜常有几种做法甚至几种口味（红烧/清蒸、甜口/辣口），
@@ -2962,6 +3096,15 @@ function normDish(input, prev, keepInputId) {
     createdAt: base.createdAt || input.createdAt || nowISO(),
     updatedAt: nowISO(),
   };
+  // 旧单做法菜的菜品级材料可以无歧义地迁入唯一做法；多做法数据保留并在采购页提示人工分配。
+  if (d.methods.length === 1 && d.seasonings.length) {
+    const existing = new Set(d.methods[0].seasonings.map((row) => `${row.ingredientId || ''}|${pantryIngredientKey(row.name)}`));
+    d.seasonings.forEach((row) => {
+      const key = `${row.ingredientId || ''}|${pantryIngredientKey(row.name)}`;
+      if (!existing.has(key)) d.methods[0].seasonings.push(row);
+    });
+    d.seasonings = [];
+  }
   return d;
 }
 
@@ -3016,12 +3159,15 @@ function normOrder(input, prev, keepInputId) {
     dishId: input.dishId ? safeText(input.dishId, 40) : null,
     dishName: safeText(input.dishName, 40).trim() || base.dishName || '随便吃点',
     requester: safeText(input.requester, 20).trim() || '匿名',
-    people: Math.max(1, Math.min(20, Number(input.people) || base.people || 2)),
+    accountId: safeText(input.accountId ?? base.accountId, 80),
+    people: Math.max(1, Math.min(20, Number(input.people) || base.people || 1)),
+    servings: Math.max(1, Math.min(20, Number(input.servings) || base.servings || 1)),
     note: safeText(input.note, 200),
     status: ['pending', 'cooking', 'done', 'cancelled'].includes(input.status)
       ? input.status
       : base.status || 'pending',
     date: safeText(input.date, 20) || base.date || todayStr(),
+    meal: ['lunch', 'dinner'].includes(input.meal ?? base.meal) ? (input.meal ?? base.meal) : 'lunch',
     createdAt: base.createdAt || input.createdAt || nowISO(),
     updatedAt: nowISO(),
   };
@@ -4737,7 +4883,8 @@ async function handleAPI(req, res, url) {
         if (!isMyMember(req, hhId) && !isHouseAdmin(req, hhId)) {
           return sendError(res, 403, '先说说你是谁，这道菜才好记下是谁加的');
         }
-        const dish = normDish({ ...(await readBody(req)), householdId: hhId });
+        const materialInput = localizeDishIngredientRows(await readBody(req), hhId);
+        const dish = normDish({ ...materialInput.input, householdId: hhId });
         if (!dish || !dish.name) return sendError(res, 400, '菜名不能为空');
         const ingredientProblem = dishIngredientReferenceProblem(dish, hhId);
         if (ingredientProblem) return sendError(res, 400, ingredientProblem);
@@ -4749,6 +4896,8 @@ async function handleAPI(req, res, url) {
         if (bad) return sendError(res, 400, bad);
         state.dishes.unshift(dish);
         scheduleSave('dishes');
+        if (materialInput.ingredientsChanged) scheduleSave('ingredients');
+        if (materialInput.categoriesChanged) scheduleSave('pantryCategories');
         return sendJSON(res, 200, { ok: true, data: publicDish(dish) });
       }
       if (method === 'PUT' && id) {
@@ -4761,7 +4910,8 @@ async function handleAPI(req, res, url) {
         if (!canWrite(req, state.dishes[idx])) {
           return sendError(res, 403, writeDenied(state.dishes[idx]));
         }
-        const dish = normDish({ ...(await readBody(req)), householdId: hhId }, state.dishes[idx]);
+        const materialInput = localizeDishIngredientRows(await readBody(req), hhId);
+        const dish = normDish({ ...materialInput.input, householdId: hhId }, state.dishes[idx]);
         const ingredientProblem = dishIngredientReferenceProblem(dish, hhId);
         if (ingredientProblem) return sendError(res, 400, ingredientProblem);
         dish.authorId = state.dishes[idx].authorId;
@@ -4771,6 +4921,8 @@ async function handleAPI(req, res, url) {
         if (bad) return sendError(res, 400, bad);
         state.dishes[idx] = dish;
         scheduleSave('dishes');
+        if (materialInput.ingredientsChanged) scheduleSave('ingredients');
+        if (materialInput.categoriesChanged) scheduleSave('pantryCategories');
         return sendJSON(res, 200, { ok: true, data: publicDish(dish) });
       }
       if (method === 'DELETE') {
@@ -5112,6 +5264,9 @@ async function handleAPI(req, res, url) {
       const body = await readBody(req);
       if (!requireAccountHousehold(req, res, resolveHouseholdId(body.householdId))) return;
       const dish = body.dishId ? state.dishes.find((d) => d.id === body.dishId) : null;
+      if (body.methodId && dish && !(dish.methods || []).some((method) => method.id === body.methodId)) {
+        return sendError(res, 400, '所选做法不属于这道菜，请刷新后重试');
+      }
       const item = normPlanItem({
         ...body,
         name: body.name || (dish && dish.name),
@@ -5138,22 +5293,48 @@ async function handleAPI(req, res, url) {
         if (hit) { foundPlan = plan; item = hit; break; }
       }
       if (!item || !foundPlan) return sendError(res, 404, '计划里没有这道菜');
-      if (!isHouseAdmin(req, foundPlan.householdId)) return sendError(res, 403, '只有家庭管理员能完成计划并扣库存');
+      if (!requireAccountHousehold(req, res, foundPlan.householdId)) return;
       const body = await readBody(req);
-      if (body.status !== 'done') return sendError(res, 400, '计划状态只能标记为完成');
-      if (item.status === 'done') return sendError(res, 409, '这道计划菜已经完成并扣过库存');
+      if (body.status !== undefined) {
+        if (!isHouseAdmin(req, foundPlan.householdId)) return sendError(res, 403, '只有家庭管理员能完成计划并扣库存');
+        if (body.status !== 'done') return sendError(res, 400, '计划状态只能标记为完成');
+        if (item.status === 'done') return sendError(res, 409, '这道计划菜已经完成并扣过库存');
 
+        const dish = item.dishId ? state.dishes.find((d) => d.id === item.dishId) : null;
+        const result = dish
+          ? consumeDishPantry(foundPlan.householdId, dish, item)
+          : { consumed: [], warnings: ['这是临时菜，没有可读取的菜谱用量，未自动扣库存'] };
+        item.status = 'done';
+        item.completedAt = nowISO();
+        foundPlan.received = {};
+        foundPlan.updatedAt = nowISO();
+        scheduleSave('plans');
+        if (result.consumed.length) scheduleSave('pantry');
+        return sendJSON(res, 200, { ok: true, data: { item, consumed: result.consumed, warnings: result.warnings } });
+      }
+
+      if (item.status === 'done') return sendError(res, 409, '已完成计划不能修改');
       const dish = item.dishId ? state.dishes.find((d) => d.id === item.dishId) : null;
-      const result = dish
-        ? consumeDishPantry(foundPlan.householdId, dish)
-        : { consumed: [], warnings: ['这是临时菜，没有可读取的菜谱用量，未自动扣库存'] };
-      item.status = 'done';
-      item.completedAt = nowISO();
+      if (body.methodId !== undefined) {
+        const methodId = safeText(body.methodId, 80);
+        if (methodId && dish && !(dish.methods || []).some((method) => method.id === methodId)) {
+          return sendError(res, 400, '所选做法不属于这道菜，请刷新后重试');
+        }
+        item.methodId = methodId;
+      }
+      if (body.meal !== undefined) {
+        if (!['lunch', 'dinner'].includes(body.meal)) return sendError(res, 400, '餐次只能选择午餐或晚餐');
+        item.meal = body.meal;
+      }
+      if (body.servings !== undefined) {
+        const servings = Number(body.servings);
+        if (!Number.isFinite(servings) || servings <= 0 || servings > 20) return sendError(res, 400, '份数需在 1 到 20 之间');
+        item.servings = String(servings);
+      }
       foundPlan.received = {};
       foundPlan.updatedAt = nowISO();
       scheduleSave('plans');
-      if (result.consumed.length) scheduleSave('pantry');
-      return sendJSON(res, 200, { ok: true, data: { item, consumed: result.consumed, warnings: result.warnings } });
+      return sendJSON(res, 200, { ok: true, data: { item } });
     }
 
     // 从计划里一次拿掉几道菜（计划页多选模式）
@@ -5227,19 +5408,23 @@ async function handleAPI(req, res, url) {
     const id = route[1];
     if (method === 'POST' && !id) {
       const body = await readBody(req);
-      const item = normPantryItem(body);
+      const householdId = resolveHouseholdId(body.householdId);
+      if (!requireAccountHousehold(req, res, householdId)) return;
+      const materialInput = localizePantryIngredient(body, householdId);
+      const item = normPantryItem(materialInput.input);
       if (!item) return sendError(res, 400, '食材名不能为空');
       if (item.trackingMode === 'quantity' && body.quantity !== undefined) {
         const quantity = Number(body.quantity);
         if (!Number.isFinite(quantity) || quantity < 0) return sendError(res, 400, '库存数量不能小于 0');
         if (quantity === 0) return sendError(res, 400, '数量为 0，无需新增库存条目');
       }
-      if (!requireAccountHousehold(req, res, item.householdId)) return;
       const ingredientProblem = pantryIngredientReferenceProblem(item);
       if (ingredientProblem) return sendError(res, 400, ingredientProblem);
       if (body.addToExisting) addPantryQuantity(item);
       else state.pantry.unshift(item);
       scheduleSave('pantry');
+      if (materialInput.ingredientsChanged) scheduleSave('ingredients');
+      if (materialInput.categoriesChanged) scheduleSave('pantryCategories');
       const stored = body.addToExisting
         ? state.pantry.find((p) => p.id === item.id ||
             (p.householdId === item.householdId && pantryIngredientKey(p.name) === pantryIngredientKey(item.name) && pantryUnitKey(p.unit) === pantryUnitKey(item.unit))) || item
@@ -5758,6 +5943,9 @@ async function handleAPI(req, res, url) {
     const id = route[1];
     if (method === 'POST' && !id) {
       const body = await readBody(req);
+      if (body.meal !== undefined && !['lunch', 'dinner'].includes(body.meal)) {
+        return sendError(res, 400, '餐次只能选择午餐或晚餐');
+      }
       const account = accountSessionOf(req);
       const requestedHouseholdId = safeText(body.householdId, 40);
       if (account && !requestedHouseholdId) {
@@ -5766,16 +5954,29 @@ async function handleAPI(req, res, url) {
       if (account && !state.households.some((h) => h.id === requestedHouseholdId)) {
         return sendError(res, 404, '这个家庭不存在');
       }
-      const order = normOrder({ ...body, householdId: requestedHouseholdId || body.householdId });
+      const user = account && userById(account.scope.userId);
+      const order = normOrder({
+        ...body,
+        householdId: requestedHouseholdId || body.householdId,
+        ...(user ? { requester: user.displayName, accountId: user.id } : {}),
+      });
       if (!requireAccountHousehold(req, res, order.householdId)) return;
+      if (order.meal !== 'lunch' && order.meal !== 'dinner') return sendError(res, 400, '餐次只能选择午餐或晚餐');
+      if (normDate(order.date) !== order.date) return sendError(res, 400, '点餐日期无效');
       if (order.dishId) {
         const dish = state.dishes.find((d) => d.id === order.dishId);
         if (dish && dish.dishStatus === 'paused') {
           return sendError(res, 409, '这道菜目前暂停供应，不能新建点餐');
         }
       }
+      if (order.accountId) {
+        const existing = state.orders.find((row) => row.accountId === order.accountId && row.householdId === order.householdId &&
+          row.date === order.date && row.meal === order.meal && row.dishId === order.dishId && row.status !== 'cancelled');
+        if (existing) return sendJSON(res, 200, { ok: true, data: existing });
+      }
       state.orders.unshift(order);
       scheduleSave('orders');
+      if (order.accountId) linkOrderToPlan(order);
       return sendJSON(res, 200, { ok: true, data: order });
     }
     // 批量改状态：点餐页「一键开做」用。PATCH /api/orders 不带 id。
@@ -5805,6 +6006,7 @@ async function handleAPI(req, res, url) {
       if (!order) return sendError(res, 404, '点餐不存在');
       if (!requireAccountHousehold(req, res, order.householdId)) return;
       const body = await readBody(req);
+      const previousOrder = { ...order };
       // 逐字段更新：只改请求里明确带上的字段，避免清空备注等未提交的内容
       if (['pending', 'cooking', 'done', 'cancelled'].includes(body.status)) {
         order.status = body.status;
@@ -5818,11 +6020,24 @@ async function handleAPI(req, res, url) {
       if (body.people !== undefined) {
         order.people = Math.max(1, Math.min(20, Number(body.people) || order.people));
       }
+      if (body.servings !== undefined) {
+        const servings = Number(body.servings);
+        if (!Number.isFinite(servings) || servings <= 0 || servings > 20) return sendError(res, 400, '份数需在 1 到 20 之间');
+        order.servings = servings;
+      }
       if (body.note !== undefined) order.note = safeText(body.note, 200);
       if (body.date !== undefined) order.date = safeText(body.date, 20) || order.date;
+      if (body.meal !== undefined) {
+        if (!['lunch', 'dinner'].includes(body.meal)) return sendError(res, 400, '餐次只能选择午餐或晚餐');
+        order.meal = body.meal;
+      }
       if (body.dishId !== undefined) order.dishId = body.dishId ? safeText(body.dishId, 40) : null;
       order.updatedAt = nowISO();
       scheduleSave('orders');
+      if (order.accountId && ['date', 'meal', 'dishId', 'dishName', 'servings', 'status'].some((key) => previousOrder[key] !== order[key])) {
+        unlinkOrderFromPlan(previousOrder);
+        if (order.status !== 'cancelled') linkOrderToPlan(order);
+      }
       return sendJSON(res, 200, { ok: true, data: order });
     }
     // 注意要排在「按 id 删点餐」前面，否则 /api/orders/done 会被当成删 id 为 done 的点餐
@@ -5830,10 +6045,12 @@ async function handleAPI(req, res, url) {
       const hid = safeText(url.searchParams.get('householdId'), 40);
       if (!requireAccountHousehold(req, res, resolveHouseholdId(hid))) return;
       const before = state.orders.length;
+      const removedOrders = state.orders.filter((o) => o.status === 'done' && (!hid || o.householdId === hid));
       state.orders = state.orders.filter(
         (o) => o.status !== 'done' || (hid && o.householdId !== hid)
       );
       scheduleSave('orders');
+      removedOrders.filter((order) => order.accountId).forEach(unlinkOrderFromPlan);
       return sendJSON(res, 200, { ok: true, data: { removed: before - state.orders.length } });
     }
     // 一次删掉勾选的那几条点餐（点餐页多选模式）。
@@ -5846,8 +6063,10 @@ async function handleAPI(req, res, url) {
       );
       if (!ids.size) return sendError(res, 400, '没有选中任何一条');
       const before = state.orders.length;
+      const removedOrders = state.orders.filter((o) => ids.has(o.id) && accountCanAccessHousehold(req, o.householdId));
       state.orders = state.orders.filter((o) => !(ids.has(o.id) && accountCanAccessHousehold(req, o.householdId)));
       scheduleSave('orders');
+      removedOrders.filter((order) => order.accountId).forEach(unlinkOrderFromPlan);
       return sendJSON(res, 200, { ok: true, data: { removed: before - state.orders.length } });
     }
     if (method === 'DELETE' && id) {
@@ -5856,6 +6075,7 @@ async function handleAPI(req, res, url) {
       if (!requireAccountHousehold(req, res, state.orders[idx].householdId)) return;
       const [gone] = state.orders.splice(idx, 1);
       scheduleSave('orders');
+      if (gone.accountId) unlinkOrderFromPlan(gone);
       return sendJSON(res, 200, { ok: true, data: gone });
     }
   }
