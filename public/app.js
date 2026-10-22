@@ -651,6 +651,22 @@ function ingredientCategoryOptions(selectedId, scope) {
   }).join('');
 }
 
+function quickIngredientCategoryPickerHtml(selectedId, scope) {
+  const categories = householdPantryCategories().filter((category) => scope !== 'global' || category.scope === 'global' || category.builtin);
+  const selected = categories.find((category) => category.id === selectedId) || categories.find((category) => category.name === '其他') || categories[0];
+  return `<input type="hidden" id="quickIngredientCategory" value="${esc(selected ? selected.id : '')}" />
+    <input class="input quick-ingredient-category-search" id="quickIngredientCategorySearch" type="search" placeholder="搜索分类" aria-label="搜索原料分类" />
+    <div class="pantry-category-picker quick-ingredient-category-picker" role="group" aria-label="选择原料分类">
+      ${categories.map((category) => {
+        const path = pantryCategoryPath(category.id, categories);
+        const on = selected && selected.id === category.id;
+        return path ? `<button type="button" class="pantry-category-option ${on ? 'on' : ''} quick-ingredient-category-option"
+          data-act="pick-quick-ingredient-category" data-category-id="${esc(category.id)}" data-scope="${category.scope || (category.builtin ? 'global' : 'household')}"
+          aria-pressed="${on ? 'true' : 'false'}"><span>${catEmoji(category.name)}</span><span>${esc(path)}${category.parentId ? (category.scope === 'global' ? ' · 全局' : ' · 本家') : ''}</span></button>` : '';
+      }).join('')}
+    </div>`;
+}
+
 function recipeIngredients(dish) {
   return RecipeIngredientLogic.filterIngredientsByScope(S.data.ingredients || [], dish && dish.householdId || '');
 }
@@ -787,10 +803,11 @@ function openQuickIngredientCreator(dish, target) {
   const categories = householdPantryCategories(householdId);
   const defaultCategory = categories.find((category) => category.id === target?.categoryId) || categories.find((category) => category.name === '其他');
   const admin = isHouseAdmin(householdId);
+  const defaultScope = admin && !dish.householdId ? 'global' : 'household';
   openSheet({
     title: '新增原料',
     body: `<div class="field"><label class="field-label">原料名称 *</label><input class="input" id="quickIngredientName" placeholder="例如：牛里脊" /></div>
-      <div class="field"><label class="field-label">分类</label><select class="select" id="quickIngredientCategory">${ingredientCategoryOptions(defaultCategory && defaultCategory.id)}</select></div>
+      <div class="field"><label class="field-label">分类</label>${quickIngredientCategoryPickerHtml(defaultCategory && defaultCategory.id, defaultScope)}</div>
       ${admin ? `<div class="field"><label class="field-label">目录范围</label><select class="select" id="quickIngredientScope"><option value="household" ${dish.householdId ? 'selected' : ''}>仅本家庭</option><option value="global" ${dish.householdId ? '' : 'selected'}>全局共享（所有家庭可见）</option></select></div>` : ''}
       ${admin ? `<div class="field"><label class="field-label">新增子分类 <span class="field-hint">可选；全局分类对所有家庭可见</span></label>
         <input class="input" id="quickIngredientChild" placeholder="留空则使用上面的分类" /></div>` : ''}
@@ -7526,6 +7543,16 @@ const ACTIONS = {
     applyFoodCategoryDefaults(cat);
     renderPresetGrid();
   },
+  'pick-quick-ingredient-category'(el) {
+    const id = el.dataset.categoryId || '';
+    const input = $('#quickIngredientCategory');
+    if (input) input.value = id;
+    document.querySelectorAll('.quick-ingredient-category-option').forEach((button) => {
+      const on = button.dataset.categoryId === id;
+      button.classList.toggle('on', on);
+      button.setAttribute('aria-pressed', String(on));
+    });
+  },
   'exp-preset'(el) {
     const d = Number(el.dataset.days) || 0;
     $('#fFoodExp').value = d > 0 ? dayOffset(d) : '';
@@ -8588,12 +8615,17 @@ document.addEventListener('change', (e) => {
   if (e.target.id === 'fFoodTracking') e.target.dataset.manual = '1';
   const el = e.target;
   if (el.id === 'quickIngredientScope') {
-    const options = ingredientCategoryOptions('', el.value);
-    const select = $('#quickIngredientCategory');
-    const previous = select && select.value;
-    if (select) {
-      select.innerHTML = options;
-      if (previous && [...select.options].some((option) => option.value === previous)) select.value = previous;
+    const keyword = ($('#quickIngredientCategorySearch')?.value || '').trim().toLocaleLowerCase();
+    const options = [...document.querySelectorAll('.quick-ingredient-category-option')];
+    options.forEach((button) => {
+      const scopeHidden = el.value === 'global' && button.dataset.scope !== 'global';
+      button.hidden = scopeHidden || (!!keyword && !button.textContent.toLocaleLowerCase().includes(keyword));
+    });
+    const current = $('#quickIngredientCategory')?.value;
+    const currentButton = options.find((button) => button.dataset.categoryId === current && !button.hidden);
+    if (!currentButton) {
+      const fallback = options.find((button) => !button.hidden);
+      if (fallback) ACTIONS['pick-quick-ingredient-category'](fallback);
     }
   }
   if (el.id === 'fFoodIngredientScope') {
@@ -8663,6 +8695,14 @@ document.addEventListener('change', (e) => {
 
 /* 搜索输入 */
 document.addEventListener('input', (e) => {
+  if (e.target.id === 'quickIngredientCategorySearch') {
+    const keyword = e.target.value.trim().toLocaleLowerCase();
+    document.querySelectorAll('.quick-ingredient-category-option').forEach((button) => {
+      const label = button.textContent.toLocaleLowerCase();
+      const scope = $('#quickIngredientScope')?.value || 'household';
+      button.hidden = (scope === 'global' && button.dataset.scope !== 'global') || (keyword && !label.includes(keyword));
+    });
+  }
   if (e.target.id === 'searchInput') {
     S.keyword = e.target.value.trim();
     render();

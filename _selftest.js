@@ -1356,6 +1356,8 @@ async function main() {
   ok('AI 确认只接受当前菜谱作用域中可用的候选', /const availableIds = new Set\(recipeIngredients\(dish\)\.map/.test(appSource) && /!availableIds\.has\(candidate\.id\)/.test(appSource));
   ok('菜谱材料选择区不再提供旧采购类型', !dishEditorSource.includes('seasoningTypeSelect') && !dishEditorSource.includes('season-type'));
   ok('菜单和库存入口均提供全局原料创建范围', /quickIngredientScope/.test(appSource) && /fFoodIngredientScope/.test(appSource));
+  const quickCategoryPickerSource = appSource.slice(appSource.indexOf('function quickIngredientCategoryPickerHtml'), appSource.indexOf('function recipeIngredients'));
+  ok('新增原料分类使用图标文字按钮而非原生下拉', /id="quickIngredientCategory"/.test(quickCategoryPickerSource) && /data-act="pick-quick-ingredient-category"/.test(quickCategoryPickerSource) && /quickIngredientCategoryPickerHtml\(defaultCategory && defaultCategory\.id, defaultScope\)/.test(appSource) && !/<select class="select" id="quickIngredientCategory"/.test(appSource));
   ok('旧菜谱无原料 ID 时优先使用当前库存分类', /resolveIngredientCategory\([\s\S]{0,220}stockCategory/.test(appSource));
   const pantryLogicSource = fs.readFileSync(path.join(ROOT, 'public', 'pantry-logic.js'), 'utf8');
   ok('计划有无型食材不汇总菜谱用量', /if\s*\(item\.trackingMode\s*===\s*'presence'\)\s*return;/.test(pantryLogicSource));

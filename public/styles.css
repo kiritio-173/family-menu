@@ -1084,6 +1084,10 @@ a { color: var(--primary-dark); }
   border-color: var(--primary); background: var(--primary-soft); color: var(--primary-dark); font-weight: 650;
 }
 .pantry-category-option:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.quick-ingredient-category-search { margin-bottom: 8px; }
+.quick-ingredient-category-picker { max-height: 190px; }
+.quick-ingredient-category-option { min-width: 0; }
+.quick-ingredient-category-option span:last-child { overflow-wrap: anywhere; }
 
 .recipe-ingredient-name { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .recipe-ingredient-name input { flex: 1; min-width: 0; }
