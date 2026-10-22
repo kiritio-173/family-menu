@@ -646,7 +646,7 @@ function ingredientNameDatalist(id) {
 function ingredientCategoryOptions(selectedId, scope) {
   const categories = householdPantryCategories().filter((category) => scope !== 'global' || category.scope === 'global' || category.builtin);
   return categories.map((category) => {
-    const path = pantryCategoryPath(category, categories);
+    const path = pantryCategoryPath(category.id, categories);
     return path ? `<option value="${esc(category.id)}" ${category.id === selectedId ? 'selected' : ''}>${esc(path)}</option>` : '';
   }).join('');
 }
@@ -666,7 +666,7 @@ function recipeIngredientRowHtml(row, action, i, j, dish) {
     : [];
   const data = `data-i="${i}"${j === undefined ? '' : ` data-j="${j}"`}`;
   const categoryOptions = [`<option value="">选择分类</option>`].concat(categories.map((category) => {
-    const label = pantryCategoryPath(category, categories);
+    const label = pantryCategoryPath(category.id, categories);
     return label ? `<option value="${esc(category.id)}" ${category.id === categoryId ? 'selected' : ''}>${esc(label)}${category.scope === 'global' && !category.builtin ? '（全局）' : ''}</option>` : '';
   })).join('');
   const ingredientOptions = [`<option value="">${row.name && !selected ? `待关联：${esc(row.name)}` : '选择原料'}</option>`].concat(matching.map((ingredient) =>

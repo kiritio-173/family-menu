@@ -1298,6 +1298,7 @@ async function main() {
   ok('选择调味干货时自动切换有无方式', /function applyFoodCategoryDefaults\(category\)[\s\S]{0,280}调味干货[\s\S]{0,180}tracking\.value\s*=\s*'presence'/.test(appSource));
   ok('计划模式从家庭原料字典读取库存方式', /const ingredient = ingredientById\(row\.ingredientId\)/.test(appSource) && /ingredient && ingredient\.defaultTrackingMode/.test(appSource));
   ok('菜谱原料编辑使用分类和字典选择器', /function recipeIngredientRowHtml\(/.test(appSource) && /data-act="season-category"/.test(appSource) && /data-act="season-ingredient"/.test(appSource));
+  ok('菜谱与快捷原料分类选项使用分类 ID 生成路径', (appSource.match(/pantryCategoryPath\(category\.id,\s*categories\)/g) || []).length === 2);
   ok('通用和做法材料行均提供就地新增原料入口', /data-act="\$\{action\}-create"/.test(appSource) && /'season-create'\(el\)/.test(appSource) && /'mseason-create'\(el\)/.test(appSource));
   ok('就地新增保留空白材料行及已选分类', /function collectDish\(preserveEmptyRows = false\)/.test(appSource) && /collectDish\(true\)/.test(appSource));
   ok('新增原料回填触发行并保留原用量', /applyIngredientToRecipeRow\(dish, target\.rowId, ingredient\)/.test(appSource));
