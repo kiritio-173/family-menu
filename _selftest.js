@@ -226,6 +226,24 @@ async function main() {
     recipeIngredientLogic.filterIngredientsByCategory(ingredientRows, ingredientCategories, 'cat-beef').map((row) => row.id),
     ['ing-beef', 'ing-steak']
   );
+  assert.deepStrictEqual(
+    recipeIngredientLogic.searchIngredients([
+      { id: 'tenderloin', name: '牛里脊', aliases: [], categoryId: 'cat-beef' },
+      { id: 'beef', name: '牛肉', aliases: [], categoryId: 'cat-beef' },
+      { id: 'steak', name: '牛排', aliases: ['西冷牛排'], categoryId: 'cat-beef' },
+      { id: 'chicken', name: '鸡肉', aliases: [], categoryId: 'cat-beef' },
+    ], '牛').map((row) => row.id),
+    ['beef', 'steak', 'tenderloin'],
+    '输入宽泛关键词时优先显示较宽泛原料，再显示具体部位'
+  );
+  assert.deepStrictEqual(
+    recipeIngredientLogic.searchIngredients([
+      { id: 'salt', name: '食盐', aliases: ['盐'], categoryId: 'cat-seasoning' },
+      { id: 'sugar', name: '白糖', aliases: ['白砂糖'], categoryId: 'cat-seasoning' },
+    ], '白砂糖').map((row) => row.id),
+    ['sugar'],
+    '自动补全支持已确认别名'
+  );
   assert.strictEqual(typeof recipeIngredientLogic.filterIngredientsByScope, 'function', '菜谱原料目录应统一按菜谱作用域过滤');
   assert.deepStrictEqual(
     recipeIngredientLogic.filterIngredientsByScope([
@@ -1297,8 +1315,11 @@ async function main() {
   ok('计划收到已入库但用量不明确的状态', /it\.received[\s\S]{0,120}uncertain/.test(appSource));
   ok('选择调味干货时自动切换有无方式', /function applyFoodCategoryDefaults\(category\)[\s\S]{0,280}调味干货[\s\S]{0,180}tracking\.value\s*=\s*'presence'/.test(appSource));
   ok('计划模式从家庭原料字典读取库存方式', /const ingredient = ingredientById\(row\.ingredientId\)/.test(appSource) && /ingredient && ingredient\.defaultTrackingMode/.test(appSource));
-  ok('菜谱原料编辑使用分类和字典选择器', /function recipeIngredientRowHtml\(/.test(appSource) && /data-act="season-category"/.test(appSource) && /data-act="season-ingredient"/.test(appSource));
-  ok('菜谱与快捷原料分类选项使用分类 ID 生成路径', (appSource.match(/pantryCategoryPath\(category\.id,\s*categories\)/g) || []).length === 2);
+  ok('菜谱原料编辑使用分类下拉和原料补全控件', /function recipeIngredientRowHtml\(/.test(appSource) && /data-act="season-category"/.test(appSource) && /data-act="\$\{action\}-ingredient-search"/.test(appSource));
+  ok('菜谱原料名支持自动补全与目录浏览', /data-act="\$\{action\}-ingredient-search"/.test(appSource) && /data-act="\$\{action\}-browse"/.test(appSource) && /openRecipeIngredientBrowser\(/.test(appSource));
+  ok('菜谱材料候选按输入和当前分类排序', /RecipeIngredientLogic\.searchIngredients\(/.test(appSource) && /data-list="\$\{esc\(listId\)\}"/.test(appSource));
+  ok('目录选料后保留材料草稿并返回编辑器', /applyIngredientToRecipeRow\(context\.dish, context\.rowId, ingredient\)[\s\S]{0,180}openDishEditor\(context\.dish\)/.test(appSource));
+  ok('菜谱与快捷原料分类选项使用分类 ID 生成路径', /pantryCategoryPath\(category\.id,\s*categories\)/.test(appSource) && /pantryCategoryPath\(ingredient\.categoryId,\s*categories\)/.test(appSource));
   ok('通用和做法材料行均提供就地新增原料入口', /data-act="\$\{action\}-create"/.test(appSource) && /'season-create'\(el\)/.test(appSource) && /'mseason-create'\(el\)/.test(appSource));
   ok('就地新增保留空白材料行及已选分类', /function collectDish\(preserveEmptyRows = false\)/.test(appSource) && /collectDish\(true\)/.test(appSource));
   ok('新增原料回填触发行并保留原用量', /applyIngredientToRecipeRow\(dish, target\.rowId, ingredient\)/.test(appSource));

@@ -22,6 +22,28 @@
       ingredient && (ingredient.scope === 'global' || (!!householdId && ingredient.householdId === householdId)));
   }
 
+  function searchIngredients(ingredients, query, categories, categoryId) {
+    const keyword = String(query || '').trim().toLocaleLowerCase();
+    const rows = Array.isArray(ingredients) ? ingredients : [];
+    const scoped = categoryId ? filterIngredientsByCategory(rows, categories, categoryId) : rows;
+    if (!keyword) return scoped.slice();
+    return scoped.map((ingredient) => {
+      const name = String(ingredient && ingredient.name || '').toLocaleLowerCase();
+      const aliases = (Array.isArray(ingredient && ingredient.aliases) ? ingredient.aliases : []).map((alias) => String(alias).toLocaleLowerCase());
+      const exact = name === keyword || aliases.includes(keyword);
+      const prefix = name.startsWith(keyword) || aliases.some((alias) => alias.startsWith(keyword));
+      const matched = name.includes(keyword) || aliases.some((alias) => alias.includes(keyword));
+      const broad = name === `${keyword}肉` || name === `${keyword}类`;
+      return { ingredient, exact, broad, prefix, matched };
+    }).filter((item) => item.matched).sort((a, b) =>
+      Number(b.exact) - Number(a.exact) ||
+      Number(b.broad) - Number(a.broad) ||
+      Number(b.prefix) - Number(a.prefix) ||
+      a.ingredient.name.length - b.ingredient.name.length ||
+      a.ingredient.name.localeCompare(b.ingredient.name, 'zh-CN')
+    ).map((item) => item.ingredient);
+  }
+
   function applyIngredientToRecipeRow(dish, rowId, ingredient) {
     if (!dish || !ingredient || !ingredient.id) return false;
     const parts = String(rowId || '').split(':');
@@ -76,7 +98,7 @@
     }).map((match) => ({ rowId: String(match.rowId), ingredientId: String(match.ingredientId) }));
   }
 
-  const api = { filterIngredientsByCategory, filterIngredientsByScope, applyIngredientToRecipeRow, validateAiMatches, filterCurrentAiMatches };
+  const api = { filterIngredientsByCategory, filterIngredientsByScope, searchIngredients, applyIngredientToRecipeRow, validateAiMatches, filterCurrentAiMatches };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.RecipeIngredientLogic = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

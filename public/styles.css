@@ -1076,6 +1076,19 @@ a { color: var(--primary-dark); }
 }
 .pantry-category-option:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
+.recipe-ingredient-name { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.recipe-ingredient-name input { flex: 1; min-width: 0; }
+.recipe-ingredient-browse { flex: 0 0 34px; width: 34px; padding: 4px !important; }
+.recipe-ingredient-results { display: grid; gap: 6px; margin-top: 10px; }
+.recipe-ingredient-result {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 44px;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2);
+  color: var(--text); text-align: left; cursor: pointer;
+}
+.recipe-ingredient-result span:first-child { display: grid; gap: 2px; min-width: 0; }
+.recipe-ingredient-result small { color: var(--muted); font-size: 12px; }
+.recipe-ingredient-result:focus-visible, .recipe-ingredient-result:hover { border-color: var(--primary); background: var(--primary-soft); }
+
 .quick-dates { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 
 .pill-now {
@@ -1516,6 +1529,6 @@ a { color: var(--primary-dark); }
   .join-request-actions { width: 100%; padding-left: 40px; justify-content: flex-start; }
   .dish-tools .btn { padding-left: 7px; padding-right: 7px; }
   .recipe-ingredient-row { grid-template-columns: minmax(0, 1fr) auto !important; }
-  .recipe-ingredient-row select:nth-child(1), .recipe-ingredient-row select:nth-child(2) { grid-column: 1 / -1; }
-  .recipe-ingredient-row input { grid-column: 1; }
+  .recipe-ingredient-row > select, .recipe-ingredient-name { grid-column: 1 / -1; }
+  .recipe-ingredient-row > input { grid-column: 1; }
 }
