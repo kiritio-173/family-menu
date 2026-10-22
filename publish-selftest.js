@@ -5,6 +5,7 @@ const { PUBLISH_FILES, buildPublishPlan, publishDecision } = require('./publish-
 
 assert.ok(Array.isArray(PUBLISH_FILES), 'publish file list must be exported');
 assert.ok(PUBLISH_FILES.includes('server.js'));
+assert.ok(PUBLISH_FILES.includes('food-presets.json'));
 assert.ok(PUBLISH_FILES.includes('public/app.js'));
 assert.ok(PUBLISH_FILES.includes('public/recipe-ingredient-logic.js'));
 assert.ok(PUBLISH_FILES.includes('public/pantry-logic.js'));

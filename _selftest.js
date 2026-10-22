@@ -181,6 +181,7 @@ async function boot(label, writeData) {
   fs.mkdirSync(path.join(dir, 'data'), { recursive: true });
   fs.copyFileSync(path.join(ROOT, 'server.js'), path.join(dir, 'server.js'));
   fs.copyFileSync(path.join(ROOT, 'package.json'), path.join(dir, 'package.json'));
+  fs.copyFileSync(path.join(ROOT, 'food-presets.json'), path.join(dir, 'food-presets.json'));
   copyDir(path.join(ROOT, 'public'), path.join(dir, 'public'));
   if (writeData) writeData(path.join(dir, 'data'));
   const child = spawn(process.execPath, ['server.js'], {
@@ -376,9 +377,20 @@ async function main() {
   const pre = (await get('/api/ingredient-presets')).body.data;
   eq('13 个分类', pre.categories.length, 13);
   ok('预设数量 > 130', pre.presets.length > 130, pre.presets.length);
+  ok('材料表导入后基础材料超过 420 项', pre.presets.length >= 420, pre.presets.length);
   const chicken = pre.presets.find((p) => p.name === '鸡蛋');
-  eq('鸡蛋 → 蛋类/个/20天', [chicken.category, chicken.unit, chicken.shelfLife], ['蛋类', '个', 20]);
-  eq('鸡蛋保质期已换算成日期', chicken.expireAt, dayOffset(20));
+  eq('鸡蛋 → 蛋类/个/7天保守提醒', [chicken.category, chicken.unit, chicken.shelfLife], ['蛋类', '个', 7]);
+  eq('鸡蛋保质期已换算成保质期区间下限', chicken.expireAt, dayOffset(7));
+  const porkBelly = pre.presets.find((p) => p.name === '五花肉');
+  ok('基础材料包含表格中的猪肉部位', pre.presets.some((p) => p.name === '梅花肉' && p.category === '肉类'));
+  eq('表格未提供的新材料单位保持空值', pre.presets.find((p) => p.name === '梅花肉').unit, '');
+  ok('基础材料保留二级分类、别名和用途', porkBelly.subcategory === '猪肉' && porkBelly.aliases.includes('三层肉') && porkBelly.uses.includes('红烧肉'));
+  eq('材料保质期区间按下限预填并保留原区间', [porkBelly.shelfLife, porkBelly.shelfLifeRange], [1, '1-3天']);
+  ok('同名材料合并为单条并保留多个用途分类', pre.presets.filter((p) => p.name === '淡奶油').length === 1 && pre.presets.find((p) => p.name === '淡奶油').alternateCategories.includes('烘焙原料'));
+  ok('同物异名白糖使用现有标准条目', !pre.presets.some((p) => p.name === '白糖') && pre.presets.find((p) => p.name === '白砂糖').aliases.includes('白糖'));
+  ok('基础材料类别映射到现有库存分类', pre.presets.find((p) => p.name === '香菇（干）').category === '蔬菜' && pre.presets.find((p) => p.name === '低筋面粉').category === '主食粮油');
+  ok('相近但不同的名称不作为自动别名', !pre.presets.find((p) => p.name === '奶油奶酪').aliases.includes('马斯卡彭'));
+  ok('基础材料别名不与其他标准材料冲突', !pre.presets.find((p) => p.name === '牛里脊').aliases.includes('里脊'));
   eq('葱姜蒜默认归调味干货',
     ['大葱', '生姜', '大蒜'].map((name) => (pre.presets.find((p) => p.name === name) || {}).category),
     ['调味干货', '调味干货', '调味干货']);
@@ -1358,6 +1370,8 @@ async function main() {
   ok('菜单和库存入口均提供全局原料创建范围', /quickIngredientScope/.test(appSource) && /fFoodIngredientScope/.test(appSource));
   const quickCategoryPickerSource = appSource.slice(appSource.indexOf('function quickIngredientCategoryPickerHtml'), appSource.indexOf('function recipeIngredients'));
   ok('新增原料分类使用图标文字按钮而非原生下拉', /id="quickIngredientCategory"/.test(quickCategoryPickerSource) && /data-act="pick-quick-ingredient-category"/.test(quickCategoryPickerSource) && /quickIngredientCategoryPickerHtml\(defaultCategory && defaultCategory\.id, defaultScope\)/.test(appSource) && !/<select class="select" id="quickIngredientCategory"/.test(appSource));
+  ok('基础材料快选可按别名搜索并显示原表说明', /p\.aliases\s*\|\|\s*\[\]\)\.some\(\(alias\)\s*=>\s*alias\.includes\(kw\)\)/.test(appSource) && /p\.shelfLifeRange/.test(appSource) && /p\.storage/.test(appSource));
+  ok('材料表未提供单位时清空残留单位并要求手动填写', /\$\('#fFoodUnit'\)\.value = unit \|\| ''/.test(appSource) && /if \(trackingMode === 'quantity' && !unit\) return toast\('请填写计量单位'\)/.test(appSource));
   ok('旧菜谱无原料 ID 时优先使用当前库存分类', /resolveIngredientCategory\([\s\S]{0,220}stockCategory/.test(appSource));
   const pantryLogicSource = fs.readFileSync(path.join(ROOT, 'public', 'pantry-logic.js'), 'utf8');
   ok('计划有无型食材不汇总菜谱用量', /if\s*\(item\.trackingMode\s*===\s*'presence'\)\s*return;/.test(pantryLogicSource));

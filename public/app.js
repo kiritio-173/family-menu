@@ -3806,12 +3806,12 @@ function renderPresetGrid() {
   const cat = catEl ? catEl.value : '';
   const all = (S.presets && S.presets.presets) || [];
   const list = all
-    .filter((p) => (kw ? p.name.indexOf(kw) >= 0 : p.category === cat))
+    .filter((p) => (kw ? p.name.includes(kw) || (p.aliases || []).some((alias) => alias.includes(kw)) : p.category === cat))
     .slice(0, 48);
   box.innerHTML = list.length
     ? list
         .map(
-          (p) => `<button class="preset-opt" data-act="pick-preset"
+          (p) => `<button class="preset-opt" title="${esc([p.categoryPath, p.aliases?.length ? `别名：${p.aliases.join('、')}` : '', p.uses, p.shelfLifeRange ? `保质期范围：${p.shelfLifeRange}` : '', p.storage].filter(Boolean).join(' · '))}" data-act="pick-preset"
             data-name="${esc(p.name)}" data-cat="${esc(p.category)}"
             data-unit="${esc(p.unit)}" data-exp="${esc(p.expireAt)}">${esc(p.name)}</button>`
         )
@@ -3890,7 +3890,7 @@ async function openFoodEditor(item) {
       ${!item && isHouseAdmin(S.householdId) ? `<div class="field"><label class="field-label">原料目录</label><select class="select" id="fFoodIngredientScope"><option value="household">仅本家庭</option><option value="global">全局共享（所有家庭可见）</option></select></div>` : ''}
       <div class="field">
         <label class="field-label">常见食材<span class="field-hint">点一下自动填分类、单位、保质期</span></label>
-        <input class="input" id="fPresetSearch" type="search" placeholder="搜食材名…" autocomplete="off" />
+        <input class="input" id="fPresetSearch" type="search" placeholder="搜食材名或别名…" autocomplete="off" />
         <div class="preset-grid" id="fPresets"></div>
       </div>
       <div class="field">
@@ -7522,7 +7522,7 @@ const ACTIONS = {
       syncFoodCategoryPicker(cat, category && category.id);
       applyFoodCategoryDefaults(cat);
     }
-    if (unit) $('#fFoodUnit').value = unit;
+    $('#fFoodUnit').value = unit || '';
     if (window.PantryLogic.inferTrackingMode({ name, category: cat }) === 'presence') {
       $('#fFoodTracking').dataset.manual = '';
       $('#fFoodTracking').value = 'presence';
@@ -7563,7 +7563,9 @@ const ACTIONS = {
     const id = el.dataset.id;
     const trackingMode = $('#fFoodTracking').value;
     const quantity = Number($('#fFoodQty').value);
+    const unit = $('#fFoodUnit').value.trim();
     if (trackingMode === 'quantity' && (!Number.isFinite(quantity) || quantity < 0)) return toast('库存数量不能小于 0');
+    if (trackingMode === 'quantity' && !unit) return toast('请填写计量单位');
     if (trackingMode === 'quantity' && quantity === 0) {
       if (!id) return toast('数量为 0，无需新增库存条目');
       await api('PUT', `/api/pantry/${id}`, { quantity: 0 });
@@ -7584,13 +7586,13 @@ const ACTIONS = {
         categoryId,
         scope: requestedScope,
         defaultTrackingMode: $('#fFoodTracking').value,
-        defaultUnit: $('#fFoodTracking').value === 'quantity' ? ($('#fFoodUnit').value.trim() || '份') : '',
+        defaultUnit: $('#fFoodTracking').value === 'quantity' ? unit : '',
       });
     } else if (ingredient.scope !== 'global' && (ingredient.categoryId !== $('#fFoodCategoryId').value || ingredient.defaultTrackingMode !== trackingMode)) {
       ingredient = await api('PUT', `/api/ingredients/${encodeURIComponent(ingredient.id)}?householdId=${encodeURIComponent(S.householdId)}`, {
         categoryId: $('#fFoodCategoryId').value,
         defaultTrackingMode: trackingMode,
-        defaultUnit: trackingMode === 'quantity' ? ($('#fFoodUnit').value.trim() || '份') : '',
+        defaultUnit: trackingMode === 'quantity' ? unit : '',
       });
     }
     const body = {
@@ -7604,7 +7606,7 @@ const ACTIONS = {
         : false,
       quantity: trackingMode === 'presence' ? 0 : quantity,
       minQuantity: trackingMode === 'presence' ? 0 : Number($('#fFoodMin').value) || 0,
-      unit: trackingMode === 'presence' ? '' : ($('#fFoodUnit').value.trim() || '份'),
+      unit: trackingMode === 'presence' ? '' : unit,
       expireAt: $('#fFoodExp').value || '',
       note: $('#fFoodNote').value.trim(),
     };

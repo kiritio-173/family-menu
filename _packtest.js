@@ -41,6 +41,7 @@ async function main() {
   const isEmpty = !fs.existsSync(path.join(APP, 'data', 'dishes.json'));
 
   ok('包内有自带 runtime/node.exe', fs.existsSync(NODE));
+  ok('基础材料数据文件随便携版分发', fs.existsSync(path.join(APP, 'food-presets.json')));
   ok('便携版包含库存与计划共享逻辑', fs.existsSync(path.join(APP, 'public', 'pantry-logic.js')));
   const bundledServer = fs.readFileSync(path.join(APP, 'server.js'), 'utf8');
   const bundledApp = fs.readFileSync(path.join(APP, 'public', 'app.js'), 'utf8');
@@ -126,6 +127,7 @@ async function main() {
 
   const pre = (await api('GET', '/api/ingredient-presets')).body.data;
   ok('食材预设在包里也可用', pre.presets.length >= 148, pre.presets.length);
+  ok('基础材料包包含工作簿中的部位和别名', pre.presets.some((p) => p.name === '梅花肉' && p.aliases.includes('颈背肉')));
 
   console.log('\n跑一遍多家庭 + 库存 …');
   // 打进去的家庭有几个取决于本机当时的数据（写死 1 的话，用户多建一个家庭就误报）

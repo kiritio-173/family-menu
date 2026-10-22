@@ -1,0 +1,3332 @@
+[
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "五花肉",
+    "uses": "红烧肉、回锅肉、炖煮、烤肉",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "三层肉、肋条肉"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "梅花肉",
+    "uses": "烤肉、叉烧、火锅",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "颈背肉、梅头肉"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "猪里脊",
+    "uses": "糖醋里脊、鱼香肉丝、滑炒",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "里脊、通脊、扁担肉"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "猪颈肉",
+    "uses": "烧烤、叉烧、香煎",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "松板肉、雪花肉、猪颈尖"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "猪肋排/排骨",
+    "uses": "糖醋排骨、清炖排骨、红烧",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "肋排、仔排、肋条"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "猪蹄",
+    "uses": "卤猪蹄、炖汤（猪蹄黄豆汤）",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "猪脚、猪手"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "肘子",
+    "uses": "酱肘子、红烧肘子",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "蹄髈、膀蹄"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "前腿肉",
+    "uses": "剁馅（饺子/丸子）、炒菜",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "前肘、夹心肉"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "后腿肉",
+    "uses": "卤肉、炒菜、炖汤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "后肘、臀尖肉"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "猪肚",
+    "uses": "爆炒、煲汤（猪肚鸡汤）",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "猪胃"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "猪肝",
+    "uses": "爆炒猪肝、猪肝汤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "肝尖、猪肝片"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "猪腰",
+    "uses": "爆炒腰花、烧烤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "猪腰子、腰花"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "猪舌",
+    "uses": "卤味、凉拌",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "口条、猪口条"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "猪耳",
+    "uses": "凉拌、卤味",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "顺风"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "棒骨/筒骨",
+    "uses": "熬高汤、骨头汤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "筒骨、腿骨、大骨"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "猪肉",
+    "name": "猪血/猪红",
+    "uses": "涮锅、猪血汤、毛血旺",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "血豆腐、血旺"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "牛肉",
+    "name": "牛里脊",
+    "uses": "滑炒牛肉、黑椒牛柳、牛排",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "菲力、牛柳、里脊"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "牛肉",
+    "name": "牛腩",
+    "uses": "番茄牛腩、红烧牛腩、炖煮",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "牛肋腩、牛腹肉"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "牛肉",
+    "name": "牛腱子",
+    "uses": "酱牛肉、卤牛肉、凉拌",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "牛腱、腱子肉"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "牛肉",
+    "name": "肥牛卷",
+    "uses": "涮火锅、金针菇肥牛卷",
+    "shelfLifeRange": "1-6个月",
+    "storage": "冷冻-18℃以下密封保存，随取随用，避免反复解冻",
+    "aliasesRaw": "肥牛、牛肉卷"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "牛肉",
+    "name": "牛排（西冷/菲力/眼肉）",
+    "uses": "煎烤、西餐主菜",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "牛扒"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "牛肉",
+    "name": "牛肋排",
+    "uses": "烤牛肋排、炖煮",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "牛排骨"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "牛肉",
+    "name": "牛尾",
+    "uses": "炖汤、牛尾火锅",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "牛尾巴"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "牛肉",
+    "name": "牛肚",
+    "uses": "爆炒、毛肚火锅",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "毛肚、百叶"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "牛肉",
+    "name": "牛舌",
+    "uses": "烧烤、香煎",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "口条、牛口条"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "牛肉",
+    "name": "牛筋",
+    "uses": "卤味、炖煮、凉拌",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "牛蹄筋"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "牛肉",
+    "name": "牛骨",
+    "uses": "熬牛骨高汤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "牛棒骨"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "牛肉",
+    "name": "牛肉馅",
+    "uses": "牛肉饼、饺子、意面酱",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "牛肉末、绞牛肉、牛肉糜"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "羊肉",
+    "name": "羊腿肉",
+    "uses": "炖羊肉、烤羊腿、手把肉",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "羊后腿、羊腿"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "羊肉",
+    "name": "羊排",
+    "uses": "烤羊排、煎羊排",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "羊肋排"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "羊肉",
+    "name": "羊蝎子",
+    "uses": "羊蝎子火锅、炖锅",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "羊脊骨、羊大梁"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "羊肉",
+    "name": "羊肉卷",
+    "uses": "涮火锅、葱爆羊肉",
+    "shelfLifeRange": "1-6个月",
+    "storage": "冷冻-18℃以下密封保存，随取随用，避免反复解冻",
+    "aliasesRaw": "涮羊肉片、羊肉片"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "羊肉",
+    "name": "羊里脊",
+    "uses": "爆炒、烧烤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "羊柳"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "羊肉",
+    "name": "羊肚",
+    "uses": "爆炒、羊杂汤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "羊胃"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "鸡肉",
+    "name": "鸡胸肉",
+    "uses": "鸡胸炒菜、沙拉、减脂餐、手撕鸡",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "鸡胸、鸡脯"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "鸡肉",
+    "name": "鸡腿肉",
+    "uses": "红烧鸡腿、炸鸡、照烧鸡、咖喱鸡",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "琵琶腿"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "鸡肉",
+    "name": "鸡翅/翅中",
+    "uses": "可乐鸡翅、烤翅、红烧",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "鸡中翅、全翅"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "鸡肉",
+    "name": "鸡翅根",
+    "uses": "红烧、炸、烤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "翅根、小鸡腿"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "鸡肉",
+    "name": "鸡爪",
+    "uses": "卤鸡爪、泡椒凤爪、虎皮凤爪",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "凤爪、鸡掌"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "鸡肉",
+    "name": "鸡胗",
+    "uses": "爆炒、烧烤、凉拌",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "鸡肫、鸡菌"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "鸡肉",
+    "name": "鸡心",
+    "uses": "烧烤、爆炒",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": ""
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "鸡肉",
+    "name": "整鸡/三黄鸡",
+    "uses": "白切鸡、炖鸡汤、烧鸡",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "三黄鸡、土鸡、走地鸡"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "鸡肉",
+    "name": "鸡架",
+    "uses": "熬汤、炸鸡架",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "鸡骨架、鸡壳"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "鸡肉",
+    "name": "鸡腿（琵琶腿）",
+    "uses": "卤、炸、炖",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "琵琶腿、棒棒腿"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "鸭肉",
+    "name": "鸭胸",
+    "uses": "香煎鸭胸、烟熏鸭胸",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "鸭胸肉"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "鸭肉",
+    "name": "鸭腿",
+    "uses": "烧鸭、卤鸭腿",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "鸭腿肉"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "鸭肉",
+    "name": "鸭翅/鸭脖",
+    "uses": "卤味、鸭货",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "鸭颈、鸭货"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "鸭肉",
+    "name": "鸭胗",
+    "uses": "爆炒、凉拌",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "鸭肫、鸭珍"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "鸭肉",
+    "name": "老鸭",
+    "uses": "老鸭煲、炖汤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "水鸭、老鸭婆"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "其他禽肉",
+    "name": "鸽子",
+    "uses": "炖汤（滋补）、清炖",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "乳鸽、肉鸽"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "其他禽肉",
+    "name": "鹅",
+    "uses": "烧鹅、卤鹅",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "鹅肉"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "其他禽肉",
+    "name": "鹌鹑",
+    "uses": "炖汤、卤鹌鹑",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；吃不完可切分冷冻-18℃，能存1-3个月",
+    "aliasesRaw": "鹌鹑鸟"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "肉制品/加工",
+    "name": "腊肠/广式腊肠",
+    "uses": "煲仔饭、炒菜、蒸",
+    "shelfLifeRange": "1-4周",
+    "storage": "阴凉通风或冷藏密封；腌制制品可保存较久，注意防霉",
+    "aliasesRaw": "腊肠、香肠（广式）"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "肉制品/加工",
+    "name": "腊肉",
+    "uses": "炒蒜苗、蒸、炖",
+    "shelfLifeRange": "1-4周",
+    "storage": "阴凉通风或冷藏密封；腌制制品可保存较久，注意防霉",
+    "aliasesRaw": "腌肉、腊味"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "肉制品/加工",
+    "name": "火腿",
+    "uses": "三明治、炒饭、冷盘",
+    "shelfLifeRange": "1-4周",
+    "storage": "阴凉通风或冷藏密封；腌制制品可保存较久，注意防霉",
+    "aliasesRaw": "金华火腿、火腿肉"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "肉制品/加工",
+    "name": "培根",
+    "uses": "早餐、煎、三明治",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封，开封后尽快食用；未开封按包装保质期",
+    "aliasesRaw": "烟肉、熏肉"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "肉制品/加工",
+    "name": "午餐肉",
+    "uses": "涮锅、煎、三明治",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封，开封后尽快食用；未开封按包装保质期",
+    "aliasesRaw": "午餐肉罐头"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "肉制品/加工",
+    "name": "香肠/热狗",
+    "uses": "烤、煎、早餐",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封，开封后尽快食用；未开封按包装保质期",
+    "aliasesRaw": "红肠、热狗肠"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "肉制品/加工",
+    "name": "肉丸",
+    "uses": "汤、火锅、丸子汤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；或冷冻-18℃存1-3个月",
+    "aliasesRaw": "丸子、肉圆"
+  },
+  {
+    "sourceCategory": "肉类",
+    "subcategory": "肉制品/加工",
+    "name": "肉馅",
+    "uses": "饺子、丸子、馄饨",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，2-3天内食用；或冷冻-18℃存1-3个月",
+    "aliasesRaw": "绞肉、肉糜、肉末"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "淡水鱼",
+    "name": "草鱼",
+    "uses": "水煮鱼、红烧、酸菜鱼",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "鲩鱼、草鲩、皖鱼"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "淡水鱼",
+    "name": "鲫鱼",
+    "uses": "鲫鱼豆腐汤、香煎、红烧",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "河鲫、鲫瓜子"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "淡水鱼",
+    "name": "鲈鱼",
+    "uses": "清蒸鲈鱼",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "花鲈、寨花、鲈子鱼"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "淡水鱼",
+    "name": "武昌鱼",
+    "uses": "清蒸、红烧",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "团头鲂、鳊鱼"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "淡水鱼",
+    "name": "黄骨鱼/黄辣丁",
+    "uses": "炖汤、酸汤鱼",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "黄辣丁、黄颡鱼"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "淡水鱼",
+    "name": "黑鱼",
+    "uses": "酸菜鱼、水煮鱼",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "乌鱼、财鱼、生鱼"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "海鱼",
+    "name": "带鱼",
+    "uses": "干炸带鱼、红烧带鱼",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "刀鱼、裙带鱼"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "海鱼",
+    "name": "黄花鱼",
+    "uses": "清蒸、红烧、家常焖",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "黄鱼、大黄鱼/小黄鱼"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "海鱼",
+    "name": "三文鱼",
+    "uses": "刺身、香煎、烟熏",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "鲑鱼、大马哈鱼"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "海鱼",
+    "name": "鳕鱼",
+    "uses": "清蒸、香煎、宝宝辅食",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "真鳕、银鳕鱼、鳕鱼柳"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "海鱼",
+    "name": "龙利鱼",
+    "uses": "番茄鱼、清蒸、香煎",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "舌鳎、踏板鱼（常被混称巴沙鱼）"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "海鱼",
+    "name": "鲅鱼",
+    "uses": "鲅鱼饺子、红烧",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "马鲛鱼、燕鲅"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "海鱼",
+    "name": "秋刀鱼",
+    "uses": "盐烤、香煎",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "竹刀鱼"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "海鱼",
+    "name": "金枪鱼",
+    "uses": "刺身、沙拉、罐头",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "吞拿鱼、鲔鱼"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "海鱼",
+    "name": "多宝鱼",
+    "uses": "清蒸、红烧",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "大菱鲆、比目鱼"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "海鱼",
+    "name": "鲳鱼",
+    "uses": "清蒸、香煎",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "平鱼、镜鱼"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "虾蟹类",
+    "name": "基围虾",
+    "uses": "白灼、油焖大虾、蒜蓉蒸",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "沙虾、麻虾"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "虾蟹类",
+    "name": "对虾",
+    "uses": "油焖大虾、白灼、开背蒸",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "明虾、大虾、斑节虾"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "虾蟹类",
+    "name": "河虾",
+    "uses": "清炒、油爆",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "青虾、米虾"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "虾蟹类",
+    "name": "小龙虾",
+    "uses": "麻辣/蒜蓉小龙虾",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "克氏原螯虾、淡水小龙虾"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "虾蟹类",
+    "name": "大闸蟹",
+    "uses": "清蒸、香辣蟹",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "河蟹、中华绒螯蟹、毛蟹"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "虾蟹类",
+    "name": "梭子蟹",
+    "uses": "清蒸、炒年糕",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "白蟹、三点蟹、飞蟹"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "虾蟹类",
+    "name": "青蟹",
+    "uses": "姜葱蟹、清蒸",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "锯缘青蟹、蟳"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "虾蟹类",
+    "name": "皮皮虾",
+    "uses": "椒盐皮皮虾、清蒸",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "濑尿虾、虾蛄、琵琶虾、虾爬子"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "虾蟹类",
+    "name": "虾仁",
+    "uses": "炒虾仁、虾仁滑蛋、汤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "虾肉、虾米（干虾仁）"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "贝类",
+    "name": "生蚝",
+    "uses": "蒜蓉烤生蚝、清蒸",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "牡蛎、海蛎子、蛎黄"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "贝类",
+    "name": "扇贝",
+    "uses": "蒜蓉粉丝蒸扇贝",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "帆立贝、带子"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "贝类",
+    "name": "花甲/蛤蜊",
+    "uses": "辣炒花甲、花甲粉、汤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "花蛤、蛤蜊、文蛤"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "贝类",
+    "name": "蛏子",
+    "uses": "爆炒蛏子、葱油蛏子",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "竹蛏、蛏"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "贝类",
+    "name": "鲍鱼",
+    "uses": "红烧鲍鱼、蒜蓉蒸、炖汤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "鲍、鲍仔"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "贝类",
+    "name": "海螺",
+    "uses": "白灼、辣炒",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "响螺、海螺肉"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "贝类",
+    "name": "青口/贻贝",
+    "uses": "白葡萄酒煮、蒜蓉",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "贻贝、淡菜、海虹"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "贝类",
+    "name": "田螺",
+    "uses": "辣炒田螺、嗦螺",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "螺蛳"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "头足类",
+    "name": "鱿鱼",
+    "uses": "铁板鱿鱼、爆炒、烤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "枪乌贼、柔鱼"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "头足类",
+    "name": "章鱼",
+    "uses": "章鱼小丸子、刺身、白灼",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "八爪鱼、八带鱼、望潮"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "头足类",
+    "name": "墨鱼",
+    "uses": "爆炒墨鱼、墨鱼汤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天/次日食用；冷冻-18℃可存1-3个月",
+    "aliasesRaw": "乌贼、花枝、墨斗鱼"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "其他水产",
+    "name": "海参",
+    "uses": "葱烧海参、海参汤",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "干货密封干燥阴凉避光；泡发后冷藏0-4℃、2-3天内食用",
+    "aliasesRaw": "刺参"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "其他水产",
+    "name": "虾滑",
+    "uses": "火锅、虾滑汤",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封；也可冷冻-18℃保存，随取随用",
+    "aliasesRaw": "虾胶、虾泥"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "其他水产",
+    "name": "鱼丸",
+    "uses": "汤、火锅、煮面",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封；也可冷冻-18℃保存，随取随用",
+    "aliasesRaw": "鱼圆、鱼蛋"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "其他水产",
+    "name": "蟹棒",
+    "uses": "火锅、沙拉、寿司",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封；也可冷冻-18℃保存，随取随用",
+    "aliasesRaw": "蟹肉棒、蟹柳、人造蟹肉"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "其他水产",
+    "name": "海带",
+    "uses": "凉拌、炖汤、卤",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "昆布、海带菜"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "其他水产",
+    "name": "紫菜",
+    "uses": "紫菜蛋花汤、紫菜包饭",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "海苔（紫菜制品）"
+  },
+  {
+    "sourceCategory": "水产海鲜",
+    "subcategory": "其他水产",
+    "name": "鱼豆腐",
+    "uses": "火锅、烧烤",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封；也可冷冻-18℃保存，随取随用",
+    "aliasesRaw": "鱼豆腐块"
+  },
+  {
+    "sourceCategory": "蛋类",
+    "subcategory": "禽蛋",
+    "name": "鸡蛋",
+    "uses": "炒、煮、煎、蒸蛋、烘焙",
+    "shelfLifeRange": "1-4周",
+    "storage": "冷藏0-4℃，大头（气室）朝上，可存数周",
+    "aliasesRaw": ""
+  },
+  {
+    "sourceCategory": "蛋类",
+    "subcategory": "禽蛋",
+    "name": "鸭蛋",
+    "uses": "咸鸭蛋、炒、腌",
+    "shelfLifeRange": "1-4周",
+    "storage": "冷藏0-4℃，大头（气室）朝上，可存数周",
+    "aliasesRaw": ""
+  },
+  {
+    "sourceCategory": "蛋类",
+    "subcategory": "禽蛋",
+    "name": "鹌鹑蛋",
+    "uses": "卤、煮、串",
+    "shelfLifeRange": "1-4周",
+    "storage": "冷藏0-4℃，大头（气室）朝上，可存数周",
+    "aliasesRaw": "鹑蛋、鹌鹑卵"
+  },
+  {
+    "sourceCategory": "蛋类",
+    "subcategory": "禽蛋",
+    "name": "皮蛋",
+    "uses": "皮蛋豆腐、凉拌、皮蛋瘦肉粥",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉或冷藏密封；未剥壳可保存较久",
+    "aliasesRaw": "松花蛋、变蛋、彩蛋"
+  },
+  {
+    "sourceCategory": "蛋类",
+    "subcategory": "禽蛋",
+    "name": "咸鸭蛋",
+    "uses": "配粥、蛋黄粽子、月饼",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉或冷藏密封；未剥壳可保存较久",
+    "aliasesRaw": "咸蛋、盐蛋"
+  },
+  {
+    "sourceCategory": "蛋类",
+    "subcategory": "蛋制品",
+    "name": "蛋清/蛋白",
+    "uses": "烘焙、蛋清打发",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，尽快食用",
+    "aliasesRaw": "鸡蛋白、蛋清"
+  },
+  {
+    "sourceCategory": "蛋类",
+    "subcategory": "蛋制品",
+    "name": "蛋黄",
+    "uses": "烘焙、酱料",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，尽快食用",
+    "aliasesRaw": "鸡蛋黄、蛋黄液"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "叶菜类",
+    "name": "菠菜",
+    "uses": "清炒、凉拌、菠菜汤、上汤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "波斯菜、赤根菜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "叶菜类",
+    "name": "油菜/上海青",
+    "uses": "清炒、蚝油、焯水",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "上海青、青菜、油白菜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "叶菜类",
+    "name": "生菜",
+    "uses": "清炒、沙拉、包菜卷",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "叶用莴苣、莴苣菜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "叶菜类",
+    "name": "小白菜",
+    "uses": "清炒、煮面、汤",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "青菜、鸡毛菜、油白菜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "叶菜类",
+    "name": "空心菜",
+    "uses": "蒜蓉空心菜、腐乳炒",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "蕹菜、通菜、竹叶菜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "叶菜类",
+    "name": "茼蒿",
+    "uses": "清炒、火锅、涮菜",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "蓬蒿、皇帝菜、蒿菜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "叶菜类",
+    "name": "油麦菜",
+    "uses": "清炒、蚝油",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "苦菜、油麦"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "叶菜类",
+    "name": "苋菜",
+    "uses": "蒜蓉苋菜、上汤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "红苋菜、米苋"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "叶菜类",
+    "name": "娃娃菜",
+    "uses": "上汤娃娃菜、火锅、煮汤",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "迷你白菜、奶白菜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "叶菜类",
+    "name": "大白菜",
+    "uses": "炖菜、酸菜、炒、涮锅",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "白菜、黄芽白、结球白菜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "叶菜类",
+    "name": "韭菜",
+    "uses": "韭菜炒蛋、饺子馅、烧烤",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "起阳草、懒人菜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "叶菜类",
+    "name": "芹菜",
+    "uses": "芹菜炒肉、凉拌、芹菜汁",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "旱芹、药芹"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "根茎类",
+    "name": "土豆",
+    "uses": "炒土豆丝、炖、炸薯条、蒸",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉通风处，避光防发芽/防潮",
+    "aliasesRaw": "马铃薯、洋芋、山药蛋、地蛋"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "根茎类",
+    "name": "红薯",
+    "uses": "蒸、烤、煮粥、拔丝",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉通风处，避光防发芽/防潮",
+    "aliasesRaw": "番薯、地瓜、红苕、甘薯"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "根茎类",
+    "name": "山药",
+    "uses": "清炒、炖汤、蒸、蓝莓山药",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉通风处，避光防发芽/防潮",
+    "aliasesRaw": "淮山、怀山药、薯蓣"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "根茎类",
+    "name": "芋头",
+    "uses": "蒸、炖、芋泥、烧肉",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉通风处，避光防发芽/防潮",
+    "aliasesRaw": "芋艿、香芋、芋奶"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "根茎类",
+    "name": "胡萝卜",
+    "uses": "炒、炖、沙拉、榨汁",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉通风处，避光防发芽/防潮",
+    "aliasesRaw": "红萝卜、黄萝卜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "根茎类",
+    "name": "白萝卜",
+    "uses": "炖汤、凉拌、萝卜丝",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉通风处，避光防发芽/防潮",
+    "aliasesRaw": "萝卜、菜头"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "根茎类",
+    "name": "莲藕",
+    "uses": "凉拌、炖排骨、藕夹、炒",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉通风处，避光防发芽/防潮",
+    "aliasesRaw": "藕、莲菜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "根茎类",
+    "name": "莴笋",
+    "uses": "凉拌、清炒、腌",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "莴苣、青笋、莴笋头"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "根茎类",
+    "name": "竹笋",
+    "uses": "油焖笋、炖、凉拌",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "笋、冬笋/春笋、竹芽"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "根茎类",
+    "name": "洋葱",
+    "uses": "炒菜、洋葱圈、凉拌、汤底",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉通风处，避光防发芽/防潮",
+    "aliasesRaw": "圆葱、葱头、玉葱"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "根茎类",
+    "name": "蒜薹",
+    "uses": "蒜薹炒肉、凉拌",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "蒜苔、蒜毫"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "根茎类",
+    "name": "香椿",
+    "uses": "香椿炒蛋、凉拌",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉通风处，避光防发芽/防潮",
+    "aliasesRaw": "椿芽、香椿芽、椿"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "瓜果茄果类",
+    "name": "黄瓜",
+    "uses": "凉拌、拍黄瓜、炒、腌",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "青瓜、胡瓜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "瓜果茄果类",
+    "name": "冬瓜",
+    "uses": "冬瓜汤、冬瓜排骨、红烧",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉或冷藏，切后冷藏密封",
+    "aliasesRaw": "白瓜、白冬瓜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "瓜果茄果类",
+    "name": "南瓜",
+    "uses": "蒸、煮粥、南瓜饼",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉或冷藏，切后冷藏密封",
+    "aliasesRaw": "倭瓜、金瓜、北瓜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "瓜果茄果类",
+    "name": "丝瓜",
+    "uses": "丝瓜蛋汤、清炒",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "胜瓜、天罗"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "瓜果茄果类",
+    "name": "苦瓜",
+    "uses": "苦瓜炒蛋、凉拌、酿苦瓜",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "凉瓜、癞瓜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "瓜果茄果类",
+    "name": "西葫芦",
+    "uses": "清炒、糊塌子、炒蛋",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "角瓜、云南小瓜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "瓜果茄果类",
+    "name": "茄子",
+    "uses": "红烧茄子、鱼香茄子、烤",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "落苏、矮瓜、昆仑瓜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "瓜果茄果类",
+    "name": "番茄",
+    "uses": "番茄炒蛋、番茄汤、凉拌",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温阴凉或冷藏，避免挤压",
+    "aliasesRaw": "西红柿、洋柿子、番柿"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "瓜果茄果类",
+    "name": "辣椒（青椒/尖椒）",
+    "uses": "虎皮尖椒、青椒炒肉",
+    "shelfLifeRange": "1-4周",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "尖椒、青椒、大椒"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "瓜果茄果类",
+    "name": "甜椒/彩椒",
+    "uses": "清炒、沙拉、配菜",
+    "shelfLifeRange": "1-4周",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "柿子椒、灯笼椒、圆椒"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "瓜果茄果类",
+    "name": "秋葵",
+    "uses": "凉拌、白灼、炒",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "羊角豆、黄秋葵、咖啡黄葵"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "瓜果茄果类",
+    "name": "芦笋",
+    "uses": "白灼、清炒、培根卷",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "石刁柏、龙须菜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "瓜果茄果类",
+    "name": "玉米",
+    "uses": "煮、烤、炖汤、炒",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "苞米、棒子、玉蜀黍、珍珠米"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "瓜果茄果类",
+    "name": "荷兰豆",
+    "uses": "清炒、蒜蓉、腊肉炒",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "荷仁豆、剪豆、青荚豌豆"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "花菜类",
+    "name": "西兰花",
+    "uses": "白灼、清炒、蒜蓉、沙拉",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "绿菜花、青花菜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "花菜类",
+    "name": "菜花/花椰菜",
+    "uses": "干煸、番茄炒、清炒",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "花菜、白花菜、花椰菜"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "菌菇类",
+    "name": "香菇",
+    "uses": "香菇炒肉、炖鸡、蒸",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃，保持干燥，尽快食用",
+    "aliasesRaw": "冬菇、香蕈、花菇"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "菌菇类",
+    "name": "口蘑/白蘑菇",
+    "uses": "炒、煎、汤",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃，保持干燥，尽快食用",
+    "aliasesRaw": "口菇、白蘑菇、蒙古口蘑"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "菌菇类",
+    "name": "金针菇",
+    "uses": "火锅、蒜蓉、凉拌、煮汤",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃，保持干燥，尽快食用",
+    "aliasesRaw": "益智菇、金菇"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "菌菇类",
+    "name": "杏鲍菇",
+    "uses": "手撕杏鲍菇、煎、炒",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃，保持干燥，尽快食用",
+    "aliasesRaw": "刺芹侧耳、雪茸"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "菌菇类",
+    "name": "平菇",
+    "uses": "炒、煮汤、火锅",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃，保持干燥，尽快食用",
+    "aliasesRaw": "侧耳、蚝菇"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "菌菇类",
+    "name": "茶树菇",
+    "uses": "炖汤、干锅",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃，保持干燥，尽快食用",
+    "aliasesRaw": "柱状田头菇"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "菌菇类",
+    "name": "白玉菇",
+    "uses": "汤、炒、火锅",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃，保持干燥，尽快食用",
+    "aliasesRaw": "白灵菇、玉蕈"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "菌菇类",
+    "name": "蟹味菇",
+    "uses": "炒、煮汤、火锅",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃，保持干燥，尽快食用",
+    "aliasesRaw": "玉蕈、真姬菇"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "菌菇类",
+    "name": "木耳（鲜/水发）",
+    "uses": "凉拌、炒、炖汤",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃；泡发后当天食用，谨防变质",
+    "aliasesRaw": "黑木耳、云耳"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "菌菇类",
+    "name": "银耳",
+    "uses": "银耳羹、甜品",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "白木耳、雪耳"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "豆类/豆荚",
+    "name": "四季豆",
+    "uses": "干煸四季豆、炒肉",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "芸豆、菜豆、刀豆、架豆"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "豆类/豆荚",
+    "name": "豇豆/长豆角",
+    "uses": "炒、凉拌、腌酸豆角",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "长豆角、豆角、带豆"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "豆类/豆荚",
+    "name": "豌豆",
+    "uses": "炒、煮粥、配菜",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "青豆、荷兰豆"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "豆类/豆荚",
+    "name": "毛豆",
+    "uses": "水煮毛豆、凉拌",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "菜用大豆、枝豆、青豆"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "豆芽类",
+    "name": "黄豆芽",
+    "uses": "炒、炖汤、火锅",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "大豆芽、豆芽"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "豆芽类",
+    "name": "绿豆芽",
+    "uses": "凉拌、清炒、火锅",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "银芽、豆芽"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "辛香配料",
+    "name": "大葱",
+    "uses": "爆香、葱爆菜、炖汤",
+    "shelfLifeRange": "1-4周",
+    "storage": "阴凉通风或冷藏，防烂叶",
+    "aliasesRaw": "青葱、葱"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "辛香配料",
+    "name": "小葱/香葱",
+    "uses": "调味、点缀、煎饼",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "香葱、青葱、葱"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "辛香配料",
+    "name": "生姜",
+    "uses": "去腥、爆香、姜茶",
+    "shelfLifeRange": "1-4周",
+    "storage": "阴凉通风或冷藏，防发芽/防潮",
+    "aliasesRaw": "姜、姜块"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "辛香配料",
+    "name": "大蒜",
+    "uses": "爆香、蒜蓉、调味",
+    "shelfLifeRange": "1-4周",
+    "storage": "阴凉通风或冷藏，防发芽/防潮",
+    "aliasesRaw": "蒜、蒜头、大蒜头"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "辛香配料",
+    "name": "蒜苗/青蒜",
+    "uses": "回锅肉、炒、蘸料",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "青蒜、蒜薹（歧义）"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "辛香配料",
+    "name": "香菜",
+    "uses": "凉拌、汤、火锅蘸料",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封保鲜，尽快食用",
+    "aliasesRaw": "芫荽、胡荽、香荽"
+  },
+  {
+    "sourceCategory": "蔬菜",
+    "subcategory": "辛香配料",
+    "name": "小米辣",
+    "uses": "辣味调味、凉拌、剁椒",
+    "shelfLifeRange": "1-4周",
+    "storage": "阴凉通风或冷藏，防发芽/防潮",
+    "aliasesRaw": "指天椒、朝天椒"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "日常水果",
+    "name": "苹果",
+    "uses": "生食、水果沙拉、派",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉或冷藏，可放较久",
+    "aliasesRaw": ""
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "日常水果",
+    "name": "香蕉",
+    "uses": "生食、香蕉奶昔、烘焙",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温或冷藏，尽快食用",
+    "aliasesRaw": ""
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "日常水果",
+    "name": "橙子",
+    "uses": "生食、榨汁、果酱",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉或冷藏，可放较久",
+    "aliasesRaw": "甜橙、广柑、橙"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "日常水果",
+    "name": "梨",
+    "uses": "生食、冰糖雪梨、榨汁",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉或冷藏，可放较久",
+    "aliasesRaw": "梨子、雪梨、沙梨"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "日常水果",
+    "name": "葡萄",
+    "uses": "生食、沙拉、酿酒",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温或冷藏，尽快食用",
+    "aliasesRaw": "提子、蒲桃"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "日常水果",
+    "name": "西瓜",
+    "uses": "生食、榨汁、凉拌",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温或冷藏，尽快食用",
+    "aliasesRaw": ""
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "日常水果",
+    "name": "草莓",
+    "uses": "生食、草莓酱、甜点",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温或冷藏，尽快食用",
+    "aliasesRaw": ""
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "日常水果",
+    "name": "蓝莓",
+    "uses": "生食、酸奶、烘焙",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温或冷藏，尽快食用",
+    "aliasesRaw": ""
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "日常水果",
+    "name": "桃子",
+    "uses": "生食、糖水、果酱",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温或冷藏，尽快食用",
+    "aliasesRaw": "桃、水蜜桃"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "日常水果",
+    "name": "橘子",
+    "uses": "生食、榨汁、罐头",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉或冷藏，可放较久",
+    "aliasesRaw": "桔子、柑橘、蜜橘"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "日常水果",
+    "name": "柚子",
+    "uses": "生食、蜂蜜柚子茶",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉或冷藏，可放较久",
+    "aliasesRaw": "文旦、香泡"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "日常水果",
+    "name": "柠檬",
+    "uses": "泡水、凉拌、去腥、柠檬汁",
+    "shelfLifeRange": "1-4周",
+    "storage": "常温阴凉或冷藏，可放较久",
+    "aliasesRaw": "柠果、洋柠檬"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "日常水果",
+    "name": "猕猴桃",
+    "uses": "生食、沙拉、榨汁",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温或冷藏，尽快食用",
+    "aliasesRaw": "奇异果"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "日常水果",
+    "name": "芒果",
+    "uses": "生食、芒果西米露、沙拉",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温或冷藏，尽快食用",
+    "aliasesRaw": "杧果、檬果、台芒"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "热带水果",
+    "name": "菠萝",
+    "uses": "生食、菠萝炒饭、甜品",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温催熟或冷藏；榴莲/木瓜等尽快食用",
+    "aliasesRaw": "凤梨、黄梨"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "热带水果",
+    "name": "火龙果",
+    "uses": "生食、沙拉、思慕雪",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温催熟或冷藏；榴莲/木瓜等尽快食用",
+    "aliasesRaw": "红龙果、青龙果、仙蜜果"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "热带水果",
+    "name": "榴莲",
+    "uses": "生食、榴莲披萨、甜品",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温催熟或冷藏；榴莲/木瓜等尽快食用",
+    "aliasesRaw": "榴梿"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "热带水果",
+    "name": "椰子",
+    "uses": "椰汁、椰肉、甜品",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温催熟或冷藏；榴莲/木瓜等尽快食用",
+    "aliasesRaw": "椰青（嫩果）、椰肉"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "热带水果",
+    "name": "荔枝",
+    "uses": "生食、糖水",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温催熟或冷藏；榴莲/木瓜等尽快食用",
+    "aliasesRaw": ""
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "热带水果",
+    "name": "龙眼",
+    "uses": "生食、桂圆茶、甜品",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温催熟或冷藏；榴莲/木瓜等尽快食用",
+    "aliasesRaw": "桂圆（干品名）"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "热带水果",
+    "name": "木瓜",
+    "uses": "生食、木瓜炖奶",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温催熟或冷藏；榴莲/木瓜等尽快食用",
+    "aliasesRaw": "番木瓜、万寿果、青木瓜"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "热带水果",
+    "name": "百香果",
+    "uses": "泡水、饮品、凉拌",
+    "shelfLifeRange": "4-7天",
+    "storage": "常温催熟或冷藏；榴莲/木瓜等尽快食用",
+    "aliasesRaw": "鸡蛋果、热情果、西番莲"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "坚果/干果",
+    "name": "核桃",
+    "uses": "零食、烘焙、拌菜",
+    "shelfLifeRange": "6-12个月",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮防虫",
+    "aliasesRaw": "胡桃、核桃仁"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "坚果/干果",
+    "name": "杏仁",
+    "uses": "零食、烘焙、牛奶",
+    "shelfLifeRange": "6-12个月",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮防虫",
+    "aliasesRaw": "甜杏仁、扁桃仁"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "坚果/干果",
+    "name": "腰果",
+    "uses": "零食、炒菜、烘焙",
+    "shelfLifeRange": "6-12个月",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮防虫",
+    "aliasesRaw": "腰果仁"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "坚果/干果",
+    "name": "开心果",
+    "uses": "零食、烘焙",
+    "shelfLifeRange": "6-12个月",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮防虫",
+    "aliasesRaw": "阿月浑子"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "坚果/干果",
+    "name": "花生",
+    "uses": "水煮、炒、炖汤、零食",
+    "shelfLifeRange": "6-12个月",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮防虫",
+    "aliasesRaw": "落花生、长生果、地豆"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "坚果/干果",
+    "name": "瓜子",
+    "uses": "零食、炒货",
+    "shelfLifeRange": "6-12个月",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮防虫",
+    "aliasesRaw": "葵花子、瓜子仁"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "坚果/干果",
+    "name": "板栗",
+    "uses": "糖炒栗子、烧肉、炖鸡",
+    "shelfLifeRange": "6-12个月",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮防虫",
+    "aliasesRaw": "栗子、毛栗、锥栗"
+  },
+  {
+    "sourceCategory": "水果",
+    "subcategory": "坚果/干果",
+    "name": "巴旦木",
+    "uses": "零食、烘焙、牛奶",
+    "shelfLifeRange": "6-12个月",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮防虫",
+    "aliasesRaw": "扁桃仁、美国大杏仁"
+  },
+  {
+    "sourceCategory": "豆制品",
+    "subcategory": "豆腐类",
+    "name": "嫩豆腐/内酯豆腐",
+    "uses": "麻婆豆腐、汤、凉拌",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃清水浸泡或密封，尽快食用",
+    "aliasesRaw": "水豆腐、软豆腐、南豆腐/绢豆腐"
+  },
+  {
+    "sourceCategory": "豆制品",
+    "subcategory": "豆腐类",
+    "name": "老豆腐",
+    "uses": "红烧、煎豆腐、炖",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃清水浸泡或密封，尽快食用",
+    "aliasesRaw": "北豆腐、硬豆腐"
+  },
+  {
+    "sourceCategory": "豆制品",
+    "subcategory": "豆腐类",
+    "name": "豆腐干/香干",
+    "uses": "炒、凉拌、卤",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "香干、豆干、五香干"
+  },
+  {
+    "sourceCategory": "豆制品",
+    "subcategory": "豆腐类",
+    "name": "豆腐皮/千张",
+    "uses": "凉拌、炒、卷菜",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "千张、百叶、豆皮"
+  },
+  {
+    "sourceCategory": "豆制品",
+    "subcategory": "豆腐类",
+    "name": "腐竹",
+    "uses": "凉拌、炒、火锅、炖",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "干品密封干燥阴凉；泡发后冷藏0-4℃、1-3天内食用",
+    "aliasesRaw": "豆腐皮（部分地区）、腐筋、豆筋"
+  },
+  {
+    "sourceCategory": "豆制品",
+    "subcategory": "豆腐类",
+    "name": "豆泡/油豆腐",
+    "uses": "火锅、炖、酿",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封保鲜",
+    "aliasesRaw": "油豆腐、豆腐泡、油炸豆腐"
+  },
+  {
+    "sourceCategory": "豆制品",
+    "subcategory": "豆腐类",
+    "name": "素鸡",
+    "uses": "卤味、凉拌、炒",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃清水浸泡或密封，尽快食用",
+    "aliasesRaw": "素鸡卷、素鸭"
+  },
+  {
+    "sourceCategory": "豆制品",
+    "subcategory": "豆腐类",
+    "name": "臭豆腐",
+    "uses": "炸、长沙臭豆腐",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃清水浸泡或密封，尽快食用",
+    "aliasesRaw": "臭干、长沙臭豆腐"
+  },
+  {
+    "sourceCategory": "豆制品",
+    "subcategory": "豆类衍生",
+    "name": "豆浆",
+    "uses": "早餐、豆浆机现磨",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃密封，1-2天内喝完",
+    "aliasesRaw": "豆乳、豆腐浆"
+  },
+  {
+    "sourceCategory": "豆制品",
+    "subcategory": "豆类衍生",
+    "name": "豆干零食",
+    "uses": "零食、下酒",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "豆干、即食豆干"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "米类",
+    "name": "大米",
+    "uses": "米饭、粥、炒饭",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "白米、粳米/籼米"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "米类",
+    "name": "糯米",
+    "uses": "粽子、糯米饭、甜品",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "江米、元米"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "米类",
+    "name": "小米",
+    "uses": "小米粥、杂粮饭",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "粟米、谷子、黄米"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "米类",
+    "name": "糙米",
+    "uses": "糙米饭、杂粮粥",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "玄米、胚芽米"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "米类",
+    "name": "黑米",
+    "uses": "黑米粥、杂粮饭",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "紫米、黑粳米"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "米类",
+    "name": "薏米",
+    "uses": "薏米粥、祛湿汤",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "薏苡仁、苡米、薏仁"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面粉类",
+    "name": "高筋面粉",
+    "uses": "面包、饺子、馒头",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "高筋粉、面包粉、强力粉"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面粉类",
+    "name": "中筋面粉",
+    "uses": "馒头、包子、饼、饺子",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "中筋粉、普通面粉"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面粉类",
+    "name": "低筋面粉",
+    "uses": "蛋糕、饼干、酥点",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "低筋粉、蛋糕粉、弱力粉"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面粉类",
+    "name": "全麦粉",
+    "uses": "全麦面包、杂粮饼",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "全麦面粉、麸皮面粉"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面粉类",
+    "name": "玉米淀粉",
+    "uses": "勾芡、腌肉、糕点",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "玉米粉、粟粉、生粉"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面粉类",
+    "name": "红薯淀粉",
+    "uses": "勾芡、炸粉、粉皮",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "地瓜粉、番薯粉、山芋粉"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面粉类",
+    "name": "澄粉/小麦淀粉",
+    "uses": "水晶虾饺、凉皮",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "澄面、小麦淀粉"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面制品",
+    "name": "挂面",
+    "uses": "汤面、拌面",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "面条、干面、筒子面"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面制品",
+    "name": "龙须面",
+    "uses": "汤面、早餐",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "龙须挂面、细面"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面制品",
+    "name": "意大利面",
+    "uses": "意面、焗面",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "意面、意粉、通心粉"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面制品",
+    "name": "河粉",
+    "uses": "炒河粉、汤粉",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "沙河粉、粿条"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面制品",
+    "name": "米粉",
+    "uses": "炒米粉、汤粉、螺蛳粉",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "米粉、米线"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面制品",
+    "name": "米线",
+    "uses": "过桥米线、米线汤",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "米线、米粉"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面制品",
+    "name": "年糕",
+    "uses": "炒年糕、煮汤、火锅",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃密封；也可冷冻-18℃保存，随取随用",
+    "aliasesRaw": "糯米糕、粑粑"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面制品",
+    "name": "饺子皮",
+    "uses": "包饺子",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天使用；或冷冻-18℃保存",
+    "aliasesRaw": "水饺皮、饺皮"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "面制品",
+    "name": "馄饨皮",
+    "uses": "包馄饨、云吞",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天使用；或冷冻-18℃保存",
+    "aliasesRaw": "云吞皮、抄手皮"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "杂粮豆类",
+    "name": "燕麦",
+    "uses": "燕麦粥、牛奶燕麦、烘焙",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "燕麦片、麦片"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "杂粮豆类",
+    "name": "玉米碴",
+    "uses": "玉米粥、贴饼",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "玉米渣、棒碴、玉米糁"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "杂粮豆类",
+    "name": "红豆",
+    "uses": "红豆汤、红豆沙、甜品",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "赤小豆、红小豆、赤豆"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "杂粮豆类",
+    "name": "绿豆",
+    "uses": "绿豆汤、绿豆糕、粥",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": ""
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "杂粮豆类",
+    "name": "黄豆",
+    "uses": "豆浆、黄豆炖猪蹄、毛豆",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "大豆、黄大豆"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "杂粮豆类",
+    "name": "黑豆",
+    "uses": "黑豆粥、豆浆、炖汤",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "黑大豆、乌豆"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "杂粮豆类",
+    "name": "鹰嘴豆",
+    "uses": "沙拉、鹰嘴豆泥、炖",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "鸡豆、桃豆、雪莲子"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "杂粮豆类",
+    "name": "藜麦",
+    "uses": "沙拉、杂粮饭",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "藜麦、南美藜"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "食用油",
+    "name": "花生油",
+    "uses": "炒菜、煎炸",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封，远离灶台；开封后尽快用完",
+    "aliasesRaw": "落花生油"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "食用油",
+    "name": "菜籽油",
+    "uses": "炒菜、煎炸",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封，远离灶台；开封后尽快用完",
+    "aliasesRaw": "菜油、菜子油"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "食用油",
+    "name": "玉米油",
+    "uses": "炒菜、烘焙",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封，远离灶台；开封后尽快用完",
+    "aliasesRaw": "玉米胚芽油"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "食用油",
+    "name": "橄榄油",
+    "uses": "沙拉、低温煎、凉拌",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封，远离灶台；开封后尽快用完",
+    "aliasesRaw": "油橄榄油"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "食用油",
+    "name": "芝麻油/香油",
+    "uses": "凉拌、出锅提香",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封，远离灶台；开封后尽快用完",
+    "aliasesRaw": "香油、麻油"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "食用油",
+    "name": "猪油",
+    "uses": "炒菜、拌饭、点心",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封，远离灶台；开封后尽快用完",
+    "aliasesRaw": "猪脂、板油"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "食用油",
+    "name": "亚麻籽油",
+    "uses": "凉拌、养生",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封，远离灶台；开封后尽快用完",
+    "aliasesRaw": "亚麻油、胡麻油"
+  },
+  {
+    "sourceCategory": "主食/米面粮油",
+    "subcategory": "食用油",
+    "name": "葵花籽油",
+    "uses": "炒菜、煎炸",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封，远离灶台；开封后尽快用完",
+    "aliasesRaw": "向日葵油、葵油"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "基础调味",
+    "name": "食盐",
+    "uses": "基础咸味",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "盐、食用盐"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "基础调味",
+    "name": "白糖",
+    "uses": "调味、提鲜、甜品",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "白砂糖、砂糖"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "基础调味",
+    "name": "冰糖",
+    "uses": "红烧上色、甜品、糖水",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "冰晶糖"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "基础调味",
+    "name": "生抽/酱油",
+    "uses": "炒菜、凉拌、腌制",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "生抽酱油、头抽"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "基础调味",
+    "name": "老抽",
+    "uses": "上色、红烧、卤味",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "老抽酱油、浓色酱油"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "基础调味",
+    "name": "蚝油",
+    "uses": "提鲜、炒菜、腌肉",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "蚝汁、牡蛎酱"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "基础调味",
+    "name": "陈醋",
+    "uses": "凉拌、蘸料、烧菜",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "山西老陈醋、老醋"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "基础调味",
+    "name": "米醋",
+    "uses": "凉拌、白灼蘸料",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "大米醋、白醋（混称）"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "基础调味",
+    "name": "香醋",
+    "uses": "蘸料、凉拌",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "镇江香醋"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "基础调味",
+    "name": "料酒",
+    "uses": "去腥、腌制、烧菜",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "黄酒、烹饪黄酒、绍酒"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "基础调味",
+    "name": "味精",
+    "uses": "提鲜",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "谷氨酸钠、味素"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "基础调味",
+    "name": "鸡精",
+    "uses": "提鲜",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "鸡粉、鸡精粉"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "基础调味",
+    "name": "淀粉（玉米/土豆淀粉）",
+    "uses": "勾芡、腌制、挂糊",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "生粉、芡粉"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "香料",
+    "name": "花椒",
+    "uses": "麻辣、炝锅、卤味",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "麻椒（更麻）"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "香料",
+    "name": "麻椒",
+    "uses": "麻味、火锅",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "花椒（四川/藤椒相关）"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "香料",
+    "name": "八角/大料",
+    "uses": "卤味、炖肉",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "大料、大茴香、八角茴香"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "香料",
+    "name": "桂皮",
+    "uses": "卤味、炖肉、红烧",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "肉桂皮、肉桂"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "香料",
+    "name": "香叶",
+    "uses": "炖肉、卤味、汤",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "月桂叶、桂叶"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "香料",
+    "name": "孜然",
+    "uses": "烧烤、孜然羊肉",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "安息茴香、枯茗"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "香料",
+    "name": "辣椒粉",
+    "uses": "烧烤、蘸料、辣味",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "辣椒面、辣椒末、辣椒碎"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "香料",
+    "name": "五香粉",
+    "uses": "卤味、腌制、馅料",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "五香面"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "香料",
+    "name": "十三香",
+    "uses": "炒菜、馅料、炖菜",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "十三香粉"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "香料",
+    "name": "白胡椒粉",
+    "uses": "汤、白灼、去腥",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "白胡椒、胡椒"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "香料",
+    "name": "黑胡椒粒/粉",
+    "uses": "煎牛排、黑椒菜",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "黑胡椒、胡椒"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "香料",
+    "name": "丁香",
+    "uses": "卤味、炖肉",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "鸡舌香"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "香料",
+    "name": "草果",
+    "uses": "卤味、炖肉、火锅底料",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": ""
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "香料",
+    "name": "小茴香",
+    "uses": "卤味、烧烤、炒菜",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "茴香籽、小茴、茴香"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "酱料",
+    "name": "豆瓣酱",
+    "uses": "川菜、红烧、麻辣",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "常温阴凉密封；开封后冷藏0-4℃保存",
+    "aliasesRaw": "郫县豆瓣、豆瓣"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "酱料",
+    "name": "黄豆酱",
+    "uses": "炸酱、焖菜、蘸酱",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "常温阴凉密封；开封后冷藏0-4℃保存",
+    "aliasesRaw": "黄酱、豆酱、大酱"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "酱料",
+    "name": "甜面酱",
+    "uses": "京酱肉丝、烤鸭、酱料",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "常温阴凉密封；开封后冷藏0-4℃保存",
+    "aliasesRaw": "甜酱、面酱"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "酱料",
+    "name": "番茄酱",
+    "uses": "蘸料、番茄味菜、糖醋",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "常温阴凉密封；开封后冷藏0-4℃保存",
+    "aliasesRaw": "茄汁、西红柿酱"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "酱料",
+    "name": "沙拉酱",
+    "uses": "沙拉、三明治",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "常温阴凉密封；开封后冷藏0-4℃保存",
+    "aliasesRaw": "美乃滋、蛋黄酱（混称）"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "酱料",
+    "name": "芝麻酱",
+    "uses": "麻酱拌面、火锅蘸料",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "常温阴凉密封；开封后冷藏0-4℃保存",
+    "aliasesRaw": "麻酱"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "酱料",
+    "name": "花生酱",
+    "uses": "拌面、涂抹、烘焙",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "常温阴凉密封；开封后冷藏0-4℃保存",
+    "aliasesRaw": "麻酱（部分地区）"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "酱料",
+    "name": "火锅底料",
+    "uses": "火锅、麻辣烫",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "常温阴凉密封；开封后冷藏0-4℃保存",
+    "aliasesRaw": "火锅料、麻辣底料"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "酱料",
+    "name": "咖喱块/粉",
+    "uses": "咖喱鸡、咖喱饭",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "常温阴凉密封；开封后冷藏0-4℃保存",
+    "aliasesRaw": "咖喱酱、咖喱粉"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "酱料",
+    "name": "辣椒酱",
+    "uses": "蘸料、拌饭、炒菜",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "常温阴凉密封；开封后冷藏0-4℃保存",
+    "aliasesRaw": "辣酱、辣酱酱"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "酱料",
+    "name": "剁椒",
+    "uses": "剁椒鱼头、蒸菜",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "常温阴凉密封；开封后冷藏0-4℃保存",
+    "aliasesRaw": "剁辣椒、剁辣子"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "酱料",
+    "name": "腐乳（红/白）",
+    "uses": "腐乳通心菜、蘸料",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "常温阴凉密封；开封后冷藏0-4℃保存",
+    "aliasesRaw": "豆腐乳、南乳"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "酱料",
+    "name": "XO酱",
+    "uses": "炒饭、拌面、海鲜菜",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "常温阴凉密封；开封后冷藏0-4℃保存",
+    "aliasesRaw": "XO酱"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "酱料",
+    "name": "沙茶酱",
+    "uses": "沙茶面、火锅蘸料",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "常温阴凉密封；开封后冷藏0-4℃保存",
+    "aliasesRaw": "沙嗲酱"
+  },
+  {
+    "sourceCategory": "调味料",
+    "subcategory": "酱料",
+    "name": "照烧酱",
+    "uses": "照烧鸡、照烧牛肉",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "常温阴凉密封；开封后冷藏0-4℃保存",
+    "aliasesRaw": "照烧汁"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "菌藻干货",
+    "name": "香菇（干）",
+    "uses": "炖汤、炖肉、泡发炒菜",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "冬菇、干香菇、花菇"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "菌藻干货",
+    "name": "木耳（干）",
+    "uses": "凉拌、炒、炖汤",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "黑木耳、云耳、干木耳"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "菌藻干货",
+    "name": "银耳（干）",
+    "uses": "银耳羹、甜品",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "白木耳、雪耳、干银耳"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "菌藻干货",
+    "name": "海带（干）",
+    "uses": "凉拌、炖汤、卤",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "昆布、干海带"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "菌藻干货",
+    "name": "紫菜（干）",
+    "uses": "蛋花汤、饭团",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "干紫菜、海苔（制品）"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "海鲜干货",
+    "name": "虾皮",
+    "uses": "提鲜、紫菜汤、蒸蛋",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "虾米皮"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "海鲜干货",
+    "name": "干贝/瑶柱",
+    "uses": "炖汤、蒸蛋、煲粥",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "瑶柱、元贝、扇贝柱"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "海鲜干货",
+    "name": "鱿鱼干",
+    "uses": "煲汤、炒、零食",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "吊片、干鱿鱼"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "果品干类",
+    "name": "红枣",
+    "uses": "煮粥、炖汤、泡水",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "大枣、干枣"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "果品干类",
+    "name": "枸杞",
+    "uses": "泡水、炖汤、煮粥",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "枸杞子、宁夏枸杞"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "果品干类",
+    "name": "桂圆干",
+    "uses": "煮粥、炖汤、泡水",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "龙眼干、桂圆"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "果品干类",
+    "name": "莲子",
+    "uses": "银耳莲子羹、炖汤",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "莲米、莲实"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "果品干类",
+    "name": "百合干",
+    "uses": "炒、煮粥、炖汤",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "干百合、百合片"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "蔬菜干类",
+    "name": "黄花菜",
+    "uses": "炖汤、炒、凉拌",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "金针菜、忘忧草、金针花"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "蔬菜干类",
+    "name": "笋干",
+    "uses": "炖肉、红烧、火锅",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "干笋、玉兰片"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "蔬菜干类",
+    "name": "萝卜干",
+    "uses": "炒、下饭、配粥",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "萝卜丝干"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "蔬菜干类",
+    "name": "梅干菜",
+    "uses": "梅菜扣肉、蒸肉饼",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "霉干菜、梅菜、芥菜干"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "粉条类",
+    "name": "粉丝",
+    "uses": "酸辣粉、蚂蚁上树、汤",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "细粉、龙口粉丝、粉条（相近）"
+  },
+  {
+    "sourceCategory": "干货/干制品",
+    "subcategory": "粉条类",
+    "name": "红薯粉条",
+    "uses": "炖菜、火锅、酸辣粉",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封干燥、阴凉避光，防潮防虫；泡发后冷藏0-4℃、1-3天内用完",
+    "aliasesRaw": "地瓜粉条、苕粉、宽粉"
+  },
+  {
+    "sourceCategory": "冷冻食品",
+    "subcategory": "速冻主食",
+    "name": "速冻水饺",
+    "uses": "煮、煎、蒸",
+    "shelfLifeRange": "1-6个月",
+    "storage": "冷冻-18℃以下密封保存，随取随用，避免反复解冻",
+    "aliasesRaw": "水饺、饺子"
+  },
+  {
+    "sourceCategory": "冷冻食品",
+    "subcategory": "速冻主食",
+    "name": "汤圆",
+    "uses": "煮、炸",
+    "shelfLifeRange": "1-6个月",
+    "storage": "冷冻-18℃以下密封保存，随取随用，避免反复解冻",
+    "aliasesRaw": "元宵（注意差异）"
+  },
+  {
+    "sourceCategory": "冷冻食品",
+    "subcategory": "速冻主食",
+    "name": "速冻包子",
+    "uses": "蒸、微波",
+    "shelfLifeRange": "1-6个月",
+    "storage": "冷冻-18℃以下密封保存，随取随用，避免反复解冻",
+    "aliasesRaw": "包子、冷冻包子"
+  },
+  {
+    "sourceCategory": "冷冻食品",
+    "subcategory": "速冻主食",
+    "name": "馄饨",
+    "uses": "煮汤、煎",
+    "shelfLifeRange": "1-6个月",
+    "storage": "冷冻-18℃以下密封保存，随取随用，避免反复解冻",
+    "aliasesRaw": "云吞、抄手、扁食"
+  },
+  {
+    "sourceCategory": "冷冻食品",
+    "subcategory": "速冻主食",
+    "name": "手抓饼",
+    "uses": "煎、卷菜",
+    "shelfLifeRange": "1-6个月",
+    "storage": "冷冻-18℃以下密封保存，随取随用，避免反复解冻",
+    "aliasesRaw": "葱油饼（相近）"
+  },
+  {
+    "sourceCategory": "冷冻食品",
+    "subcategory": "冷冻肉/海鲜",
+    "name": "冷冻虾仁",
+    "uses": "炒、汤、蒸",
+    "shelfLifeRange": "1-6个月",
+    "storage": "冷冻-18℃以下密封保存，随取随用，避免反复解冻",
+    "aliasesRaw": "冻虾仁、冷冻虾肉"
+  },
+  {
+    "sourceCategory": "冷冻食品",
+    "subcategory": "冷冻肉/海鲜",
+    "name": "冷冻鱼丸",
+    "uses": "汤、火锅",
+    "shelfLifeRange": "1-6个月",
+    "storage": "冷冻-18℃以下密封保存，随取随用，避免反复解冻",
+    "aliasesRaw": "鱼丸（冷冻）"
+  },
+  {
+    "sourceCategory": "冷冻食品",
+    "subcategory": "冷冻肉/海鲜",
+    "name": "冷冻鸡翅",
+    "uses": "烤、炸、红烧",
+    "shelfLifeRange": "1-6个月",
+    "storage": "冷冻-18℃以下密封保存，随取随用，避免反复解冻",
+    "aliasesRaw": "冻鸡翅、鸡翅（冷冻）"
+  },
+  {
+    "sourceCategory": "冷冻食品",
+    "subcategory": "冷冻肉/海鲜",
+    "name": "冷冻牛排",
+    "uses": "煎烤",
+    "shelfLifeRange": "1-6个月",
+    "storage": "冷冻-18℃以下密封保存，随取随用，避免反复解冻",
+    "aliasesRaw": "牛排（冷冻）"
+  },
+  {
+    "sourceCategory": "冷冻食品",
+    "subcategory": "冷冻蔬菜",
+    "name": "冷冻玉米粒",
+    "uses": "炒、汤、沙拉",
+    "shelfLifeRange": "1-6个月",
+    "storage": "冷冻-18℃以下密封保存，随取随用，避免反复解冻",
+    "aliasesRaw": "速冻玉米粒"
+  },
+  {
+    "sourceCategory": "冷冻食品",
+    "subcategory": "冷冻蔬菜",
+    "name": "冷冻豌豆",
+    "uses": "炒、配菜",
+    "shelfLifeRange": "1-6个月",
+    "storage": "冷冻-18℃以下密封保存，随取随用，避免反复解冻",
+    "aliasesRaw": "速冻青豆"
+  },
+  {
+    "sourceCategory": "冷冻食品",
+    "subcategory": "冷冻蔬菜",
+    "name": "冷冻西兰花",
+    "uses": "炒、白灼",
+    "shelfLifeRange": "1-6个月",
+    "storage": "冷冻-18℃以下密封保存，随取随用，避免反复解冻",
+    "aliasesRaw": "速冻西兰花"
+  },
+  {
+    "sourceCategory": "冷冻食品",
+    "subcategory": "冷冻半成品",
+    "name": "冷冻薯条",
+    "uses": "炸、烤",
+    "shelfLifeRange": "1-6个月",
+    "storage": "冷冻-18℃以下密封保存，随取随用，避免反复解冻",
+    "aliasesRaw": "冻薯条、薯条"
+  },
+  {
+    "sourceCategory": "冷冻食品",
+    "subcategory": "冷冻半成品",
+    "name": "冰淇淋",
+    "uses": "甜品",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "冷冻-18℃以下保存",
+    "aliasesRaw": "冰激凌、雪糕"
+  },
+  {
+    "sourceCategory": "蛋奶乳制品",
+    "subcategory": "乳制品",
+    "name": "牛奶",
+    "uses": "饮用、烘焙、煮奶茶",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃，未开封按保质期，开封后尽快喝完",
+    "aliasesRaw": "鲜奶、牛乳"
+  },
+  {
+    "sourceCategory": "蛋奶乳制品",
+    "subcategory": "乳制品",
+    "name": "酸奶",
+    "uses": "饮用、水果捞、烘焙",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃，未开封按保质期，开封后尽快喝完",
+    "aliasesRaw": "酸牛奶、优酪乳"
+  },
+  {
+    "sourceCategory": "蛋奶乳制品",
+    "subcategory": "乳制品",
+    "name": "黄油",
+    "uses": "煎、烘焙、抹酱",
+    "shelfLifeRange": "1-4周",
+    "storage": "冷藏密封；也可冷冻-18℃存数月",
+    "aliasesRaw": "奶油（港台称奶油）"
+  },
+  {
+    "sourceCategory": "蛋奶乳制品",
+    "subcategory": "乳制品",
+    "name": "淡奶油",
+    "uses": "烘焙、甜点、浓汤",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃，开封后1-3天内用完",
+    "aliasesRaw": "稀奶油、鲜奶油"
+  },
+  {
+    "sourceCategory": "蛋奶乳制品",
+    "subcategory": "乳制品",
+    "name": "奶酪/芝士",
+    "uses": "披萨、焗饭、三明治",
+    "shelfLifeRange": "1-4周",
+    "storage": "冷藏0-4℃密封，开封后尽快",
+    "aliasesRaw": "芝士、起司、干酪、乳酪"
+  },
+  {
+    "sourceCategory": "蛋奶乳制品",
+    "subcategory": "乳制品",
+    "name": "芝士片",
+    "uses": "三明治、汉堡、焗",
+    "shelfLifeRange": "1-4周",
+    "storage": "冷藏0-4℃密封，开封后尽快",
+    "aliasesRaw": "奶酪片、起司片"
+  },
+  {
+    "sourceCategory": "蛋奶乳制品",
+    "subcategory": "乳制品",
+    "name": "炼乳",
+    "uses": "甜品、饮料、烘焙",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封阴凉干燥；开封后冷藏并尽快食用",
+    "aliasesRaw": "炼奶、浓缩奶"
+  },
+  {
+    "sourceCategory": "蛋奶乳制品",
+    "subcategory": "乳制品",
+    "name": "奶粉",
+    "uses": "冲饮、烘焙",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封阴凉干燥；开封后冷藏并尽快食用",
+    "aliasesRaw": "奶粉（全脂/配方）"
+  },
+  {
+    "sourceCategory": "蛋奶乳制品",
+    "subcategory": "乳制品",
+    "name": "奶油奶酪",
+    "uses": "芝士蛋糕、涂抹",
+    "shelfLifeRange": "1-4周",
+    "storage": "冷藏0-4℃密封，开封后尽快",
+    "aliasesRaw": "芝士奶油、马斯卡彭（相近）"
+  },
+  {
+    "sourceCategory": "饮品",
+    "subcategory": "茶类",
+    "name": "绿茶",
+    "uses": "泡饮",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封；开封后尽快，酒类避光卧放",
+    "aliasesRaw": ""
+  },
+  {
+    "sourceCategory": "饮品",
+    "subcategory": "茶类",
+    "name": "红茶",
+    "uses": "泡饮、奶茶、柠檬茶",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封；开封后尽快，酒类避光卧放",
+    "aliasesRaw": ""
+  },
+  {
+    "sourceCategory": "饮品",
+    "subcategory": "茶类",
+    "name": "乌龙茶",
+    "uses": "泡饮、冷泡",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封；开封后尽快，酒类避光卧放",
+    "aliasesRaw": "青茶"
+  },
+  {
+    "sourceCategory": "饮品",
+    "subcategory": "茶类",
+    "name": "普洱茶",
+    "uses": "泡饮、煮茶",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封；开封后尽快，酒类避光卧放",
+    "aliasesRaw": "普洱"
+  },
+  {
+    "sourceCategory": "饮品",
+    "subcategory": "茶类",
+    "name": "茉莉花茶",
+    "uses": "泡饮",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封；开封后尽快，酒类避光卧放",
+    "aliasesRaw": "花茶、茉莉"
+  },
+  {
+    "sourceCategory": "饮品",
+    "subcategory": "咖啡",
+    "name": "速溶咖啡",
+    "uses": "冲饮",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封；开封后尽快，酒类避光卧放",
+    "aliasesRaw": "即溶咖啡、三合一"
+  },
+  {
+    "sourceCategory": "饮品",
+    "subcategory": "咖啡",
+    "name": "咖啡豆/咖啡粉",
+    "uses": "手冲、意式、冷萃",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封；开封后尽快，酒类避光卧放",
+    "aliasesRaw": "咖啡、咖啡豆"
+  },
+  {
+    "sourceCategory": "饮品",
+    "subcategory": "果汁饮料",
+    "name": "鲜榨果汁",
+    "uses": "饮品",
+    "shelfLifeRange": "1-3天",
+    "storage": "冷藏0-4℃，当天饮用",
+    "aliasesRaw": "果汁、鲜果汁"
+  },
+  {
+    "sourceCategory": "饮品",
+    "subcategory": "果汁饮料",
+    "name": "碳酸饮料/气泡水",
+    "uses": "饮品、调饮",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封；开封后尽快，酒类避光卧放",
+    "aliasesRaw": "苏打水（混称）"
+  },
+  {
+    "sourceCategory": "饮品",
+    "subcategory": "酒类",
+    "name": "啤酒",
+    "uses": "饮用、料酒替代、炖菜",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封；开封后尽快，酒类避光卧放",
+    "aliasesRaw": "麦酒"
+  },
+  {
+    "sourceCategory": "饮品",
+    "subcategory": "酒类",
+    "name": "白酒",
+    "uses": "调味、泡酒、饮用",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封；开封后尽快，酒类避光卧放",
+    "aliasesRaw": "烧酒、白干、高粱酒"
+  },
+  {
+    "sourceCategory": "饮品",
+    "subcategory": "酒类",
+    "name": "红酒/葡萄酒",
+    "uses": "饮用、红酒炖牛腩",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封；开封后尽快，酒类避光卧放",
+    "aliasesRaw": "红葡萄酒"
+  },
+  {
+    "sourceCategory": "饮品",
+    "subcategory": "蜂蜜类",
+    "name": "蜂蜜",
+    "uses": "泡水、蜂蜜柚子茶、烤肉刷",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉避光密封；开封后尽快，酒类避光卧放",
+    "aliasesRaw": "蜜、蜂糖"
+  },
+  {
+    "sourceCategory": "烘焙原料",
+    "subcategory": "粉类",
+    "name": "高筋面粉",
+    "uses": "面包",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "高筋粉、面包粉、强力粉"
+  },
+  {
+    "sourceCategory": "烘焙原料",
+    "subcategory": "粉类",
+    "name": "低筋面粉",
+    "uses": "蛋糕、饼干",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "低筋粉、蛋糕粉、弱力粉"
+  },
+  {
+    "sourceCategory": "烘焙原料",
+    "subcategory": "粉类",
+    "name": "可可粉",
+    "uses": "巧克力蛋糕、饮品",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "可可"
+  },
+  {
+    "sourceCategory": "烘焙原料",
+    "subcategory": "粉类",
+    "name": "抹茶粉",
+    "uses": "蛋糕、饮品",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "抹茶"
+  },
+  {
+    "sourceCategory": "烘焙原料",
+    "subcategory": "粉类",
+    "name": "糖粉",
+    "uses": "装饰、糖霜",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "糖霜、糖霜粉"
+  },
+  {
+    "sourceCategory": "烘焙原料",
+    "subcategory": "发酵/膨松剂",
+    "name": "酵母",
+    "uses": "面包、馒头、发酵",
+    "shelfLifeRange": "6-12个月",
+    "storage": "未开封阴凉干燥；开封后冷藏密封并尽快使用",
+    "aliasesRaw": "干酵母、酵母粉、鲜酵母"
+  },
+  {
+    "sourceCategory": "烘焙原料",
+    "subcategory": "发酵/膨松剂",
+    "name": "泡打粉",
+    "uses": "蛋糕、松饼、饼干",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "发粉、泡大粉"
+  },
+  {
+    "sourceCategory": "烘焙原料",
+    "subcategory": "发酵/膨松剂",
+    "name": "小苏打",
+    "uses": "烘焙、嫩肉、清洁",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "碳酸氢钠、食粉"
+  },
+  {
+    "sourceCategory": "烘焙原料",
+    "subcategory": "辅料",
+    "name": "吉利丁片/粉",
+    "uses": "慕斯、布丁、果冻",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "明胶、鱼胶"
+  },
+  {
+    "sourceCategory": "烘焙原料",
+    "subcategory": "辅料",
+    "name": "巧克力",
+    "uses": "烘焙、甜品、零食",
+    "shelfLifeRange": "6-12个月",
+    "storage": "阴凉避光（夏季可冷藏），防受潮结霜",
+    "aliasesRaw": "朱古力"
+  },
+  {
+    "sourceCategory": "烘焙原料",
+    "subcategory": "辅料",
+    "name": "淡奶油",
+    "uses": "裱花、慕斯",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃，开封后尽快用完",
+    "aliasesRaw": "稀奶油、鲜奶油"
+  },
+  {
+    "sourceCategory": "烘焙原料",
+    "subcategory": "辅料",
+    "name": "奶油奶酪",
+    "uses": "芝士蛋糕",
+    "shelfLifeRange": "4-7天",
+    "storage": "冷藏0-4℃，开封后尽快用完",
+    "aliasesRaw": "芝士奶油、马斯卡彭（相近）"
+  },
+  {
+    "sourceCategory": "烘焙原料",
+    "subcategory": "辅料",
+    "name": "杏仁片/杏仁粉",
+    "uses": "烘焙、装饰",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "阴凉干燥、密封避光，防潮防虫",
+    "aliasesRaw": "杏仁碎、扁桃仁片"
+  },
+  {
+    "sourceCategory": "零食",
+    "subcategory": "饼干糕点",
+    "name": "饼干",
+    "uses": "零食",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮",
+    "aliasesRaw": "曲奇（饼干类）"
+  },
+  {
+    "sourceCategory": "零食",
+    "subcategory": "饼干糕点",
+    "name": "蛋糕/面包",
+    "uses": "零食、早餐",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮",
+    "aliasesRaw": ""
+  },
+  {
+    "sourceCategory": "零食",
+    "subcategory": "膨化/休闲",
+    "name": "薯片",
+    "uses": "零食",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮",
+    "aliasesRaw": "马铃薯片"
+  },
+  {
+    "sourceCategory": "零食",
+    "subcategory": "膨化/休闲",
+    "name": "辣条/豆制品零食",
+    "uses": "零食",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮",
+    "aliasesRaw": "调味面制品"
+  },
+  {
+    "sourceCategory": "零食",
+    "subcategory": "坚果炒货",
+    "name": "混合坚果",
+    "uses": "零食",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮",
+    "aliasesRaw": "每日坚果"
+  },
+  {
+    "sourceCategory": "零食",
+    "subcategory": "糖果巧克力",
+    "name": "巧克力",
+    "uses": "零食",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮",
+    "aliasesRaw": "朱古力"
+  },
+  {
+    "sourceCategory": "零食",
+    "subcategory": "糖果巧克力",
+    "name": "糖果",
+    "uses": "零食",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮",
+    "aliasesRaw": "糖、糖果"
+  },
+  {
+    "sourceCategory": "零食",
+    "subcategory": "果干蜜饯",
+    "name": "葡萄干/果干",
+    "uses": "零食、烘焙",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮",
+    "aliasesRaw": "提子干、果干、水果干"
+  },
+  {
+    "sourceCategory": "零食",
+    "subcategory": "果干蜜饯",
+    "name": "蜜饯",
+    "uses": "零食",
+    "shelfLifeRange": "长期·保质期内",
+    "storage": "密封阴凉干燥避光；开封后尽快食用，防潮",
+    "aliasesRaw": "果脯、凉果"
+  }
+]

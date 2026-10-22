@@ -18,6 +18,7 @@ const { execFileSync } = require('child_process');
 const PUBLISH_FILES = [
   'README.md',
   'build-package.js',
+  'food-presets.json',
   'package.json',
   'publish-selftest.js',
   'publish-update.js',

@@ -41,10 +41,19 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.31.6';
+const APP_VERSION = '1.31.7';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.31.7',
+    date: '2026-10-22',
+    title: '扩充基础材料目录',
+    items: [
+      '导入多级材料表中的 370 条材料资料，合并同名项并保留二级分类、用途、别名、保质期区间和保存要求',
+      '基础材料支持按别名搜索；保质期区间按下限预填提醒日期，未提供单位的材料不补造单位',
+    ],
+  },
   {
     version: '1.31.6',
     date: '2026-10-21',
@@ -1542,7 +1551,7 @@ function pantryCategoryWouldCycle(householdId, categoryId, parentId) {
  * [名称, 分类, 单位, 保质期天数]
  * ------------------------------------------------------------------ */
 
-const FOOD_PRESETS = [
+const LEGACY_FOOD_PRESETS = [
   // 肉类
   ['猪里脊', '肉类', 'g', 3], ['五花肉', '肉类', 'g', 3], ['猪排骨', '肉类', 'g', 3],
   ['猪蹄', '肉类', 'g', 3], ['牛肉', '肉类', 'g', 3], ['牛腩', '肉类', 'g', 3],
@@ -1614,6 +1623,74 @@ const FOOD_PRESETS = [
   // 其他
   ['保鲜膜', '其他', '卷', 0], ['厨房纸', '其他', '卷', 0], ['洗洁精', '其他', '瓶', 1080],
 ];
+
+const IMPORTED_FOOD_PRESETS = require('./food-presets.json');
+
+function presetCategoryFromSource(item) {
+  const category = item.sourceCategory;
+  if (category === '肉类' || category === '蛋类' || category === '豆制品' || category === '冷冻食品' || category === '零食' || category === '水产海鲜' || category === '蔬菜' || category === '水果') return category;
+  if (category === '蛋奶乳制品') return '奶制品';
+  if (category === '调味料') return '调味干货';
+  if (category === '饮品') return '饮料';
+  if (category === '主食/米面粮油' || category === '烘焙原料') return '主食粮油';
+  if (category === '干货/干制品') {
+    if (item.subcategory === '果品干类') return '水果';
+    if (item.subcategory === '海鲜干货') return '水产海鲜';
+    if (item.subcategory === '菌藻干货' || item.subcategory === '蔬菜干类') return '蔬菜';
+    return '主食粮油';
+  }
+  return '其他';
+}
+
+function presetShelfLifeDays(range) {
+  const match = /^(\d+)\s*-\s*\d+\s*(天|周|个月|年)$/.exec(String(range || '').trim());
+  if (!match) return 0;
+  const multiplier = { 天: 1, 周: 7, 个月: 30, 年: 365 }[match[2]];
+  return Number(match[1]) * multiplier;
+}
+
+function splitPresetAliases(value) {
+  return String(value || '').split(/[、,，;；]/).map((alias) => alias.trim())
+    .filter((alias) => alias && !/(相近|近似)/.test(alias));
+}
+
+function mergeFoodPresets() {
+  const byName = new Map(LEGACY_FOOD_PRESETS.map((item) => [item[0], [...item, '', [], '', '', '', [], '', '']]));
+  for (const source of IMPORTED_FOOD_PRESETS) {
+    const originalName = source.name.trim();
+    const name = originalName === '白糖' ? '白砂糖' : originalName;
+    const category = presetCategoryFromSource(source);
+    const current = byName.get(name);
+    const aliases = [...splitPresetAliases(source.aliasesRaw), ...(name === originalName ? [] : [originalName])];
+    if (current) {
+      current[3] = presetShelfLifeDays(source.shelfLifeRange);
+      if (!current[4]) current[4] = source.subcategory;
+      current[5] = [...new Set([...(current[5] || []), ...aliases])];
+      current[6] = [...new Set([...(current[6] ? [current[6]] : []), source.uses])].filter(Boolean).join('；');
+      current[7] = [...new Set([...(current[7] ? [current[7]] : []), source.shelfLifeRange])].filter(Boolean).join('；');
+      current[8] = [...new Set([...(current[8] ? [current[8]] : []), source.storage])].filter(Boolean).join('；');
+      if (current[11]) current[9] = [...new Set([...(current[9] || []), source.sourceCategory])].filter((value) => value !== current[11]);
+      else current[11] = source.sourceCategory;
+      current[10] = current[10] || `${current[1]} > ${source.subcategory}`;
+      continue;
+    }
+    byName.set(name, [name, category, '', presetShelfLifeDays(source.shelfLifeRange), source.subcategory, aliases,
+      source.uses, source.shelfLifeRange, source.storage, [], `${category} > ${source.subcategory}`, source.sourceCategory]);
+  }
+
+  const rows = [...byName.values()];
+  const canonicalNames = new Set(rows.map((row) => row[0]));
+  const aliasOwners = new Map();
+  for (const row of rows) for (const alias of row[5] || []) {
+    aliasOwners.set(alias, (aliasOwners.get(alias) || new Set()).add(row[0]));
+  }
+  for (const row of rows) {
+    row[5] = [...new Set(row[5] || [])].filter((alias) => alias !== row[0] && !canonicalNames.has(alias) && aliasOwners.get(alias)?.size === 1);
+  }
+  return rows;
+}
+
+const FOOD_PRESETS = mergeFoodPresets();
 
 /** 日期只认 YYYY-MM-DD，其它一律当作「没填」 */
 function normDate(v) {
@@ -4685,6 +4762,14 @@ async function handleAPI(req, res, url) {
           category: p[1],
           unit: p[2],
           shelfLife: p[3],
+          subcategory: p[4] || '',
+          aliases: p[5] || [],
+          uses: p[6] || '',
+          shelfLifeRange: p[7] || '',
+          storage: p[8] || '',
+          alternateCategories: p[9] || [],
+          categoryPath: p[10] || p[1],
+          sourceCategory: p[11] || p[1],
           expireAt: p[3] > 0 ? daysFromNow(p[3]) : '',
         })),
       },

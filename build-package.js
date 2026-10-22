@@ -352,6 +352,7 @@ function main() {
   log('[2/5] 复制程序文件');
   writeOver(path.join(ROOT, 'server.js'), path.join(APP, 'server.js'));
   writeOver(path.join(ROOT, 'package.json'), path.join(APP, 'package.json'));
+  writeOver(path.join(ROOT, 'food-presets.json'), path.join(APP, 'food-presets.json'));
   copyDir(path.join(ROOT, 'public'), path.join(APP, 'public'));
 
   fs.mkdirSync(path.join(APP, 'uploads'), { recursive: true });
