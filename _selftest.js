@@ -1338,6 +1338,10 @@ async function main() {
   ok('采购入库不调用原生 prompt', !fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8').includes('window.prompt'));
   const appSource = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
   const dishEditorSource = (appSource.match(/function openDishEditor\(dish\) \{[\s\S]*?\n\}/) || [''])[0];
+  ok('做法通过独立弹框新增和编辑', /function openMethodEditor\(methodIndex\)/.test(appSource) && /data-act="edit-method"/.test(appSource) && /title: isNew \? '新增做法' : '编辑做法'/.test(appSource));
+  ok('做法弹框材料行复用菜谱分类和原料选择器', /function methodEditorHtml\(methodIndex\)/.test(appSource) && /recipeIngredientRowHtml\(row, 'mseason'/.test(appSource));
+  ok('新增做法后添加原料不会先过滤掉空步骤做法', /'add-method'\(\) \{[\s\S]*?openMethodEditor\(index\)/.test(appSource) && /'add-mseason'\(el\) \{[\s\S]*?methodEditorDraft\.method\.seasonings\.push[\s\S]*?renderMethodEditor\(\)/.test(appSource));
+  ok('编辑器做法卡片呈现步骤和材料摘要而非内嵌输入控件', /function methodCardHtml\(m, i\)[\s\S]*?stepSummary[\s\S]*?data-act="edit-method"/.test(appSource) && !/data-act="method-steps" data-i="\$\{i\}"/.test((appSource.match(/function methodCardHtml\(m, i\) \{[\s\S]*?\n\}/) || [''])[0]));
   ok('编辑表单初始化管理员权限变量', /const admin\s*=\s*isSuper\(\)/.test(dishEditorSource));
   ok('计划采购按调料/普通食材分组并隐藏已确认调料', /purchaseShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning\s*&&/.test(appSource) && /stapleShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*it\.isSeasoning\s*&&\s*stockAssessment\(it\)\.key\s*!==\s*'enough'/.test(appSource));
   ok('计划采购只列当前缺口或需确认项目', /purchaseShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning[\s\S]{0,160}it\.received[\s\S]{0,80}uncertain/.test(appSource));
@@ -1357,7 +1361,7 @@ async function main() {
   ok('菜谱原料编辑使用分类下拉和原料补全控件', /function recipeIngredientRowHtml\(/.test(appSource) && /data-act="season-category"/.test(appSource) && /data-act="\$\{action\}-ingredient-search"/.test(appSource));
   ok('菜谱原料名支持自动补全与目录浏览', /data-act="\$\{action\}-ingredient-search"/.test(appSource) && /data-act="\$\{action\}-browse"/.test(appSource) && /openRecipeIngredientBrowser\(/.test(appSource));
   ok('菜谱材料候选按输入和当前分类排序', /RecipeIngredientLogic\.searchIngredients\(/.test(appSource) && /data-list="\$\{esc\(listId\)\}"/.test(appSource));
-  ok('目录选料后保留材料草稿并返回编辑器', /applyIngredientToRecipeRow\(context\.dish, context\.rowId, ingredient\)[\s\S]{0,180}openDishEditor\(context\.dish\)/.test(appSource));
+  ok('目录选料后保留做法材料草稿并返回当前弹框', /applyIngredientToRecipeRow\(context\.dish, context\.rowId, ingredient\)[\s\S]{0,380}context\.returnToMethod[\s\S]{0,180}renderMethodEditor\(\)/.test(appSource));
   ok('菜谱与快捷原料分类选项使用分类 ID 生成路径', /pantryCategoryPath\(category\.id,\s*categories\)/.test(appSource) && /pantryCategoryPath\(ingredient\.categoryId,\s*categories\)/.test(appSource));
   ok('通用和做法材料行均提供就地新增原料入口', /data-act="\$\{action\}-create"/.test(appSource) && /'season-create'\(el\)/.test(appSource) && /'mseason-create'\(el\)/.test(appSource));
   ok('就地新增保留空白材料行及已选分类', /function collectDish\(preserveEmptyRows = false\)/.test(appSource) && /collectDish\(true\)/.test(appSource));

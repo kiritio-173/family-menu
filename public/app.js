@@ -709,14 +709,16 @@ function recipeIngredientBrowserResults(categoryId, query, dish) {
 }
 
 function openRecipeIngredientBrowser(el) {
-  const dish = collectDish(true);
   const action = el.dataset.act.startsWith('mseason-') ? 'mseason' : 'season';
   const methodIndex = Number(el.dataset.i);
   const rowIndex = action === 'season' ? methodIndex : Number(el.dataset.j);
   const rowId = action === 'season' ? `general:${rowIndex}` : `method:${methodIndex}:${rowIndex}`;
+  const dish = action === 'mseason' && methodEditorDraft && methodEditorDraft.methodIndex === methodIndex
+    ? { ...S.draft.dish, methods: S.draft.dish.methods.map((method, index) => index === methodIndex ? methodEditorDraft.method : method) }
+    : collectDish(true);
   const row = action === 'season' ? dish.seasonings[rowIndex] : dish.methods[methodIndex]?.seasonings?.[rowIndex];
   if (!row) return toast('材料行已变化，请重试');
-  S.recipeIngredientBrowser = { rowId, action, methodIndex, rowIndex, householdId: dish.householdId, dish };
+  S.recipeIngredientBrowser = { rowId, action, methodIndex, rowIndex, householdId: dish.householdId, dish, returnToMethod: action === 'mseason' && !!methodEditorDraft };
   const categories = householdPantryCategories(dish.householdId).filter((category) =>
     !!dish.householdId || category.scope === 'global' || category.builtin);
   const categoryId = row.categoryId || categories[0]?.id || '';
@@ -813,7 +815,7 @@ function openQuickIngredientCreator(dish, target) {
         <input class="input" id="quickIngredientChild" placeholder="留空则使用上面的分类" /></div>` : ''}
       <div class="field"><label class="field-label">默认库存方式</label><select class="select" id="quickIngredientMode"><option value="quantity">按数量</option><option value="presence">只记录有 / 没有</option></select></div>
       <div class="field"><label class="field-label">参考单位 <span class="field-hint">数量管理时使用</span></label><input class="input" id="quickIngredientUnit" list="unitList" placeholder="g、个、份…" /><datalist id="unitList">${UNITS.map((unit) => `<option value="${esc(unit)}"></option>`).join('')}</datalist></div>`,
-    foot: '<button class="btn ghost" data-act="close-sheet">取消</button><button class="btn" data-act="save-quick-ingredient">保存原料</button>',
+    foot: `<button class="btn ghost" data-act="${target && target.returnToMethod ? 'cancel-method-child-sheet' : 'close-sheet'}">取消</button><button class="btn" data-act="save-quick-ingredient">保存原料</button>`,
     onMount() { $('#quickIngredientName')?.focus(); },
   });
 }
@@ -1473,6 +1475,7 @@ const dishDrafts = new Map();
 let sheetBaseline = null; // 打开时的表单快照；null = 不做脏检查
 let sheetDraftKey = null; // 这次草稿归属谁
 let pendingStockInputResolve = null;
+let methodEditorDraft = null;
 
 /**
  * 抓当前弹层里所有可编辑控件的值，用来判断「有没有改过」和存草稿。
@@ -5030,23 +5033,47 @@ function redrawSeasons() {
  */
 function methodCardHtml(m, i) {
   const seasons = m.seasonings || [];
+  const stepSummary = (m.steps || []).slice(0, 2).join(' / ') || '还没有填写步骤';
   return `<div class="sub-card">
     <div class="sub-card-head">
-      <input class="mini-input" data-act="method-name" data-i="${i}" value="${esc(m.name)}" placeholder="做法名称（如：红烧 / 清蒸 / 微辣版）" />
-      <button class="del-btn" data-act="rm-method" data-i="${i}">✕</button>
+      <span class="method-summary"><strong>${esc(m.name || `做法 ${i + 1}`)}</strong><small>${esc(stepSummary)}</small><small>${seasons.length} 种原料 · ${(m.steps || []).length} 步</small></span>
+      <button class="btn ghost sm" data-act="edit-method" data-i="${i}">编辑</button>
+      <button class="del-btn" data-act="rm-method" data-i="${i}" aria-label="删除做法">✕</button>
     </div>
-    <div class="mseason">
-      <div class="mseason-label">这个做法的原料<span class="field-hint">填写本做法完整原料与用量</span></div>
-      ${seasons
-        .map(
-          (s, j) => recipeIngredientRowHtml(s, 'mseason', i, j, S.draft.dish)
-        )
-        .join('')}
-      <button class="btn ghost sm" data-act="add-mseason" data-i="${i}">＋ 加一味</button>
-    </div>
-    <textarea class="textarea" data-act="method-steps" data-i="${i}"
-      placeholder="一行一步">${esc(m.steps.join('\n'))}</textarea>
   </div>`;
+}
+
+function methodEditorHtml(methodIndex) {
+  const method = methodEditorDraft && methodEditorDraft.method;
+  if (!method) return '';
+  return `<div class="field"><label class="field-label" for="methodEditorName">做法名称 *</label>
+      <input class="input" id="methodEditorName" data-act="method-editor-name" value="${esc(method.name)}" placeholder="红烧 / 清蒸" /></div>
+    <div class="field"><label class="field-label" for="methodEditorSteps">完整步骤</label>
+      <textarea class="textarea" id="methodEditorSteps" data-act="method-editor-steps" rows="7" placeholder="一行一步，记录从准备到出锅的完整过程">${esc((method.steps || []).join('\n'))}</textarea></div>
+    <div class="field"><label class="field-label">本做法原料 <span class="field-hint">和其他做法分别维护</span></label>
+      <div class="mseason">${(method.seasonings || []).map((row, rowIndex) => recipeIngredientRowHtml(row, 'mseason', methodIndex, rowIndex, S.draft.dish)).join('')}
+        <button class="btn soft sm" data-act="add-mseason" data-i="${methodIndex}">＋ 添加原料</button></div></div>`;
+}
+
+function openMethodEditor(methodIndex) {
+  const method = S.draft && S.draft.dish.methods[methodIndex];
+  if (!method) return toast('做法已变化，请重新打开');
+  const isNew = !method.name && !method.steps.length && !method.seasonings.length;
+  methodEditorDraft = { methodIndex, isNew, method: { ...method, seasonings: (method.seasonings || []).map((row) => ({ ...row })), steps: [...(method.steps || [])] } };
+  renderMethodEditor();
+}
+
+function renderMethodEditor() {
+  if (!methodEditorDraft) return;
+  const methodIndex = methodEditorDraft.methodIndex;
+  const method = methodEditorDraft.method;
+  const isNew = methodEditorDraft.isNew;
+  openSheet({
+    title: isNew ? '新增做法' : '编辑做法',
+    body: methodEditorHtml(methodIndex),
+    foot: `<button class="btn ghost" data-act="cancel-method-editor">取消</button><button class="btn" data-act="save-method-editor">保存做法</button>`,
+    onMount() { $('#methodEditorName')?.focus(); },
+  });
 }
 
 function redrawMethods() {
@@ -6590,11 +6617,16 @@ const ACTIONS = {
     collectDish();
     S.draft.dish.methods.push({
       id: '',
-      name: `做法 ${S.draft.dish.methods.length + 1}`,
+      name: '',
       seasonings: [],
       steps: [],
     });
-    redrawMethods();
+    const index = S.draft.dish.methods.length - 1;
+    openMethodEditor(index);
+  },
+  'edit-method'(el) {
+    collectDish();
+    openMethodEditor(Number(el.dataset.i));
   },
   'rm-method'(el) {
     collectDish();
@@ -6602,19 +6634,38 @@ const ACTIONS = {
     redrawMethods();
   },
   'add-mseason'(el) {
-    collectDish();
-    const m = S.draft.dish.methods[Number(el.dataset.i)];
-    if (!m) return;
-    m.seasonings = m.seasonings || [];
-    m.seasonings.push({ name: '', amount: '' });
-    redrawMethods();
+    const methodIndex = Number(el.dataset.i);
+    if (!methodEditorDraft || methodEditorDraft.methodIndex !== methodIndex) return toast('做法编辑已结束，请重新打开');
+    methodEditorDraft.method.seasonings.push({ name: '', amount: '' });
+    renderMethodEditor();
   },
   'mseason-remove'(el) {
-    collectDish();
-    const m = S.draft.dish.methods[Number(el.dataset.i)];
+    const methodIndex = Number(el.dataset.i);
+    const m = methodEditorDraft && methodEditorDraft.methodIndex === methodIndex ? methodEditorDraft.method : null;
     if (!m) return;
     m.seasonings.splice(Number(el.dataset.j), 1);
-    redrawMethods();
+    renderMethodEditor();
+  },
+  'cancel-method-editor'() {
+    methodEditorDraft = null;
+    openDishEditor(S.draft.dish);
+  },
+  'cancel-method-child-sheet'() {
+    S.quickIngredientDraft = null;
+    S.quickIngredientTarget = null;
+    S.recipeIngredientBrowser = null;
+    renderMethodEditor();
+  },
+  'save-method-editor'() {
+    if (!methodEditorDraft || !S.draft) return toast('做法编辑已结束，请重新打开');
+    const method = methodEditorDraft.method;
+    method.name = ($('#methodEditorName')?.value || '').trim();
+    method.steps = ($('#methodEditorSteps')?.value || '').split('\n').map((step) => step.trim()).filter(Boolean);
+    if (!method.name) return toast('请填写做法名称');
+    if (!method.steps.length) return toast('请填写完整步骤');
+    S.draft.dish.methods[methodEditorDraft.methodIndex] = method;
+    methodEditorDraft = null;
+    openDishEditor(S.draft.dish);
   },
   async 'save-dish'() {
     const d = collectDish();
@@ -7251,9 +7302,13 @@ const ACTIONS = {
     if (!context || !context.dish) return toast('材料编辑已结束，请重新打开');
     const ingredient = recipeIngredients(context.dish).find((item) => item.id === el.dataset.ingredientId);
     if (!ingredient || !RecipeIngredientLogic.applyIngredientToRecipeRow(context.dish, context.rowId, ingredient)) return toast('原料不可用，请刷新后重试');
+    if (context.returnToMethod && methodEditorDraft && methodEditorDraft.methodIndex === context.methodIndex) {
+      methodEditorDraft.method = context.dish.methods[context.methodIndex];
+    }
     S.recipeIngredientBrowser = null;
     closeSheet();
-    openDishEditor(context.dish);
+    if (context.returnToMethod) renderMethodEditor();
+    else openDishEditor(context.dish);
   },
   'season-create'(el) {
     const dish = collectDish(true);
@@ -7263,12 +7318,14 @@ const ACTIONS = {
     openQuickIngredientCreator(dish, { rowId: `general:${index}`, categoryId: row.categoryId || '' });
   },
   'mseason-create'(el) {
-    const dish = collectDish(true);
     const methodIndex = Number(el.dataset.i);
     const rowIndex = Number(el.dataset.j);
+    const dish = methodEditorDraft && methodEditorDraft.methodIndex === methodIndex
+      ? { ...S.draft.dish, methods: S.draft.dish.methods.map((method, index) => index === methodIndex ? methodEditorDraft.method : method) }
+      : collectDish(true);
     const row = dish.methods[methodIndex]?.seasonings?.[rowIndex];
     if (!row) return toast('材料行已变化，请重试');
-    openQuickIngredientCreator(dish, { rowId: `method:${methodIndex}:${rowIndex}`, categoryId: row.categoryId || '' });
+    openQuickIngredientCreator(dish, { rowId: `method:${methodIndex}:${rowIndex}`, categoryId: row.categoryId || '', returnToMethod: !!methodEditorDraft, methodIndex });
   },
   async 'ai-match-recipe-ingredients'() {
     await suggestRecipeIngredientMatches();
@@ -7335,6 +7392,9 @@ const ACTIONS = {
         S.quickIngredientTarget = null;
         return toast('材料行已变化，原料已创建但未关联；请重新选择');
       }
+      if (target.returnToMethod && methodEditorDraft && methodEditorDraft.methodIndex === target.methodIndex) {
+        methodEditorDraft.method = dish.methods[target.methodIndex];
+      }
     } else if (dish) {
       dish.seasonings.push({ name: ingredient.name, ingredientId: ingredient.id, amount: '', categoryId: ingredient.categoryId });
     }
@@ -7342,7 +7402,8 @@ const ACTIONS = {
     S.quickIngredientTarget = null;
     closeSheet();
     await loadState(true);
-    if (dish) openDishEditor(dish);
+    if (target && target.returnToMethod) renderMethodEditor();
+    else if (dish) openDishEditor(dish);
     else render();
     toast(`已添加${scope === 'global' ? '全局' : '本家庭'}原料「${ingredient.name}」`);
   },
@@ -8471,6 +8532,12 @@ const ACTIONS = {
   },
 
   'close-sheet'() {
+    if (S.recipeIngredientBrowser && S.recipeIngredientBrowser.returnToMethod) {
+      S.recipeIngredientBrowser = null;
+      return renderMethodEditor();
+    }
+    if (S.quickIngredientTarget && S.quickIngredientTarget.returnToMethod) return ACTIONS['cancel-method-child-sheet']();
+    if (methodEditorDraft) return ACTIONS['cancel-method-editor']();
     // 走守卫：填了一半也走这里，草稿照样存下来
     requestCloseSheet();
   },
@@ -8595,10 +8662,13 @@ document.addEventListener('input', (e) => {
   if (!act || !S.draft) return;
   const i = Number(el.dataset.i);
   const j = Number(el.dataset.j);
-  const m = S.draft.dish.methods[i];
+  const m = methodEditorDraft && methodEditorDraft.methodIndex === i ? methodEditorDraft.method : S.draft.dish.methods[i];
   if (act === 'season-amt' && S.draft.dish.seasonings[i]) S.draft.dish.seasonings[i].amount = el.value;
+  else if (act === 'method-editor-name' && methodEditorDraft) methodEditorDraft.method.name = el.value;
+  else if (act === 'method-editor-steps' && methodEditorDraft) methodEditorDraft.method.steps = el.value.split('\n').map((s) => s.trim()).filter(Boolean);
   else if (act === 'method-name' && m) m.name = el.value;
   else if (act === 'method-steps' && m) m.steps = el.value.split('\n').map((s) => s.trim()).filter(Boolean);
+  else if (act === 'mseason-amt' && methodEditorDraft && m && m.seasonings[j]) m.seasonings[j].amount = el.value;
   else if (act === 'mseason-amt' && m && m.seasonings[j]) m.seasonings[j].amount = el.value;
 });
 
@@ -8651,7 +8721,7 @@ document.addEventListener('change', (e) => {
   if (!act || !S.draft) return;
   const i = Number(el.dataset.i);
   const j = Number(el.dataset.j);
-  const m = S.draft.dish.methods[i];
+  const m = methodEditorDraft && methodEditorDraft.methodIndex === i ? methodEditorDraft.method : S.draft.dish.methods[i];
   if (act === 'season-category' && S.draft.dish.seasonings[i]) {
     const row = S.draft.dish.seasonings[i];
     row.categoryId = el.value;
@@ -8677,14 +8747,16 @@ document.addEventListener('change', (e) => {
     row.categoryId = el.value;
     row.name = '';
     row.ingredientId = '';
-    redrawMethods();
+    if (methodEditorDraft) renderMethodEditor();
+    else redrawMethods();
   } else if (act === 'mseason-ingredient' && m && m.seasonings[j]) {
     const row = m.seasonings[j];
     const ingredient = ingredientById(el.value, S.draft.dish.householdId);
     row.ingredientId = ingredient ? ingredient.id : '';
     row.name = ingredient ? ingredient.name : '';
     row.categoryId = ingredient ? ingredient.categoryId : row.categoryId;
-    redrawMethods();
+    if (methodEditorDraft) renderMethodEditor();
+    else redrawMethods();
   } else if (act === 'mseason-ingredient-search' && m && m.seasonings[j]) {
     const row = m.seasonings[j];
     const match = RecipeIngredientLogic.searchIngredients(recipeIngredients(S.draft.dish), el.value, householdPantryCategories(S.draft.dish.householdId), row.categoryId)

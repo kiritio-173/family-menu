@@ -1536,6 +1536,10 @@ a { color: var(--primary-dark); }
 .batch-recipe-main .input, .batch-recipe-main .select { width: 100%; min-width: 0; padding: 6px 8px; font-size: 13px; }
 .batch-recipe-main b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .batch-progress { padding: 30px 10px; text-align: center; color: var(--muted); line-height: 1.7; }
+.method-summary { display: grid; gap: 4px; min-width: 0; flex: 1; }
+.method-summary strong { color: var(--text); font-size: 14px; }
+.method-summary small { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.sub-card-head { align-items: center; }
 
 @media (max-width: 560px) {
   .order-date-picker { width: 100%; flex: 1 1 100%; }
