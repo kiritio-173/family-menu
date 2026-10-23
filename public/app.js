@@ -4394,6 +4394,8 @@ function recipeIngredientPickerHtml(row, scope, i, j) {
   const categoryId = recipeIngredientCategoryId(row);
   const selected = row && row.ingredientId ? ingredientById(row.ingredientId) : null;
   const unresolved = !!(row && row.name && !selected);
+  // 共享菜谱没有当前家庭的原料归属；先收进我家，再在私房副本中绑定材料。
+  const canAddHouseholdIngredient = !!(S.draft && S.draft.dish && S.draft.dish.householdId && S.draft.dish.householdId === S.householdId);
   const key = `${scope}-${i}${j === undefined ? '' : `-${j}`}`;
   const categoryOptions = `<option value="">选择材料分类</option>${categories.map((category) => {
     const path = pantryCategoryPath(category.id, categories);
@@ -4412,7 +4414,7 @@ function recipeIngredientPickerHtml(row, scope, i, j) {
   </div>
   <div class="recipe-ingredient-tools">
     ${unresolved ? `<span class="recipe-ingredient-warning">⚠ 「${esc(row.name)}」尚未关联家庭原料</span>` : ''}
-    ${S.householdId ? `<button class="btn ghost sm" data-act="quick-add-ingredient" data-scope="${esc(scope)}" data-i="${i}" ${j === undefined ? '' : `data-j="${j}"`} data-category-id="${esc(categoryId)}">＋ 在此分类新增</button>` : ''}
+    ${canAddHouseholdIngredient ? `<button class="btn ghost sm" data-act="quick-add-ingredient" data-scope="${esc(scope)}" data-i="${i}" ${j === undefined ? '' : `data-j="${j}"`} data-category-id="${esc(categoryId)}">＋ 在此分类新增</button>` : ''}
   </div>`;
 }
 
