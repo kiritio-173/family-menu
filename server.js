@@ -41,10 +41,21 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.31.5';
+const APP_VERSION = '1.31.6';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.31.6',
+    date: '2026-10-24',
+    title: '统一菜谱材料选择与家庭原料关联',
+    items: [
+      '菜品通用材料和每个做法的材料统一使用“分类 → 家庭原料 → 用量”选择流程，分类切换只更新当前材料行',
+      '原料选择保存家庭原料 ID，计划与库存继续沿用同一原料；可从当前分类直接新增原料并回填到当前行',
+      '旧材料保留原文并提示待关联；超级管理员可让 AI 仅从当前家庭已有原料提出匹配，必须逐项确认后才写入',
+      '移除菜谱材料行的采购方式覆盖，旧 purchaseType 不再影响计划追踪方式，后续保存不再写入该字段',
+    ],
+  },
   {
     version: '1.31.5',
     date: '2026-10-21',
@@ -1272,9 +1283,9 @@ function ensureHouseholdIngredient(householdId, row, pantryCategory) {
   if (existing) return existing;
   const stock = state.pantry.find((item) => item.householdId === householdId &&
     item.name.toLocaleLowerCase() === name.toLocaleLowerCase());
-  const purchaseType = row && row.purchaseType;
-  const trackingMode = purchaseType === 'staple' ? 'presence' :
-    purchaseType === 'purchase' ? 'quantity' : isKnownSeasoning(name) ? 'presence' : 'quantity';
+  // 菜谱行上的旧 purchaseType 只是历史显示字段，不再决定库存追踪方式。
+  // 迁移时按家庭原料/分类的默认规则建立新原料，避免旧菜谱覆盖统一字典。
+  const trackingMode = isKnownSeasoning(name) ? 'presence' : 'quantity';
   const ingredient = normIngredient({
     householdId,
     name,
@@ -1355,6 +1366,7 @@ function copyDishToScope(source, householdId, req) {
   const mapRows = (rows) => (Array.isArray(rows) ? rows : []).map((row) => {
     const mapped = { ...row };
     delete mapped.ingredientId;
+    delete mapped.purchaseType;
     if (householdId) {
       const ingredient = findHouseholdIngredient(householdId, mapped.name);
       if (ingredient) mapped.ingredientId = ingredient.id;
@@ -2809,6 +2821,22 @@ function scheduleAutoBackup() {
  * 菜品规范化
  * ------------------------------------------------------------------ */
 
+function stripLegacyPurchaseType(input) {
+  if (!input || typeof input !== 'object') return input;
+  const cleanRows = (rows) => (Array.isArray(rows) ? rows : []).map((row) => {
+    if (!row || typeof row !== 'object') return row;
+    const { purchaseType, ...clean } = row;
+    return clean;
+  });
+  return {
+    ...input,
+    seasonings: cleanRows(input.seasonings),
+    methods: Array.isArray(input.methods)
+      ? input.methods.map((method) => ({ ...method, seasonings: cleanRows(method && method.seasonings) }))
+      : input.methods,
+  };
+}
+
 function normDish(input, prev, keepInputId) {
   const base = prev || {};
   const rawName = safeText(input.name, 40).trim();
@@ -3925,6 +3953,15 @@ async function handleAPI(req, res, url) {
           '通用的留在菜品级；只有一个做法时调料一律放菜品级，那个做法的 seasonings 留空数组。',
         wantJSON: true,
       },
+      'ingredient-match': {
+        system:
+          '你是家庭菜谱材料匹配助手。输入包含待关联的旧材料行和当前家庭已有原料候选。' +
+          '只能从 candidates 中选择明确同义的 ingredientId；同类但不是同一原料时不要匹配。' +
+          '不确定就不要返回该行，不得创建新原料、分类、别名、用量或库存状态。' +
+          '只输出 JSON：{"matches":[{"rowId":"待关联行 ID","ingredientId":"候选原料 ID"}]}。' +
+          '不得输出解释、理由、置信度或候选之外的 ID。',
+        wantJSON: true,
+      },
       'ingredient-classify': {
         system:
           '你是家庭食材分类助手。用户会给你若干食材名称及现有分类线索。' +
@@ -4001,7 +4038,23 @@ async function handleAPI(req, res, url) {
       });
     }
     let result = t.wantJSON ? r.json : r.text;
-    if (task === 'ingredient-classify') {
+    if (task === 'ingredient-match') {
+      const source = r.json && Array.isArray(r.json.matches) ? r.json.matches : [];
+      const seenRows = new Set();
+      const seenIngredients = new Set();
+      const matches = source.slice(0, 100).filter((item) => {
+        const rowId = safeText(item && item.rowId, 80).trim();
+        const ingredientId = safeText(item && item.ingredientId, 80).trim();
+        if (!rowId || !ingredientId || seenRows.has(rowId) || seenIngredients.has(ingredientId)) return false;
+        seenRows.add(rowId);
+        seenIngredients.add(ingredientId);
+        return true;
+      }).map((item) => ({
+        rowId: safeText(item.rowId, 80).trim(),
+        ingredientId: safeText(item.ingredientId, 80).trim(),
+      }));
+      result = { matches };
+    } else if (task === 'ingredient-classify') {
       const allowedCategories = new Set(PANTRY_CATEGORIES.map((c) => c.name));
       const source = r.json && Array.isArray(r.json.items) ? r.json.items : [];
       const items = source.slice(0, 100).filter((item) =>
@@ -4634,7 +4687,7 @@ async function handleAPI(req, res, url) {
         if (!isMyMember(req, hhId) && !isHouseAdmin(req, hhId)) {
           return sendError(res, 403, '先说说你是谁，这道菜才好记下是谁加的');
         }
-        const dish = normDish({ ...(await readBody(req)), householdId: hhId });
+        const dish = normDish(stripLegacyPurchaseType({ ...(await readBody(req)), householdId: hhId }));
         if (!dish || !dish.name) return sendError(res, 400, '菜名不能为空');
         const ingredientProblem = dishIngredientReferenceProblem(dish, hhId);
         if (ingredientProblem) return sendError(res, 400, ingredientProblem);
@@ -4658,7 +4711,7 @@ async function handleAPI(req, res, url) {
         if (!canWrite(req, state.dishes[idx])) {
           return sendError(res, 403, writeDenied(state.dishes[idx]));
         }
-        const dish = normDish({ ...(await readBody(req)), householdId: hhId }, state.dishes[idx]);
+        const dish = normDish(stripLegacyPurchaseType({ ...(await readBody(req)), householdId: hhId }), state.dishes[idx]);
         const ingredientProblem = dishIngredientReferenceProblem(dish, hhId);
         if (ingredientProblem) return sendError(res, 400, ingredientProblem);
         dish.authorId = state.dishes[idx].authorId;
@@ -5489,7 +5542,7 @@ async function handleAPI(req, res, url) {
     }
     if (method === 'POST' && !id) {
       const body = await readBody(req);
-      const dish = normDish(body);
+      const dish = normDish(stripLegacyPurchaseType(body));
       if (!dish) return sendError(res, 400, '菜名不能为空');
       const ingredientProblem = dishIngredientReferenceProblem(dish, dish.householdId);
       if (ingredientProblem) return sendError(res, 400, ingredientProblem);
@@ -5516,7 +5569,7 @@ async function handleAPI(req, res, url) {
       if (!canWrite(req, state.dishes[idx])) {
         return sendError(res, 403, writeDenied(state.dishes[idx]));
       }
-      const dish = normDish(await readBody(req), state.dishes[idx]);
+      const dish = normDish(stripLegacyPurchaseType(await readBody(req)), state.dishes[idx]);
       const ingredientProblem = dishIngredientReferenceProblem(dish, dish.householdId);
       if (ingredientProblem) return sendError(res, 400, ingredientProblem);
       // 作者不许改：这条要是你写的，以后就一直是你的
@@ -5539,7 +5592,7 @@ async function handleAPI(req, res, url) {
       if (src.householdId && !requireAccountHousehold(req, res, src.householdId)) return;
       if (!canWrite(req, src)) return sendError(res, 403, writeDenied(src));
       // 副本跟原菜一个归属：复制我家私菜不该把它变成全体共享
-      const copy = normDish({ ...src, id: '', name: src.name + '（副本）' });
+      const copy = normDish(stripLegacyPurchaseType({ ...src, id: '', name: src.name + '（副本）' }));
       copy.isFavorite = false;
       const who = whoami(req, copy.householdId);
       copy.authorId = who.kind === 'member' ? who.memberId : '';

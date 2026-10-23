@@ -61,6 +61,7 @@ const S = {
   manageKeyword: '',
   manageGroups: { family: true, menu: true, system: true },
   randomFilters: null,
+  ingredientMatchReview: null,
   batchImport: [], // 图片批量识别后等待用户审核的菜谱草稿
   batchExportSel: new Set(), // 批量导出图片时选中的菜品
 };
@@ -638,24 +639,32 @@ function ingredientNameDatalist(id) {
 function ingredientCategoryOptions(selectedId) {
   const categories = householdPantryCategories();
   return categories.map((category) => {
-    const path = pantryCategoryPath(category, categories);
+    const path = pantryCategoryPath(category.id, categories);
     return path ? `<option value="${esc(category.id)}" ${category.id === selectedId ? 'selected' : ''}>${esc(path)}</option>` : '';
   }).join('');
 }
 
-function openQuickIngredientCreator(dish) {
+function openQuickIngredientCreator(dish, context) {
   if (!dish.householdId) return toast('先把菜品可见范围切换为「仅本家」，才能关联家庭原料');
-  S.quickIngredientDraft = dish;
-  const defaultCategory = householdPantryCategories().find((category) => category.name === '其他');
+  const ctx = context || {};
+  const categories = recipeIngredientCategories();
+  const selectedCategory = categories.find((category) => category.id === ctx.categoryId) || null;
+  S.quickIngredientDraft = {
+    dish,
+    scope: ctx.scope || 'general',
+    index: Number(ctx.i),
+    methodIndex: ctx.j === undefined ? null : Number(ctx.j),
+    categoryId: selectedCategory ? selectedCategory.id : '',
+  };
   openSheet({
     title: '新建家庭原料',
     body: `<div class="field"><label class="field-label">原料名称 *</label><input class="input" id="quickIngredientName" placeholder="例如：牛里脊" /></div>
-      <div class="field"><label class="field-label">分类</label><select class="select" id="quickIngredientCategory">${ingredientCategoryOptions(defaultCategory && defaultCategory.id)}</select></div>
+      <div class="field"><label class="field-label">分类<span class="field-hint">当前行的分类已预选，可改为其他家庭分类</span></label><select class="select" id="quickIngredientCategory">${ingredientCategoryOptions(selectedCategory ? selectedCategory.id : '')}</select></div>
       ${isHouseAdmin(S.householdId) ? `<div class="field"><label class="field-label">新增子分类 <span class="field-hint">可选；分类仅归类，不会合并不同原料</span></label>
         <input class="input" id="quickIngredientChild" placeholder="留空则使用上面的分类" /></div>` : ''}
       <div class="field"><label class="field-label">默认库存方式</label><select class="select" id="quickIngredientMode"><option value="quantity">按数量</option><option value="presence">只记录有 / 没有</option></select></div>
       <div class="field"><label class="field-label">参考单位 <span class="field-hint">数量管理时使用</span></label><input class="input" id="quickIngredientUnit" list="unitList" placeholder="g、个、份…" /><datalist id="unitList">${UNITS.map((unit) => `<option value="${esc(unit)}"></option>`).join('')}</datalist></div>`,
-    foot: '<button class="btn ghost" data-act="close-sheet">取消</button><button class="btn" data-act="save-quick-ingredient">保存原料</button>',
+    foot: '<button class="btn ghost" data-act="cancel-quick-ingredient">取消</button><button class="btn" data-act="save-quick-ingredient">保存原料</button>',
     onMount() { $('#quickIngredientName')?.focus(); },
   });
 }
@@ -1326,7 +1335,7 @@ function snapshotSheetInputs() {
   if (!root) return out;
   root
     .querySelectorAll(
-      'input[id], textarea[id], select[id], input[data-act="season-name"], input[data-act="season-amt"], select[data-act="season-type"], input[data-act="method-name"], textarea[data-act="method-steps"], input[data-act="mseason-name"], input[data-act="mseason-amt"], select[data-act="mseason-type"]'
+      'input[id], textarea[id], select[id], input[data-act="recipe-ingredient-search"], input[data-act="recipe-amt"], select[data-act="recipe-category"], select[data-act="recipe-ingredient"], input[data-act="method-name"], textarea[data-act="method-steps"]'
     )
     .forEach((el) => {
       const k = el.id || `${el.dataset.act}:${el.dataset.i || ''}:${el.dataset.j || ''}`;
@@ -1346,7 +1355,7 @@ function applySheetInputs(snap) {
   if (!root || !snap) return;
   root
     .querySelectorAll(
-      'input[id], textarea[id], select[id], input[data-act="season-name"], input[data-act="season-amt"], select[data-act="season-type"], input[data-act="method-name"], textarea[data-act="method-steps"], input[data-act="mseason-name"], input[data-act="mseason-amt"], select[data-act="mseason-type"]'
+      'input[id], textarea[id], select[id], input[data-act="recipe-ingredient-search"], input[data-act="recipe-amt"], select[data-act="recipe-category"], select[data-act="recipe-ingredient"], input[data-act="method-name"], textarea[data-act="method-steps"]'
     )
     .forEach((el) => {
       const k = el.id || `${el.dataset.act}:${el.dataset.i || ''}:${el.dataset.j || ''}`;
@@ -2531,11 +2540,11 @@ function findStock(name, ingredientId) {
 function collectDishSeasonings(d) {
   const out = [];
   (d.seasonings || []).forEach((s) => {
-    if (s.name) out.push({ name: (ingredientById(s.ingredientId) || {}).name || s.name, ingredientId: s.ingredientId || '', amount: s.amount, purchaseType: s.purchaseType || '', method: '' });
+    if (s.name) out.push({ name: (ingredientById(s.ingredientId) || {}).name || s.name, ingredientId: s.ingredientId || '', amount: s.amount, method: '' });
   });
   (d.methods || []).forEach((m) => {
     (m.seasonings || []).forEach((s) => {
-      if (s.name) out.push({ name: (ingredientById(s.ingredientId) || {}).name || s.name, ingredientId: s.ingredientId || '', amount: s.amount, purchaseType: s.purchaseType || '', method: m.name || '' });
+      if (s.name) out.push({ name: (ingredientById(s.ingredientId) || {}).name || s.name, ingredientId: s.ingredientId || '', amount: s.amount, method: m.name || '' });
     });
   });
   return out;
@@ -4358,13 +4367,128 @@ function openHouseholdEditor(house) {
    菜品编辑
    ========================================================= */
 
-function seasoningTypeSelect(type, attrs) {
-  const v = ['staple', 'purchase'].includes(type) ? type : '';
-  return `<select class="mini-input" ${attrs || ''} aria-label="调料采购类型">
-    <option value="" ${v === '' ? 'selected' : ''}>自动判断</option>
-    <option value="staple" ${v === 'staple' ? 'selected' : ''}>常备调料</option>
-    <option value="purchase" ${v === 'purchase' ? 'selected' : ''}>需要采购</option>
-  </select>`;
+function recipeIngredientCategories() {
+  return householdPantryCategories().filter((category) => category && category.id);
+}
+
+function recipeIngredientCategoryId(row) {
+  const ingredient = row && row.ingredientId ? ingredientById(row.ingredientId) : ingredientByName(row && row.name);
+  if (ingredient) return ingredient.categoryId || '';
+  const categories = recipeIngredientCategories();
+  return row && categories.some((category) => category.id === row.categoryId) ? row.categoryId : '';
+}
+
+function recipeIngredientOptions(row, categoryId, search) {
+  const categories = recipeIngredientCategories();
+  const list = window.RecipeIngredientLogic
+    ? window.RecipeIngredientLogic.filterIngredientsByCategory(householdIngredients(), categories, categoryId, search)
+    : householdIngredients().filter((ingredient) => ingredient.categoryId === categoryId);
+  const selected = row && row.ingredientId ? String(row.ingredientId) : '';
+  const options = list.map((ingredient) => `<option value="${esc(ingredient.id)}" ${ingredient.id === selected ? 'selected' : ''}>${esc(ingredient.name)}${ingredient.aliases && ingredient.aliases.length ? `（${esc(ingredient.aliases.slice(0, 2).join('、'))}）` : ''}</option>`).join('');
+  const current = selected && !list.some((ingredient) => ingredient.id === selected) ? ingredientById(selected) : null;
+  return `<option value="">${categoryId ? (list.length ? '选择原料' : '该分类下暂无原料') : '先选择类别'}</option>${current ? `<option value="${esc(current.id)}" selected>${esc(current.name)}（当前原料）</option>` : ''}${options}`;
+}
+
+function recipeIngredientPickerHtml(row, scope, i, j) {
+  const categories = recipeIngredientCategories();
+  const categoryId = recipeIngredientCategoryId(row);
+  const selected = row && row.ingredientId ? ingredientById(row.ingredientId) : null;
+  const unresolved = !!(row && row.name && !selected);
+  const key = `${scope}-${i}${j === undefined ? '' : `-${j}`}`;
+  const categoryOptions = `<option value="">选择材料分类</option>${categories.map((category) => {
+    const path = pantryCategoryPath(category.id, categories);
+    return `<option value="${esc(category.id)}" ${category.id === categoryId ? 'selected' : ''}>${esc(path || category.name)}</option>`;
+  }).join('')}`;
+  const searchValue = selected ? selected.name : (row && row.name ? row.name : '');
+  return `<div class="recipe-ingredient-row" data-recipe-row="${esc(key)}" data-scope="${esc(scope)}" data-i="${i}" ${j === undefined ? '' : `data-j="${j}"`}>
+    <select class="mini-input recipe-ingredient-category" data-act="recipe-category" data-i="${i}" ${j === undefined ? '' : `data-j="${j}"`} aria-label="材料分类">${categoryOptions}</select>
+    <div class="recipe-ingredient-choice">
+      <input class="mini-input recipe-ingredient-search" list="${esc(`recipe-ingredients-${key}`)}" data-act="recipe-ingredient-search" data-i="${i}" ${j === undefined ? '' : `data-j="${j}"`} value="${esc(searchValue)}" placeholder="搜索或输入原料" autocomplete="off" />
+      <datalist id="${esc(`recipe-ingredients-${key}`)}">${householdIngredients().map((ingredient) => `<option value="${esc(ingredient.name)}">${esc(pantryCategoryPath(ingredient.categoryId))}</option>`).join('')}</datalist>
+      <select class="mini-input recipe-ingredient-select" data-act="recipe-ingredient" data-i="${i}" ${j === undefined ? '' : `data-j="${j}"`} aria-label="原料" ${categoryId ? '' : 'disabled'}>${recipeIngredientOptions(row, categoryId)}</select>
+    </div>
+    <input class="mini-input recipe-ingredient-amount" data-act="recipe-amt" data-i="${i}" ${j === undefined ? '' : `data-j="${j}"`} value="${esc(row && row.amount)}" placeholder="用量，如 200g" />
+    <button class="del-btn" data-act="${scope === 'method' ? 'rm-mseason' : 'rm-season'}" data-i="${i}" ${j === undefined ? '' : `data-j="${j}"`} aria-label="删除原料">✕</button>
+  </div>
+  <div class="recipe-ingredient-tools">
+    ${unresolved ? `<span class="recipe-ingredient-warning">⚠ 「${esc(row.name)}」尚未关联家庭原料</span>` : ''}
+    ${S.householdId ? `<button class="btn ghost sm" data-act="quick-add-ingredient" data-scope="${esc(scope)}" data-i="${i}" ${j === undefined ? '' : `data-j="${j}"`} data-category-id="${esc(categoryId)}">＋ 在此分类新增</button>` : ''}
+  </div>`;
+}
+
+function recipeDraftRow(el) {
+  if (!S.draft || !el) return null;
+  const holder = el.closest ? (el.closest('.recipe-ingredient-row') || el) : el;
+  const i = Number(holder.dataset.i);
+  const j = holder.dataset.j === undefined ? null : Number(holder.dataset.j);
+  if (holder.dataset.scope === 'method') {
+    const method = S.draft.dish.methods[i];
+    return method && method.seasonings[j] ? { row: method.seasonings[j], scope: 'method', i, j } : null;
+  }
+  return S.draft.dish.seasonings[i] ? { row: S.draft.dish.seasonings[i], scope: 'general', i, j: null } : null;
+}
+
+function replaceRecipeIngredientRow(el, context) {
+  const current = el && el.closest('.recipe-ingredient-row');
+  if (!current) return;
+  const info = context || { scope: current.dataset.scope, i: Number(current.dataset.i), j: current.dataset.j === undefined ? undefined : Number(current.dataset.j) };
+  const oldTools = current.nextElementSibling;
+  const template = document.createElement('template');
+  const infoRow = info.scope === 'method' ? S.draft.dish.methods[info.i]?.seasonings[info.j] : S.draft.dish.seasonings[info.i];
+  template.innerHTML = recipeIngredientPickerHtml(infoRow || {}, info.scope, info.i, info.j);
+  if (oldTools && oldTools.classList.contains('recipe-ingredient-tools')) oldTools.remove();
+  current.replaceWith(template.content);
+}
+
+function recipeIngredientMatchesCategory(ingredientId, categoryId) {
+  const categories = recipeIngredientCategories();
+  const ingredient = ingredientById(ingredientId);
+  if (!ingredient || !categoryId) return false;
+  const allowed = window.RecipeIngredientLogic
+    ? window.RecipeIngredientLogic.filterIngredientsByCategory([ingredient], categories, categoryId)
+    : [ingredient].filter((item) => item.categoryId === categoryId);
+  return allowed.length > 0;
+}
+
+function setRecipeIngredientFromName(el, value) {
+  const info = recipeDraftRow(el);
+  if (!info) return;
+  const ingredient = ingredientByName(value);
+  if (ingredient) {
+    info.row.name = ingredient.name;
+    info.row.ingredientId = ingredient.id;
+    info.row.categoryId = ingredient.categoryId;
+    const categoryEl = el.closest('.recipe-ingredient-row')?.querySelector('[data-act="recipe-category"]');
+    if (categoryEl) categoryEl.value = ingredient.categoryId;
+    const select = el.closest('.recipe-ingredient-row')?.querySelector('[data-act="recipe-ingredient"]');
+    if (select) {
+      select.disabled = false;
+      select.innerHTML = recipeIngredientOptions(info.row, ingredient.categoryId);
+      select.value = ingredient.id;
+    }
+  } else {
+    info.row.name = String(value || '');
+    info.row.ingredientId = '';
+  }
+}
+
+function recipeMaterialRows(dish) {
+  const rows = [];
+  (dish && dish.seasonings || []).forEach((row, i) => rows.push({ id: `general-${i}`, row, scope: 'general', i }));
+  (dish && dish.methods || []).forEach((method, i) => {
+    (method.seasonings || []).forEach((row, j) => rows.push({ id: `method-${i}-${j}`, row, scope: 'method', i, j }));
+  });
+  return rows;
+}
+
+function unresolvedRecipeMaterialRows(dish) {
+  return recipeMaterialRows(dish).filter((entry) => String(entry.row && entry.row.name || '').trim() && !entry.row.ingredientId);
+}
+
+function ingredientMatchButtonHtml(dish) {
+  if (!dish || !dish.householdId || !isSuper() || !aiReady() || !unresolvedRecipeMaterialRows(dish).length) return '';
+  return `<button class="btn soft sm ai-btn" data-act="ai-match-ingredients" style="margin-top:8px">✨ 只匹配已有家庭原料</button>
+    <p class="field-hint" style="margin-top:5px">AI 只从当前家庭已有原料中提出匹配；不确定的材料保留原文，不会自动创建或猜算。</p>`;
 }
 
 function openDishEditor(dish) {
@@ -4399,11 +4523,17 @@ function openDishEditor(dish) {
       ...d,
       images: [...(d.images || [])],
       tags: [...(d.tags || [])],
-      seasonings: (d.seasonings || []).map((s) => ({ ...s })),
+      seasonings: (d.seasonings || []).map((s) => {
+        const linked = s.ingredientId ? ingredientById(s.ingredientId, d.householdId) : ingredientByName(s.name, d.householdId);
+        return { name: linked ? linked.name : String(s.name || ''), amount: String(s.amount || ''), ...(linked ? { ingredientId: linked.id, categoryId: linked.categoryId } : {}) };
+      }),
       methods: (d.methods || []).map((m) => ({
         name: m.name,
         // 老数据没有这个字段，补空数组，菜谱不会少东西
-        seasonings: (m.seasonings || []).map((s) => ({ ...s })),
+        seasonings: (m.seasonings || []).map((s) => {
+          const linked = s.ingredientId ? ingredientById(s.ingredientId, d.householdId) : ingredientByName(s.name, d.householdId);
+          return { name: linked ? linked.name : String(s.name || ''), amount: String(s.amount || ''), ...(linked ? { ingredientId: linked.id, categoryId: linked.categoryId } : {}) };
+        }),
         steps: [...(m.steps || [])],
       })),
     },
@@ -4496,22 +4626,12 @@ function openDishEditor(dish) {
       </div>
 
       <div class="field">
-        <label class="field-label">通用调料<span class="field-hint">“自动判断”会把「调味干货」当常备；可逐项切换为常备或需要采购</span></label>
-        ${ingredientNameDatalist('dishIngredients')}
+        <label class="field-label">通用材料<span class="field-hint">先选分类，再选家庭原料；用量只记录做法说明，采购方式由原料字典统一决定</span></label>
         <div id="fSeasons">
-          ${d.seasonings
-            .map(
-              (s, i) => `<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 112px auto;gap:6px;margin-bottom:8px">
-                <input class="mini-input" list="dishIngredients" data-act="season-name" data-i="${i}" value="${esc(s.name)}" placeholder="原料名（可搜索家庭原料）" />
-                <input class="mini-input" data-act="season-amt" data-i="${i}" value="${esc(s.amount)}" placeholder="用量" />
-                ${seasoningTypeSelect(s.purchaseType, `data-act="season-type" data-i="${i}"`)}
-                <button class="del-btn" data-act="rm-season" data-i="${i}">✕</button>
-              </div>`
-            )
-            .join('')}
+          ${d.seasonings.map((s, i) => recipeIngredientPickerHtml(s, 'general', i)).join('')}
         </div>
-        <button class="btn ghost sm" data-act="add-season">＋ 加一味调料</button>
-        ${S.householdId ? '<button class="btn soft sm" data-act="quick-add-ingredient">＋ 新建家庭原料</button>' : ''}
+        <button class="btn ghost sm" data-act="add-season">＋ 加一项材料</button>
+        ${ingredientMatchButtonHtml(d)}
       </div>
 
       <div class="field">
@@ -4591,13 +4711,13 @@ function batchDishFromAI(result, imageUrl) {
     ? r.tags.map((x) => toText(x, 24)).filter(Boolean).slice(0, 12)
     : toText(r.tags, 160).split(/[,，、]/).map((x) => x.trim()).filter(Boolean).slice(0, 12);
   const seasonings = Array.isArray(r.seasonings)
-    ? r.seasonings.map((s) => ({ name: toText(s && s.name, 40), amount: toText(s && s.amount, 40), purchaseType: s && ['staple', 'purchase'].includes(s.purchaseType) ? s.purchaseType : '' })).filter((s) => s.name)
+    ? r.seasonings.map((s) => ({ name: toText(s && s.name, 40), amount: toText(s && s.amount, 40) })).filter((s) => s.name)
     : [];
   const methods = Array.isArray(r.methods)
     ? r.methods.map((m, i) => ({
         name: toText(m && m.name, 40) || `做法 ${i + 1}`,
         seasonings: Array.isArray(m && m.seasonings)
-          ? m.seasonings.map((s) => ({ name: toText(s && s.name, 40), amount: toText(s && s.amount, 40), purchaseType: s && ['staple', 'purchase'].includes(s.purchaseType) ? s.purchaseType : '' })).filter((s) => s.name)
+          ? m.seasonings.map((s) => ({ name: toText(s && s.name, 40), amount: toText(s && s.amount, 40) })).filter((s) => s.name)
           : [],
         steps: Array.isArray(m && m.steps) ? m.steps.map((x) => toText(x, 240)).filter(Boolean).slice(0, 30) : [],
       })).filter((m) => m.steps.length || m.seasonings.length)
@@ -4844,12 +4964,24 @@ function collectDish() {
   d.tags = g('fTags').value.split(/[,，\s]+/).filter(Boolean);
   d.notes = g('fNotes').value.trim();
   d.isFavorite = g('fFav').checked;
-  d.seasonings = d.seasonings.filter((s) => s.name.trim());
+  d.seasonings = d.seasonings
+    .filter((s) => String(s.name || '').trim())
+    .map((s) => ({
+      name: String(s.name || '').trim(),
+      amount: String(s.amount || '').trim(),
+      ...(s.ingredientId ? { ingredientId: s.ingredientId } : {}),
+    }));
   d.methods = d.methods
     .map((m) => ({
       name: m.name.trim() || '做法',
       // 没写调料名的那一行直接丢掉，别留空壳进 JSON
-      seasonings: (m.seasonings || []).filter((s) => s.name.trim()),
+      seasonings: (m.seasonings || [])
+        .filter((s) => String(s.name || '').trim())
+        .map((s) => ({
+          name: String(s.name || '').trim(),
+          amount: String(s.amount || '').trim(),
+          ...(s.ingredientId ? { ingredientId: s.ingredientId } : {}),
+        })),
       steps: m.steps.map((s) => s.trim()).filter(Boolean),
     }))
     .filter((m) => m.steps.length);
@@ -4859,14 +4991,7 @@ function collectDish() {
 /** 局部重绘调料/做法区，保留其它字段 */
 function redrawSeasons() {
   $('#fSeasons').innerHTML = S.draft.dish.seasonings
-    .map(
-      (s, i) => `<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 112px auto;gap:6px;margin-bottom:8px">
-        <input class="mini-input" list="dishIngredients" data-act="season-name" data-i="${i}" value="${esc(s.name)}" placeholder="原料名（可搜索家庭原料）" />
-        <input class="mini-input" data-act="season-amt" data-i="${i}" value="${esc(s.amount)}" placeholder="用量" />
-        ${seasoningTypeSelect(s.purchaseType, `data-act="season-type" data-i="${i}"`)}
-        <button class="del-btn" data-act="rm-season" data-i="${i}">✕</button>
-      </div>`
-    )
+    .map((s, i) => recipeIngredientPickerHtml(s, 'general', i))
     .join('');
 }
 
@@ -4887,14 +5012,7 @@ function methodCardHtml(m, i) {
     <div class="mseason">
       <div class="mseason-label">这个做法独有的调料<span class="field-hint">上面的通用调料它也能用，这里只写它额外要的</span></div>
       ${seasons
-        .map(
-          (s, j) => `<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 112px auto;gap:6px;margin-bottom:6px">
-        <input class="mini-input" list="dishIngredients" data-act="mseason-name" data-i="${i}" data-j="${j}" value="${esc(s.name)}" placeholder="原料名（可搜索家庭原料）" />
-        <input class="mini-input" data-act="mseason-amt" data-i="${i}" data-j="${j}" value="${esc(s.amount)}" placeholder="用量" />
-        ${seasoningTypeSelect(s.purchaseType, `data-act="mseason-type" data-i="${i}" data-j="${j}"`)}
-        <button class="del-btn" data-act="rm-mseason" data-i="${i}" data-j="${j}">✕</button>
-      </div>`
-        )
+        .map((s, j) => recipeIngredientPickerHtml(s, 'method', i, j))
         .join('')}
       <button class="btn ghost sm" data-act="add-mseason" data-i="${i}">＋ 加一味</button>
     </div>
@@ -6345,6 +6463,71 @@ const ACTIONS = {
     applyAIResult(r);
     toast('整理好了，改动过的地方你再扫一眼', 3200);
   },
+  async 'ai-match-ingredients'() {
+    if (!aiReady()) return toast('还没配置 AI');
+    if (!isSuper()) return toast('AI 材料匹配由超级管理员使用');
+    collectDish();
+    const rows = unresolvedRecipeMaterialRows(S.draft.dish).map((entry) => ({ id: entry.id, name: String(entry.row.name || '').trim() }));
+    const catalog = householdIngredients().map((ingredient) => ({
+      id: ingredient.id,
+      name: ingredient.name,
+      aliases: ingredient.aliases || [],
+      category: pantryCategoryPath(ingredient.categoryId),
+    }));
+    if (!rows.length) return toast('当前没有待关联的材料');
+    if (!catalog.length) return toast('本家庭还没有原料字典，先手动新增原料');
+    const result = await askAI('ingredient-match', JSON.stringify({ rows, candidates: catalog }));
+    if (!result) return;
+    const matches = window.RecipeIngredientLogic
+      ? window.RecipeIngredientLogic.validateAiMatches(result, rows, householdIngredients(), S.householdId)
+      : [];
+    if (!matches.length) return toast('AI 没找到明确对应项，原材料保持不变');
+    const localById = new Map(householdIngredients().map((ingredient) => [ingredient.id, ingredient]));
+    const rowById = new Map(rows.map((row) => [row.id, row]));
+    S.ingredientMatchReview = { dish: JSON.parse(JSON.stringify(S.draft.dish)), rows, matches };
+    const body = matches.map((match, index) => {
+      const row = rowById.get(match.rowId);
+      const ingredient = localById.get(match.ingredientId);
+      if (!row || !ingredient) return '';
+      return `<label class="list-row ingredient-match-row">
+        <input type="checkbox" data-ingredient-match-index="${index}" checked />
+        <span class="list-row-main"><span class="list-row-title">${esc(row.name)} → ${esc(ingredient.name)}</span>
+        <span class="list-row-sub">${esc(pantryCategoryPath(ingredient.categoryId))}${ingredient.aliases && ingredient.aliases.length ? ` · 别名：${esc(ingredient.aliases.slice(0, 3).join('、'))}` : ''}</span></span>
+      </label>`;
+    }).join('');
+    openSheet({
+      title: '确认材料匹配',
+      body: `<p class="section-sub">以下建议都来自当前家庭原料字典。只应用你勾选并确认的项目，未勾选或未匹配的原文会保留。</p>${body}`,
+      foot: '<button class="btn ghost" data-act="cancel-ingredient-match">取消</button><button class="btn" data-act="confirm-ingredient-match">应用勾选匹配</button>',
+    });
+  },
+  'cancel-ingredient-match'() {
+    S.ingredientMatchReview = null;
+    closeSheet();
+    if (S.draft && S.draft.dish) openDishEditor(S.draft.dish);
+  },
+  'confirm-ingredient-match'() {
+    const review = S.ingredientMatchReview;
+    if (!review || !S.draft || !S.draft.dish) return closeSheet();
+    const selected = new Set([...document.querySelectorAll('[data-ingredient-match-index]:checked')].map((input) => Number(input.dataset.ingredientMatchIndex)));
+    const byRow = new Map(review.matches.map((match, index) => [index, match]));
+    const localById = new Map(householdIngredients().map((ingredient) => [ingredient.id, ingredient]));
+    const rows = recipeMaterialRows(S.draft.dish);
+    selected.forEach((index) => {
+      const match = byRow.get(index);
+      const target = match && rows.find((entry) => entry.id === match.rowId);
+      const ingredient = match && localById.get(match.ingredientId);
+      if (!target || !ingredient) return;
+      target.row.name = ingredient.name;
+      target.row.ingredientId = ingredient.id;
+      target.row.categoryId = ingredient.categoryId;
+    });
+    const dish = S.draft.dish;
+    S.ingredientMatchReview = null;
+    closeSheet();
+    openDishEditor(dish);
+    toast(`已应用 ${selected.size} 项材料匹配，请检查后保存`);
+  },
   async 'dup-dish'(el) {
     const d = await api('POST', `/api/dishes/${el.dataset.id}/duplicate`, {});
     await loadState(true);
@@ -6426,7 +6609,7 @@ const ACTIONS = {
   },
   'add-season'() {
     collectDish();
-    S.draft.dish.seasonings.push({ name: '', amount: '', purchaseType: '' });
+    S.draft.dish.seasonings.push({ name: '', amount: '' });
     redrawSeasons();
   },
   'rm-season'(el) {
@@ -6453,7 +6636,7 @@ const ACTIONS = {
     const m = S.draft.dish.methods[Number(el.dataset.i)];
     if (!m) return;
     m.seasonings = m.seasonings || [];
-    m.seasonings.push({ name: '', amount: '', purchaseType: '' });
+    m.seasonings.push({ name: '', amount: '' });
     redrawMethods();
   },
   'rm-mseason'(el) {
@@ -7093,8 +7276,21 @@ const ACTIONS = {
   },
 
   /* 库存 */
-  'quick-add-ingredient'() {
-    openQuickIngredientCreator(collectDish());
+  'quick-add-ingredient'(el) {
+    const dish = collectDish();
+    openQuickIngredientCreator(dish, {
+      scope: el.dataset.scope || 'general',
+      i: el.dataset.i,
+      j: el.dataset.j,
+      categoryId: el.dataset.categoryId || '',
+    });
+  },
+  'cancel-quick-ingredient'() {
+    const draft = S.quickIngredientDraft;
+    const dish = draft && draft.dish;
+    S.quickIngredientDraft = null;
+    closeSheet();
+    if (dish) openDishEditor(dish);
   },
   async 'save-quick-ingredient'() {
     const name = $('#quickIngredientName').value.trim();
@@ -7114,8 +7310,21 @@ const ACTIONS = {
       defaultTrackingMode: mode,
       defaultUnit: mode === 'quantity' ? $('#quickIngredientUnit').value.trim() : '',
     });
-    const dish = S.quickIngredientDraft;
-    if (dish) dish.seasonings.push({ name: ingredient.name, ingredientId: ingredient.id, amount: '', purchaseType: '' });
+    const draft = S.quickIngredientDraft;
+    const dish = draft && draft.dish;
+    if (dish && draft.scope === 'method' && dish.methods[draft.index]) {
+      const row = dish.methods[draft.index].seasonings[draft.methodIndex];
+      if (row) {
+        row.name = ingredient.name;
+        row.ingredientId = ingredient.id;
+        row.categoryId = ingredient.categoryId;
+      }
+    } else if (dish && dish.seasonings[draft.index]) {
+      const row = dish.seasonings[draft.index];
+      row.name = ingredient.name;
+      row.ingredientId = ingredient.id;
+      row.categoryId = ingredient.categoryId;
+    }
     S.quickIngredientDraft = null;
     closeSheet();
     await loadState(true);
@@ -8359,7 +8568,14 @@ document.addEventListener('input', (e) => {
   const i = Number(el.dataset.i);
   const j = Number(el.dataset.j);
   const m = S.draft.dish.methods[i];
-  if (act === 'season-name') {
+  if (act === 'recipe-ingredient-search') {
+    setRecipeIngredientFromName(el, el.value);
+  }
+  else if (act === 'recipe-amt') {
+    const info = recipeDraftRow(el);
+    if (info) info.row.amount = el.value;
+  }
+  else if (act === 'season-name') {
     const row = S.draft.dish.seasonings[i];
     if (row) { row.name = el.value; row.ingredientId = (ingredientByName(el.value) || {}).id || ''; }
   }
@@ -8381,8 +8597,25 @@ document.addEventListener('change', (e) => {
   const i = Number(el.dataset.i);
   const j = Number(el.dataset.j);
   const m = S.draft.dish.methods[i];
-  if (act === 'season-type' && S.draft.dish.seasonings[i]) S.draft.dish.seasonings[i].purchaseType = el.value;
-  else if (act === 'mseason-type' && m && m.seasonings[j]) m.seasonings[j].purchaseType = el.value;
+  if (act === 'recipe-category') {
+    const info = recipeDraftRow(el);
+    if (!info) return;
+    info.row.categoryId = el.value;
+    info.row.ingredientId = '';
+    info.row.name = '';
+    replaceRecipeIngredientRow(el, { scope: info.scope, i: info.i, j: info.scope === 'method' ? info.j : undefined });
+  } else if (act === 'recipe-ingredient') {
+    const info = recipeDraftRow(el);
+    const ingredient = ingredientById(el.value);
+    if (!info || !ingredient) return;
+    info.row.name = ingredient.name;
+    info.row.ingredientId = ingredient.id;
+    info.row.categoryId = ingredient.categoryId;
+    const search = el.closest('.recipe-ingredient-row')?.querySelector('[data-act="recipe-ingredient-search"]');
+    if (search) search.value = ingredient.name;
+  } else if (act === 'recipe-ingredient-search') {
+    setRecipeIngredientFromName(el, el.value);
+  }
 });
 
 /* 搜索输入 */

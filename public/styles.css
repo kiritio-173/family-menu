@@ -1255,6 +1255,25 @@ a { color: var(--primary-dark); }
   outline: none;
 }
 .mini-input:focus { border-color: var(--primary); background: var(--surface); }
+.recipe-ingredient-row {
+  display: grid;
+  grid-template-columns: minmax(130px, .75fr) minmax(180px, 1.25fr) minmax(110px, .65fr) auto;
+  gap: 6px;
+  align-items: start;
+  margin-bottom: 4px;
+}
+.recipe-ingredient-choice { min-width: 0; display: grid; gap: 4px; }
+.recipe-ingredient-choice .recipe-ingredient-select { width: 100%; }
+.recipe-ingredient-tools {
+  display: flex; align-items: center; gap: 8px; min-height: 25px;
+  margin: 0 0 8px 0; flex-wrap: wrap;
+}
+.recipe-ingredient-warning { color: var(--warn, #9a6700); font-size: 12px; }
+@media (max-width: 620px) {
+  .recipe-ingredient-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .recipe-ingredient-category, .recipe-ingredient-choice, .recipe-ingredient-amount { grid-column: 1; width: 100%; }
+  .recipe-ingredient-row .del-btn { grid-column: 2; grid-row: 1; }
+}
 .del-btn {
   width: 28px; height: 28px; border-radius: 8px; flex: 0 0 auto;
   background: var(--danger-soft); color: var(--danger); font-size: 13px;

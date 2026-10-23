@@ -25,8 +25,6 @@
     if (category === '调味干货' || category.startsWith('调味干货 > ')) return 'presence';
     if (item && item.trackingMode === 'presence') return 'presence';
     if (item && item.trackingMode === 'quantity') return 'quantity';
-    if (item && item.purchaseType === 'purchase') return 'quantity';
-    if (item && item.purchaseType === 'staple') return 'presence';
     const raw = String(item && item.name || '').trim();
     const normalized = defaultNormalizeName(raw);
     const known = new Set([...PRESENCE_NAMES].map(defaultNormalizeName));
@@ -73,13 +71,11 @@
           requiredUnit: '',
           requiredComparable: true,
           trackingMode: mode,
-          purchaseType: row.purchaseType || '',
         });
       }
       const item = map.get(key);
       item.useCount += 1;
       item.trackingMode = mode;
-      if (row.purchaseType === 'purchase' || (row.purchaseType === 'staple' && !item.purchaseType)) item.purchaseType = row.purchaseType;
       const part = row.method ? `${row.dish || ''}（${row.method}） ${row.amount || ''}` : `${row.dish || ''} ${row.amount || ''}`;
       if (part.trim() && !item.parts.includes(part.trim())) item.parts.push(part.trim());
       if (item.trackingMode === 'presence') return;
