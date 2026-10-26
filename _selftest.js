@@ -1205,6 +1205,10 @@ async function main() {
   const appSource = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
   const dishEditorSource = (appSource.match(/function openDishEditor\(dish\) \{[\s\S]*?\n\}/) || [''])[0];
   ok('编辑表单初始化管理员权限变量', /const admin\s*=\s*isSuper\(\)/.test(dishEditorSource));
+  const planPickerSource = (appSource.match(/function syncPlanPickBtn\(\) \{[\s\S]*?\n\}/) || [''])[0];
+  ok('计划自定义菜名可以启用加入按钮', /planName/.test(planPickerSource) && /const total\s*=\s*n\s*\+/.test(planPickerSource) && /b\.disabled\s*=\s*total\s*===\s*0/.test(planPickerSource));
+  ok('计划保存支持没有菜单勾选时加入临时菜', /async 'save-plan-picks'\(\)[\s\S]*planName[\s\S]*addToPlan/.test(appSource));
+  ok('点餐手写菜名会清除预选菜单菜', /orderNameAutoValue/.test(appSource) && /ordName/.test(appSource) && /orderPickSel\s*=\s*new Set\(\)/.test(appSource));
   ok('计划采购按调料/普通食材分组并隐藏已确认调料', /purchaseShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning\s*&&/.test(appSource) && /stapleShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*it\.isSeasoning\s*&&\s*stockAssessment\(it\)\.key\s*!==\s*'enough'/.test(appSource));
   ok('计划采购只列当前缺口或需确认项目', /purchaseShop\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning[\s\S]{0,160}it\.received[\s\S]{0,80}uncertain/.test(appSource));
   ok('库存已覆盖时仍显示无需采购汇总', /purchaseMaterials\s*=\s*shop\.filter\(\(it\)\s*=>\s*!it\.isSeasoning\)/.test(appSource) && /没有待购食材 · 库存可覆盖/.test(appSource));

@@ -28,6 +28,7 @@ const S = {
   planShopSelected: new Set(), // 计划采购仅用于当前周的批量操作选择
   planShopSelectionContext: '',
   orderPickSel: new Set(), // 点餐弹层里勾中的几道菜
+  orderNameAutoValue: '', // 点餐弹层里由菜单选择自动填入的菜名，用来识别手写覆盖
   planPickSel: new Set(), // 计划弹层里勾中的几道菜
   planPickWeek: '', // 计划弹层是给哪一周开的
   planWeek: '', // 正在看的周（周一日期），空 = 本周
@@ -3022,6 +3023,7 @@ function openOrderForm(dish) {
   };
   // 弹层里的多选：点一下勾上，提交时一次下好几道
   S.orderPickSel = new Set(d ? [d.id] : []);
+  S.orderNameAutoValue = d ? d.name : '';
   S.orderMethodSel = {};
 
   const picker = scopeDishes()
@@ -3343,8 +3345,10 @@ function syncPlanPickBtn() {
   const b = $('#planAddBtn');
   if (!b) return;
   const n = (S.planPickSel || new Set()).size;
-  b.disabled = n === 0;
-  b.textContent = n ? `加 ${n} 道进去` : '加进去';
+  const customName = ($('#planName')?.value || '').trim();
+  const total = n + (customName ? 1 : 0);
+  b.disabled = total === 0;
+  b.textContent = total ? `加 ${total} 道进去` : '加进去';
   const holder = $('#planMethodFields');
   if (!holder) return;
   holder.innerHTML = [...(S.planPickSel || new Set())].map((id) => {
@@ -6760,7 +6764,10 @@ const ACTIONS = {
       .querySelectorAll('.sheet-body .picker-item[data-act="pick-dish"]')
       .forEach((b) => b.setAttribute('aria-pressed', String(S.orderPickSel.has(b.dataset.id))));
     const box = $('#ordName');
-    if (box) box.value = names.join('、');
+    if (box) {
+      box.value = names.join('、');
+      S.orderNameAutoValue = box.value;
+    }
     syncOrderPickBtn();
   },
   'pick-member'(el) {
@@ -7258,7 +7265,8 @@ const ACTIONS = {
   /** 勾好的几道一次加进这一周 */
   async 'save-plan-picks'() {
     const ids = [...(S.planPickSel || new Set())];
-    if (!ids.length) return toast('先勾几道菜');
+    const customName = ($('#planName')?.value || '').trim();
+    if (!ids.length && !customName) return toast('先勾几道菜，或者写一道临时菜');
     const week = S.planPickWeek || planWeek();
     const plannedFor = ($('#planDate') && $('#planDate').value) || week;
     const methodByDish = S.planMethodSel || {};
@@ -7277,6 +7285,10 @@ const ACTIONS = {
       } catch (_) {
         /* 已经在计划里的那道跳过，不打断其余的 */
       }
+    }
+    if (customName) {
+      await addToPlan({ name: customName, plannedFor }, week, () => {});
+      n++;
     }
     S.planPickSel = new Set();
     closeSheet();
@@ -8722,6 +8734,20 @@ document.addEventListener('change', (e) => {
 
 /* 搜索输入 */
 document.addEventListener('input', (e) => {
+  if (e.target.id === 'ordName') {
+    const value = (e.target.value || '').trim();
+    // 从菜单卡片打开点餐时会预选原菜。用户改写「或者自己写」后，
+    // 这次提交应当落成自定义菜，不能继续带着原来的 dishId 一起提交。
+    if (S.orderPickSel && S.orderPickSel.size && value !== (S.orderNameAutoValue || '').trim()) {
+      S.orderPickSel = new Set();
+      S.orderMethodSel = {};
+      document
+        .querySelectorAll('.sheet-body .picker-item[data-act="pick-dish"]')
+        .forEach((b) => b.setAttribute('aria-pressed', 'false'));
+      syncOrderPickBtn();
+    }
+    S.orderNameAutoValue = value;
+  }
   if (e.target.id === 'searchInput') {
     S.keyword = e.target.value.trim();
     render();
@@ -8739,6 +8765,7 @@ document.addEventListener('input', (e) => {
     if (clear) clear.hidden = !S.manageKeyword;
   }
   if (e.target.id === 'fPresetSearch') renderPresetGrid();
+  if (e.target.id === 'planName') syncPlanPickBtn();
 });
 
 document.addEventListener('toggle', (e) => {
