@@ -287,6 +287,8 @@ async function main() {
   eq('不传 householdId → 落到默认家庭', o1.householdId, st.households[0].id);
   const o2 = (await post('/api/orders', { dishId: DISH.id, dishName: DISH.name, householdId: h301.id })).body.data;
   eq('指定家庭就记到那个家', o2.householdId, h301.id);
+  eq('点餐默认一份', o2.people, 1);
+  eq('点餐默认晚餐', o2.mealSlot, 'dinner');
   const o3 = (await post('/api/orders', { dishId: DISH.id, dishName: DISH.name, householdId: '幽灵家庭' })).body.data;
   ok('未知 householdId 不会丢数据', !!o3.householdId, o3.householdId);
 
@@ -331,6 +333,25 @@ async function main() {
   })();
 
   const add1 = (await post('/api/plans/items', { householdId: h301.id, weekOf: wednesday, dishId: DISH.id })).body.data;
+  const methodId = DISH.methods && DISH.methods[0] && DISH.methods[0].id;
+  const methodPlan = (await post('/api/plans/items', {
+    householdId: h301.id,
+    weekOf: wednesday,
+    dishId: DISH.id,
+    methodId,
+    methodName: DISH.methods && DISH.methods[0] && DISH.methods[0].name,
+    orderId: 'order-method-once',
+  })).body.data;
+  eq('计划保存所选做法', [methodPlan.item.methodId, methodPlan.item.methodName], [methodId, DISH.methods[0].name]);
+  const duplicateMethodPlan = await post('/api/plans/items', {
+    householdId: h301.id,
+    weekOf: wednesday,
+    dishId: DISH.id,
+    methodId,
+    methodName: DISH.methods[0].name,
+    orderId: 'order-method-once',
+  });
+  eq('同一订单不会重复生成计划', duplicateMethodPlan.body.data.item.id, methodPlan.item.id);
   ok('加菜进计划', add1.item && add1.item.name === DISH.name, add1);
   eq('周三归到本周一', add1.plan.weekOf, monday);
   eq('自动带出份量', add1.item.servings, DISH.servings);
@@ -347,7 +368,7 @@ async function main() {
   let plans = (await get('/api/state')).body.data.plans;
   eq('一共 3 条计划记录（本周/下周 × 两个家庭）', plans.length, 3);
   const planThis = plans.find((p) => p.householdId === h301.id && p.weekOf === monday);
-  eq('本周这家有 3 道（含重复菜）', planThis.items.length, 3);
+  eq('本周这家有 4 道（含重复菜和做法）', planThis.items.length, 4);
   eq('下周这家有 1 道', plans.find((p) => p.householdId === h301.id && p.weekOf === nextMonday).items.length, 1);
   eq('另一家本周也是 1 道（互不影响）',
     plans.find((p) => p.householdId === st.households[0].id && p.weekOf === monday).items.length, 1);
@@ -357,7 +378,7 @@ async function main() {
   eq('幽灵家庭拉回默认', (await post('/api/plans/items', { householdId: '幽灵', name: '测试菜' })).body.data.plan.householdId, st.households[0].id);
 
   const getPlan = (await get(`/api/plans?householdId=${h301.id}&weekOf=${monday}`)).body.data;
-  eq('GET 单周计划', getPlan.items.length, 3);
+  eq('GET 单周计划', getPlan.items.length, 4);
   eq('查没有的一周返回 null', (await get(`/api/plans?householdId=${h301.id}&weekOf=1999-01-04`)).body.data, null);
 
   // 拿掉一道
@@ -374,11 +395,11 @@ async function main() {
   const rm = (await del(`/api/plans/items/${target.id}`)).body.data;
   eq('拿掉后返回的是被删的那条', rm.id, target.id);
   eq('删不存在的计划项 404', (await del('/api/plans/items/p_不存在')).status, 404);
-  eq('删完剩 2 道', (await get(`/api/plans?householdId=${h301.id}&weekOf=${monday}`)).body.data.items.length, 2);
+  eq('删完剩 3 道', (await get(`/api/plans?householdId=${h301.id}&weekOf=${monday}`)).body.data.items.length, 3);
 
   // 清空某一周
   const clearedPlan = (await del(`/api/plans?householdId=${h301.id}&weekOf=${monday}`)).body.data;
-  eq('清空本周', clearedPlan.removed, 2);
+  eq('清空本周', clearedPlan.removed, 3);
   eq('本周空了', (await get(`/api/plans?householdId=${h301.id}&weekOf=${monday}`)).body.data.items.length, 0);
   eq('下周没被清掉', (await get(`/api/plans?householdId=${h301.id}&weekOf=${nextMonday}`)).body.data.items.length, 1);
   // 默认家庭里有 1 道菜谱菜 + 前面「幽灵家庭」用例兜回来的「测试菜」，共 2 道

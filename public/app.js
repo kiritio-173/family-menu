@@ -12,6 +12,7 @@ const S = {
   dishScope: 'all', // 菜单归属筛选：all / shared / own
   keyword: '',
   orderStatus: 'pending',
+  orderDate: '',
   groupByMember: true,
   memberFilter: '',
   pantryCat: '全部',
@@ -713,7 +714,10 @@ function shelfStatus(item) {
 }
 
 function pendingOrders() {
-  return householdOrders().filter((o) => o.status === 'pending' || o.status === 'cooking');
+  return householdOrders().filter((o) =>
+    (o.status === 'pending' || o.status === 'cooking') &&
+    String(o.date || o.createdAt || '').slice(0, 10) === orderDay()
+  );
 }
 
 function relTime(iso) {
@@ -1550,9 +1554,13 @@ function pickVisibleIds(key) {
 }
 
 /** 点餐页当前真正列出来的那批（状态页签 + 成员筛选之后） */
+function orderDay() {
+  return S.orderDate || todayStr();
+}
+
 function visibleOrders() {
   return householdOrders().filter(
-    (o) => o.status === S.orderStatus && (!S.memberFilter || o.requester === S.memberFilter)
+    (o) => o.status === S.orderStatus && String(o.date || o.createdAt || '').slice(0, 10) === orderDay() && (!S.memberFilter || o.requester === S.memberFilter)
   );
 }
 
@@ -2439,7 +2447,7 @@ function orderItem(o) {
       <div class="order-thumb">${thumb}</div>
       <div class="order-main">
         <div class="order-name">${esc(o.dishName)}</div>
-        <div class="order-meta">${esc(o.requester)} · ${o.people} 人份 · ${relTime(o.createdAt)}</div>
+        <div class="order-meta">${esc(o.requester)} · ${o.people} 份 · ${o.mealSlot === 'lunch' ? '午餐' : '晚餐'} · ${relTime(o.createdAt)}</div>
         ${o.note ? `<div class="order-note">📝 ${esc(o.note)}</div>` : ''}
       </div>
       <div style="text-align:right">
@@ -2453,7 +2461,7 @@ function orderItem(o) {
     <div class="order-main${d ? ' link' : ''}" role="button" tabindex="0" ${d ? `data-act="open-dish" data-id="${esc(d.id)}"` : ''}
       ${d ? `aria-label="查看 ${esc(o.dishName)} 做法"` : ''}>
       <div class="order-name">${esc(o.dishName)}</div>
-      <div class="order-meta">${esc(o.requester)} · ${o.people} 人份 · ${relTime(o.createdAt)}</div>
+        <div class="order-meta">${esc(o.requester)} · ${o.people} 份 · ${o.mealSlot === 'lunch' ? '午餐' : '晚餐'} · ${relTime(o.createdAt)}</div>
       ${o.note ? `<div class="order-note">📝 ${esc(o.note)}</div>` : ''}
     </div>
     <div style="text-align:right">
@@ -2537,12 +2545,16 @@ function findStock(name, ingredientId) {
  * 通用调料（菜品级）和各做法独有的调料都得算进来 ——
  * 买菜的人只看到「冰糖」，得知道红烧要 10g、清蒸不要。
  */
-function collectDishSeasonings(d) {
+function collectDishSeasonings(d, methodId) {
   const out = [];
   (d.seasonings || []).forEach((s) => {
     if (s.name) out.push({ name: (ingredientById(s.ingredientId) || {}).name || s.name, ingredientId: s.ingredientId || '', amount: s.amount, method: '' });
   });
-  (d.methods || []).forEach((m) => {
+  const selectedMethods = methodId
+    ? (d.methods || []).filter((m) => m.id === methodId)
+    : [];
+  const methods = selectedMethods.length ? selectedMethods : (d.methods || []);
+  methods.forEach((m) => {
     (m.seasonings || []).forEach((s) => {
       if (s.name) out.push({ name: (ingredientById(s.ingredientId) || {}).name || s.name, ingredientId: s.ingredientId || '', amount: s.amount, method: m.name || '' });
     });
@@ -2671,10 +2683,12 @@ function stockAssessment(item) {
 /** 采购清单：把一批菜品的调料合并，并标出家里已经有的 */
 function shoppingFromDishIds(dishIds) {
   const rows = [];
-  dishIds.forEach((id) => {
+  dishIds.forEach((entry) => {
+    const id = typeof entry === 'string' ? entry : entry && entry.dishId;
     const d = dishById(id);
     if (!d) return;
-    collectDishSeasonings(d).forEach((s) => rows.push({ ...s, dish: d.name }));
+    const methodId = typeof entry === 'string' ? '' : entry && entry.methodId;
+    collectDishSeasonings(d, methodId).forEach((s) => rows.push({ ...s, dish: d.name }));
   });
   return mergeSeasonings(rows);
 }
@@ -2687,7 +2701,7 @@ function buildShoppingList() {
     .forEach((o) => {
       const d = o.dishId ? dishById(o.dishId) : null;
       if (!d) return;
-      collectDishSeasonings(d).forEach((s) => rows.push({ ...s, dish: d.name }));
+      collectDishSeasonings(d, o.methodId).forEach((s) => rows.push({ ...s, dish: d.name }));
     });
   return mergeSeasonings(rows);
 }
@@ -2826,8 +2840,8 @@ function shopListHtml(list, opts) {
 }
 
 function viewOrder() {
-  const all = householdOrders();
-  const today = todayStr();
+  const all = householdOrders().filter((o) => String(o.date || o.createdAt || '').slice(0, 10) === orderDay());
+  const today = orderDay();
   const house = currentHousehold();
   const admin = anyHouseAdmin();
 
@@ -2875,21 +2889,14 @@ function viewOrder() {
         </div>`
       : '';
 
-  const shop = buildShoppingList();
-  const shopScope = pendingOrders().filter((o) => !S.memberFilter || o.requester === S.memberFilter);
-  const shopHtml = shopListHtml(shop, {
-    sub: `${S.memberFilter ? S.memberFilter + '的 ' : ''}${shopScope.length} 道待做菜自动汇总`,
-    hint: '标了「家里有」的不用买；买回来的点「入库」记进库存。',
-  });
-
   const doneCount = all.filter((o) => o.status === 'done').length;
   const pendingCount = all.filter((o) => o.status === 'pending').length;
 
   return `
-    ${shopHtml}
     <div class="section-head">
       <h2 class="section-title">点餐单</h2>
-      <span class="section-sub">${esc(house ? house.emoji + ' ' + house.name : '点餐单')} · ${today}</span>
+      <span class="section-sub">${esc(house ? house.emoji + ' ' + house.name : '点餐单')}</span>
+      <input class="input sm" style="width:auto;margin-left:auto" type="date" id="orderDate" value="${esc(today)}" aria-label="查看哪一天的点餐" />
       ${
         admin && S.orderStatus === 'done' && doneCount
           ? `<button class="btn ghost sm" style="margin-left:auto" data-act="clear-done">清空已完成</button>`
@@ -2911,6 +2918,11 @@ function viewOrder() {
               data-act="ai-cook-plan" title="看这几道菜怎么并行着做最快">👨‍🍳 厨房助手</button>`
           : ''
       }
+    </div>
+    <div class="chip-row" style="margin-top:8px">
+      <button class="chip" data-act="shift-order-day" data-n="-1">‹ 前一天</button>
+      <span class="section-sub">${esc(today)}</span>
+      <button class="chip" data-act="shift-order-day" data-n="1">后一天 ›</button>
     </div>
     <div class="status-tabs">${tabs}</div>
     ${!admin ? '<p class="section-sub" style="margin:10px 0 0">点餐由全家提交，做饭状态由管理员统一更新。</p>' : ''}
@@ -3003,11 +3015,15 @@ function openOrderForm(dish) {
     dishName: d ? d.name : '',
     householdId: S.householdId,
     requester: meName(),
-    people: 2,
+    people: 1,
+    date: orderDay(),
+    mealSlot: new Date().getHours() < 15 ? 'lunch' : 'dinner',
     note: '',
   };
   // 弹层里的多选：点一下勾上，提交时一次下好几道
   S.orderPickSel = new Set(d ? [d.id] : []);
+  S.orderMethodSel = {};
+  if (d && d.methods && d.methods.length === 1) S.orderMethodSel[d.id] = d.methods[0].id;
 
   const picker = scopeDishes()
     .map((x) => {
@@ -3058,6 +3074,14 @@ function openOrderForm(dish) {
         <label class="field-label">几个人吃</label>
         <input class="input" id="ordPeople" type="number" min="1" max="20" value="${S.draftOrder.people}" />
       </div>
+      <div class="row-2">
+        <div class="field"><label class="field-label">哪一天</label><input class="input" id="ordDate" type="date" value="${esc(S.draftOrder.date)}" /></div>
+        <div class="field"><label class="field-label">餐次</label><select class="select" id="ordMealSlot"><option value="lunch" ${S.draftOrder.mealSlot === 'lunch' ? 'selected' : ''}>午餐</option><option value="dinner" ${S.draftOrder.mealSlot === 'dinner' ? 'selected' : ''}>晚餐</option></select></div>
+      </div>
+      <div class="field">
+        <label class="field-label">做法<span class="field-hint">每道菜只计算所选做法的材料</span></label>
+        <div id="orderMethodFields"></div>
+      </div>
       <div class="field">
         <label class="field-label">备注<span class="field-hint">少放辣、不要香菜…</span></label>
         <textarea class="textarea" id="ordNote" placeholder="有什么要求写这里">${esc(S.draftOrder.note)}</textarea>
@@ -3077,6 +3101,20 @@ function syncOrderPickBtn() {
   if (!b) return;
   const n = (S.orderPickSel || new Set()).size;
   b.textContent = n > 1 ? `提交点餐（${n} 道）` : '提交点餐';
+  const holder = $('#orderMethodFields');
+  if (!holder) return;
+  const ids = [...(S.orderPickSel || new Set())];
+  holder.innerHTML = ids.map((id) => {
+    const d = dishById(id);
+    if (!d || !Array.isArray(d.methods) || !d.methods.length) return `<div class="section-sub">${esc(d ? d.name : '')}：没有单独做法，按通用材料计算</div>`;
+    const selected = S.orderMethodSel && S.orderMethodSel[id] || (d.methods.length === 1 ? d.methods[0].id : '');
+    if (S.orderMethodSel && selected) S.orderMethodSel[id] = selected;
+    return `<label class="field-label" style="display:block;margin:8px 0 4px">${esc(d.name)}
+      <select class="select" data-act="order-method" data-id="${esc(id)}">
+        <option value="">请选择做法</option>
+        ${d.methods.map((m) => `<option value="${esc(m.id)}" ${m.id === selected ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}
+      </select></label>`;
+  }).join('');
 }
 
 function collectOrder() {
@@ -3084,7 +3122,9 @@ function collectOrder() {
   S.draftOrder.householdId = S.householdId;
   S.draftOrder.dishName = (el('ordName').value || '').trim();
   S.draftOrder.requester = (el('ordWho').value || '').trim() || '匿名';
-  S.draftOrder.people = Number(el('ordPeople').value) || 2;
+  S.draftOrder.people = Number(el('ordPeople').value) || 1;
+  S.draftOrder.date = el('ordDate').value || orderDay();
+  S.draftOrder.mealSlot = el('ordMealSlot').value === 'lunch' ? 'lunch' : 'dinner';
   S.draftOrder.note = (el('ordNote').value || '').trim();
   return S.draftOrder;
 }
@@ -3158,8 +3198,8 @@ function viewPlan() {
 
   // 只有能查到调料的菜才进采购汇总（自己随手写的那道不算）
   // 已完成的计划菜已经实际扣过库存，不再重复计入本周待采购需求。
-  const dishIds = items.filter((it) => it.status !== 'done').map((it) => it.dishId).filter(Boolean);
-  const shop = shoppingFromDishIds(dishIds);
+  const plannedDishes = items.filter((it) => it.status !== 'done' && it.dishId);
+  const shop = shoppingFromDishIds(plannedDishes);
   const received = (planRecord(week) || {}).received || {};
   shop.forEach((it) => {
     const keys = [planReceiptKey(it), `name:${ingredientMatchKey(it.name)}`, ingredientMatchKey(it.name)];
@@ -3257,6 +3297,7 @@ function openPlanPicker(weekOf) {
   planItems(week).forEach((it) => plannedCount.set(it.name, (plannedCount.get(it.name) || 0) + 1));
   S.planPickWeek = week;
   S.planPickSel = new Set();
+  S.planMethodSel = {};
 
   const picker = scopeDishes()
     .map((x) => {
@@ -3285,6 +3326,10 @@ function openPlanPicker(weekOf) {
         <div class="picker-list">${picker}</div>
       </div>
       <div class="field">
+        <label class="field-label">每道菜的做法<span class="field-hint">计划和采购只计算所选做法材料</span></label>
+        <div id="planMethodFields"></div>
+      </div>
+      <div class="field">
         <label class="field-label">或者自己写一道<span class="field-hint">菜单里没有的，比如「楼下那家的烤鸭」</span></label>
         <input class="input" id="planName" placeholder="例如：红烧排骨" />
       </div>`,
@@ -3302,6 +3347,19 @@ function syncPlanPickBtn() {
   const n = (S.planPickSel || new Set()).size;
   b.disabled = n === 0;
   b.textContent = n ? `加 ${n} 道进去` : '加进去';
+  const holder = $('#planMethodFields');
+  if (!holder) return;
+  holder.innerHTML = [...(S.planPickSel || new Set())].map((id) => {
+    const d = dishById(id);
+    if (!d || !d.methods || !d.methods.length) return `<div class="section-sub">${esc(d ? d.name : '')}：没有单独做法</div>`;
+    const selected = S.planMethodSel && S.planMethodSel[id] || (d.methods.length === 1 ? d.methods[0].id : '');
+    if (S.planMethodSel && selected) S.planMethodSel[id] = selected;
+    return `<label class="field-label" style="display:block;margin:8px 0 4px">${esc(d.name)}
+      <select class="select" data-act="plan-method" data-id="${esc(id)}">
+        <option value="">请选择做法</option>
+        ${d.methods.map((m) => `<option value="${esc(m.id)}" ${m.id === selected ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}
+      </select></label>`;
+  }).join('');
 }
 
 /** 「本周」「下周」「10月20日 那周」 */
@@ -6252,6 +6310,10 @@ const ACTIONS = {
     S.orderStatus = el.dataset.status;
     render();
   },
+  'shift-order-day'(el) {
+    S.orderDate = addDays(orderDay(), Number(el.dataset.n) || 0);
+    render();
+  },
   'filter-member'(el) {
     S.memberFilter = el.dataset.name || '';
     render();
@@ -6701,7 +6763,7 @@ const ACTIONS = {
       .querySelectorAll('.sheet-body .picker-item[data-act="pick-dish"]')
       .forEach((b) => b.setAttribute('aria-pressed', String(S.orderPickSel.has(b.dataset.id))));
     const box = $('#ordName');
-    if (box && names.length) box.value = names.join('、');
+    if (box) box.value = names.join('、');
     syncOrderPickBtn();
   },
   'pick-member'(el) {
@@ -6719,6 +6781,12 @@ const ACTIONS = {
       .map((id) => dishById(id))
       .filter(Boolean);
     if (!picks.length && !o.dishName) return toast('先勾几道菜，或者写上想吃的名字');
+    const methodByDish = S.orderMethodSel || {};
+    for (const dish of picks) {
+      if (dish.methods && dish.methods.length && !methodByDish[dish.id]) {
+        return toast(`请先选择「${dish.name}」的做法`);
+      }
+    }
     try {
       // 勾了几道就下几道：谁点的、几份、备注这些对每道都一样，统一填一次就行
       const targets = picks.length ? picks : [{ id: null, name: o.dishName }];
@@ -6727,6 +6795,9 @@ const ACTIONS = {
           ...o,
           dishId: t.id || null,
           dishName: t.name,
+          methodId: t.id ? methodByDish[t.id] || '' : '',
+          methodName: t.id ? ((dishById(t.id)?.methods || []).find((m) => m.id === methodByDish[t.id]) || {}).name || '' : '',
+          autoPlan: !!t.id,
         });
       }
       closeSheet();
@@ -7193,12 +7264,18 @@ const ACTIONS = {
     if (!ids.length) return toast('先勾几道菜');
     const week = S.planPickWeek || planWeek();
     const plannedFor = ($('#planDate') && $('#planDate').value) || week;
+    const methodByDish = S.planMethodSel || {};
     let n = 0;
     for (const id of ids) {
       const d = dishById(id);
       if (!d) continue;
+      if (d.methods && d.methods.length && !methodByDish[d.id]) {
+        return toast(`请先选择「${d.name}」的做法`);
+      }
       try {
-        await addToPlan({ dishId: d.id, name: d.name, servings: d.servings, plannedFor }, week, () => {});
+        const methodId = methodByDish[d.id] || '';
+        const methodName = ((d.methods || []).find((m) => m.id === methodId) || {}).name || '';
+        await addToPlan({ dishId: d.id, name: d.name, servings: d.servings, plannedFor, methodId, methodName }, week, () => {});
         n++;
       } catch (_) {
         /* 已经在计划里的那道跳过，不打断其余的 */
@@ -7224,9 +7301,20 @@ const ACTIONS = {
       render();
       toast(`已从${planWeekTitle(week)}拿掉`);
     } else {
-      await addToPlan({ dishId: dish.id, name: dish.name, servings: dish.servings }, week, () =>
-        openDish(dish.id)
-      );
+      if (dish.methods && dish.methods.length > 1) {
+        openPlanPicker(week);
+        S.planPickSel = new Set([dish.id]);
+        syncPlanPickBtn();
+        return;
+      }
+      const method = dish.methods && dish.methods[0];
+      await addToPlan({
+        dishId: dish.id,
+        name: dish.name,
+        servings: dish.servings,
+        methodId: method ? method.id : '',
+        methodName: method ? method.name : '',
+      }, week, () => openDish(dish.id));
     }
   },
   async 'save-plan-custom'(el) {
@@ -7269,8 +7357,8 @@ const ACTIONS = {
     toast('已清空');
   },
   async 'copy-plan-shopping'() {
-    const dishIds = planItems(planWeek()).filter((it) => it.status !== 'done').map((it) => it.dishId).filter(Boolean);
-    const list = shoppingFromDishIds(dishIds);
+    const plannedDishes = planItems(planWeek()).filter((it) => it.status !== 'done' && it.dishId);
+    const list = shoppingFromDishIds(plannedDishes);
     if (!list.length) return toast('计划里的菜还没有记录食材');
     await copyText(list.map((i) => i.isSeasoning
       ? `□ ${i.name}（调料，确认库存）`
@@ -8592,6 +8680,21 @@ document.addEventListener('input', (e) => {
 });
 
 document.addEventListener('change', (e) => {
+  if (e.target.id === 'orderDate') {
+    S.orderDate = e.target.value || todayStr();
+    render();
+    return;
+  }
+  if (e.target.dataset && e.target.dataset.act === 'order-method') {
+    if (!S.orderMethodSel) S.orderMethodSel = {};
+    S.orderMethodSel[e.target.dataset.id] = e.target.value;
+    return;
+  }
+  if (e.target.dataset && e.target.dataset.act === 'plan-method') {
+    if (!S.planMethodSel) S.planMethodSel = {};
+    S.planMethodSel[e.target.dataset.id] = e.target.value;
+    return;
+  }
   if (e.target.id === 'fFoodTracking') e.target.dataset.manual = '1';
   const el = e.target;
   const act = el.dataset && el.dataset.act;

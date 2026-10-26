@@ -41,10 +41,21 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.31.6';
+const APP_VERSION = '1.31.7';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.31.7',
+    date: '2026-10-26',
+    title: '点餐按餐次联动计划与做法材料',
+    items: [
+      '点餐默认当天、默认一份，并可选择午餐或晚餐；点餐页按日期查看，不再混入采购清单',
+      '有多个做法的菜提交点餐或加入计划时必须选择做法，计划和库存只计算通用材料与所选做法材料',
+      '点餐提交可自动生成当天计划，同一订单重复提交不会重复排计划；旧接口数据保持兼容',
+      '做法补充稳定 ID，完成计划时按选定做法扣减数量型库存并保留调料有无确认逻辑',
+    ],
+  },
   {
     version: '1.31.6',
     date: '2026-10-24',
@@ -1742,19 +1753,24 @@ function parseRecipeAmount(text) {
   return { quantity: Math.round(Number(m[1]) * 1000) / 1000, unit };
 }
 
-function dishRecipeIngredients(dish) {
+function dishRecipeIngredients(dish, methodId) {
   if (!dish) return [];
   const rows = [];
   (dish.seasonings || []).forEach((s) => { if (s && s.name) rows.push(s); });
-  (dish.methods || []).forEach((m) => (m.seasonings || []).forEach((s) => { if (s && s.name) rows.push(s); }));
+  const selectedMethods = methodId
+    ? (dish.methods || []).filter((m) => m && m.id === methodId)
+    : [];
+  // 旧计划可能保存了不存在的做法 ID，回退到历史“全部做法”语义，避免少扣材料。
+  const methods = selectedMethods.length ? selectedMethods : (dish.methods || []);
+  methods.forEach((m) => (m.seasonings || []).forEach((s) => { if (s && s.name) rows.push(s); }));
   return rows;
 }
 
 /** 完成计划菜时实际扣库存；扣完的数量型库存行会删除，不足时仍返回缺货提醒。 */
-function consumeDishPantry(householdId, dish) {
+function consumeDishPantry(householdId, dish, methodId) {
   const totals = new Map();
   const warnings = [];
-  dishRecipeIngredients(dish).forEach((s) => {
+  dishRecipeIngredients(dish, methodId).forEach((s) => {
     const ingredient = s.ingredientId
       ? state.ingredients.find((row) => row.id === s.ingredientId && row.householdId === householdId)
       : null;
@@ -1841,6 +1857,9 @@ function normPlanItem(input, prev, keepInputId, defaultWeek) {
   return {
     id: base.id || (keepInputId && typeof input.id === 'string' && input.id ? input.id : uid('pi_')),
     dishId: safeText(input.dishId ?? base.dishId, 40) || null,
+    methodId: safeText(input.methodId ?? base.methodId, 80) || '',
+    methodName: safeText(input.methodName ?? base.methodName, 40).trim(),
+    orderId: safeText(input.orderId ?? base.orderId, 80),
     name,
     servings: safeText(input.servings ?? base.servings, 30),
     note: safeText(input.note ?? base.note, 100),
@@ -1943,6 +1962,10 @@ function loadState() {
     );
   }
   state.dishes = state.dishes.filter((d) => d && d.name);
+  // 预置菜和早期菜谱也补上稳定的做法 ID，便于计划引用指定做法。
+  const dishesBeforeNormalize = JSON.stringify(state.dishes);
+  state.dishes = state.dishes.map((dish) => normDish(dish, dish, true)).filter(Boolean);
+  if (JSON.stringify(state.dishes) !== dishesBeforeNormalize) scheduleSave('dishes');
   // 菜和分类分家是从 1.9 才有的。老数据没有 householdId 字段，
   // 一律补成 null（= 共享）：升级之后你原来录的菜还是人人可见，
   // 只是从今往后新加的菜可以只给自己家看。
@@ -2893,7 +2916,9 @@ function normDish(input, prev, keepInputId) {
       .filter((s) => s.name)
       .slice(0, 40),
     methods: safeList(input.methods)
-      .map((m) => ({
+      .map((m, methodIndex) => ({
+        // 做法需要稳定标识，计划和点餐才能明确引用其中一种材料清单。
+        id: safeText(m && m.id, 80) || `method_${(base.id || (keepInputId && input.id) || 'dish')}_${methodIndex + 1}`,
         name: safeText(m && m.name, 24).trim() || '做法',
         // 每个做法可以带自己的调料。
         // 一道菜常有几种做法甚至几种口味（红烧/清蒸、甜口/辣口），
@@ -2975,13 +3000,19 @@ function resolveHouseholdId(v) {
 
 function normOrder(input, prev, keepInputId) {
   const base = prev || {};
+  const mealSlot = ['lunch', 'dinner'].includes(input.mealSlot)
+    ? input.mealSlot
+    : (['lunch', 'dinner'].includes(base.mealSlot) ? base.mealSlot : 'dinner');
   return {
     id: base.id || (keepInputId && typeof input.id === 'string' && input.id ? input.id : uid('o_')),
     householdId: resolveHouseholdId(input.householdId ?? base.householdId),
     dishId: input.dishId ? safeText(input.dishId, 40) : null,
     dishName: safeText(input.dishName, 40).trim() || base.dishName || '随便吃点',
     requester: safeText(input.requester, 20).trim() || '匿名',
-    people: Math.max(1, Math.min(20, Number(input.people) || base.people || 2)),
+    people: Math.max(1, Math.min(20, Number(input.people) || base.people || 1)),
+    mealSlot,
+    methodId: safeText(input.methodId ?? base.methodId, 80),
+    methodName: safeText(input.methodName ?? base.methodName, 40).trim(),
     note: safeText(input.note, 200),
     status: ['pending', 'cooking', 'done', 'cancelled'].includes(input.status)
       ? input.status
@@ -5062,14 +5093,27 @@ async function handleAPI(req, res, url) {
       const body = await readBody(req);
       if (!requireAccountHousehold(req, res, resolveHouseholdId(body.householdId))) return;
       const dish = body.dishId ? state.dishes.find((d) => d.id === body.dishId) : null;
+      if (body.dishId && !dish) return sendError(res, 400, '菜谱不存在，请刷新后重试');
+      const selectedMethod = dish && body.methodId
+        ? (dish.methods || []).find((candidate) => candidate.id === safeText(body.methodId, 80))
+        : null;
+      if (body.methodId && !selectedMethod) return sendError(res, 400, '所选做法不属于这道菜，请重新选择');
+      const selectedMethodId = selectedMethod ? selectedMethod.id : '';
+      const selectedMethodName = selectedMethod ? selectedMethod.name : '';
       const item = normPlanItem({
         ...body,
         name: body.name || (dish && dish.name),
         servings: body.servings || (dish && dish.servings),
+        methodId: selectedMethodId || body.methodId,
+        methodName: selectedMethodName || body.methodName,
         weekOf: body.weekOf,
       }, undefined, false, body.weekOf);
       if (!item) return sendError(res, 400, '要加哪道菜？写个菜名吧');
       const plan = findPlan(body.householdId, body.weekOf, true);
+      if (item.orderId) {
+        const existing = plan.items.find((candidate) => candidate.orderId === item.orderId);
+        if (existing) return sendJSON(res, 200, { ok: true, data: { plan, item: existing, duplicate: true } });
+      }
       plan.items.push(item);
       plan.received = {};
       plan.updatedAt = nowISO();
@@ -5095,7 +5139,7 @@ async function handleAPI(req, res, url) {
 
       const dish = item.dishId ? state.dishes.find((d) => d.id === item.dishId) : null;
       const result = dish
-        ? consumeDishPantry(foundPlan.householdId, dish)
+        ? consumeDishPantry(foundPlan.householdId, dish, item.methodId)
         : { consumed: [], warnings: ['这是临时菜，没有可读取的菜谱用量，未自动扣库存'] };
       item.status = 'done';
       item.completedAt = nowISO();
@@ -5720,12 +5764,52 @@ async function handleAPI(req, res, url) {
       if (!requireAccountHousehold(req, res, order.householdId)) return;
       if (order.dishId) {
         const dish = state.dishes.find((d) => d.id === order.dishId);
+        if (!dish) return sendError(res, 400, '菜谱不存在，请刷新后重试');
+        const methods = Array.isArray(dish.methods) ? dish.methods : [];
+        if (methods.length) {
+          const selected = methods.find((candidate) => candidate.id === order.methodId);
+          // 旧客户端没有做法字段时兼容选择第一种；新客户端必须显式带上选择。
+          if (!selected && body.methodId) return sendError(res, 400, '请重新选择这道菜的做法');
+          if (!selected) {
+            order.methodId = methods[0].id;
+            order.methodName = methods[0].name;
+          } else {
+            order.methodId = selected.id;
+            order.methodName = selected.name;
+          }
+        } else {
+          order.methodId = '';
+          order.methodName = '';
+        }
         if (dish && dish.dishStatus === 'paused') {
           return sendError(res, 409, '这道菜目前暂停供应，不能新建点餐');
         }
       }
       state.orders.unshift(order);
       scheduleSave('orders');
+      // 前端显式要求时，点餐同时排入当天计划；orderId 让重试保持幂等。
+      if (body.autoPlan === true && order.dishId) {
+        const dish = state.dishes.find((candidate) => candidate.id === order.dishId);
+        const week = mondayOf(order.date);
+        const plan = findPlan(order.householdId, week, true);
+        if (!plan.items.some((candidate) => candidate.orderId === order.id)) {
+          const item = normPlanItem({
+            householdId: order.householdId,
+            weekOf: week,
+            plannedFor: order.date,
+            dishId: order.dishId,
+            name: order.dishName,
+            servings: dish && dish.servings,
+            methodId: order.methodId,
+            methodName: order.methodName,
+            orderId: order.id,
+          }, undefined, false, week);
+          if (item) plan.items.push(item);
+          plan.received = {};
+          plan.updatedAt = nowISO();
+          scheduleSave('plans');
+        }
+      }
       return sendJSON(res, 200, { ok: true, data: order });
     }
     // 批量改状态：点餐页「一键开做」用。PATCH /api/orders 不带 id。
@@ -5771,6 +5855,9 @@ async function handleAPI(req, res, url) {
       if (body.note !== undefined) order.note = safeText(body.note, 200);
       if (body.date !== undefined) order.date = safeText(body.date, 20) || order.date;
       if (body.dishId !== undefined) order.dishId = body.dishId ? safeText(body.dishId, 40) : null;
+      if (body.mealSlot !== undefined && ['lunch', 'dinner'].includes(body.mealSlot)) order.mealSlot = body.mealSlot;
+      if (body.methodId !== undefined) order.methodId = safeText(body.methodId, 80);
+      if (body.methodName !== undefined) order.methodName = safeText(body.methodName, 40).trim();
       order.updatedAt = nowISO();
       scheduleSave('orders');
       return sendJSON(res, 200, { ok: true, data: order });
