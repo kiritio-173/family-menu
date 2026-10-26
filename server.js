@@ -41,10 +41,20 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.31.9';
+const APP_VERSION = '1.31.10';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.31.10',
+    date: '2026-10-26',
+    title: '收紧账户家庭访问边界',
+    items: [
+      '账户创建的家庭必须使用有效的全局账户会话访问家庭状态，设备令牌不能替代账户登录',
+      '账户创建的家庭只允许已登录账户提交加入申请，无效或匿名令牌会被拒绝',
+      '跨家庭姓名与成员状态读取回归测试覆盖多个家庭账户场景',
+    ],
+  },
   {
     version: '1.31.9',
     date: '2026-10-26',
@@ -949,6 +959,17 @@ function accountUserId(req) {
   return a ? a.scope.userId : '';
 }
 
+// 一旦数据里已经存在全局账户，就进入账户优先模式。旧的无账户数据仍保留
+// 一段兼容窗口，便于启动迁移；新请求不能再把匿名访问当成家庭成员。
+function accountModelEnabled() {
+  return Array.isArray(state.users) && state.users.length > 0;
+}
+
+function householdUsesAccounts(householdId) {
+  const household = state.households.find((item) => item.id === householdId);
+  return !!(household && household.createdByUserId);
+}
+
 function currentMember(req, householdId) {
   const uidForRequest = accountUserId(req);
   if (uidForRequest) return memberForUser(householdId, uidForRequest);
@@ -961,7 +982,9 @@ function currentMember(req, householdId) {
 /** 账户模式下，日常数据也只能读写已经加入的家庭；旧设备令牌继续走兼容路径。 */
 function accountCanAccessHousehold(req, householdId) {
   const account = accountSessionOf(req);
-  if (!account || !householdId) return !account || !householdId;
+  if (!householdId) return true;
+  if (!account && householdUsesAccounts(householdId)) return false;
+  if (!account) return true;
   if (sessionOf(req)) return true; // 绑定账户的超级授权可跨家庭
   return !!memberForUser(householdId, account.scope.userId);
 }
@@ -1615,6 +1638,7 @@ function normHousehold(input, prev) {
     status: (input.status ?? base.status) === 'approved' ? 'approved' : 'normal',
     pin: safeText(input.pin ?? base.pin, 12),
     members,
+    createdByUserId: safeText(input.createdByUserId ?? base.createdByUserId, 80),
     createdAt: base.createdAt || input.createdAt || nowISO(),
     updatedAt: nowISO(),
   };
@@ -3519,7 +3543,7 @@ function publicMembers(house) {
 /** 同样抹掉家庭口令 */
 function publicHousehold(h) {
   if (!h) return null;
-  const { pin, ...rest } = h;
+  const { pin, createdByUserId, ...rest } = h;
   return { ...rest, hasPin: !!pin, members: publicMembers(h) };
 }
 
@@ -4434,6 +4458,7 @@ async function handleAPI(req, res, url) {
     // 就能在返回的 JSON 里读到明文，管理口令形同虚设。
     const { adminPin, ...pubSettings } = state.settings;
     const account = accountSessionOf(req);
+    const device = deviceMember(req);
     if (adminPin && req.headers['x-auth-token'] && !isSuperAdmin(req)) {
       return sendError(res, 401, '超级管理员授权已失效，请重新输入全局管理口令');
     }
@@ -4441,9 +4466,15 @@ async function handleAPI(req, res, url) {
     const superAccess = account ? (!adminPin || !!sessionOf(req)) : isAuthed(req);
     const requestedHouseholdId = safeText(url.searchParams.get('householdId'), 40);
     const requestedHousehold = state.households.find((h) => h.id === requestedHouseholdId);
+    const hasAccountSession = !!account;
+    if (householdUsesAccounts(requestedHouseholdId) && !hasAccountSession) {
+      return sendError(res, 401, '请先登录账户');
+    }
     const isMemberOfRequested = !!(account && requestedHousehold && accountHouses.some((h) => h.id === requestedHousehold.id));
+    const isDeviceMemberOfRequested = !!(!householdUsesAccounts(requestedHouseholdId) && device && requestedHousehold && device.householdId === requestedHousehold.id &&
+      requestedHousehold.members.some((member) => member.id === device.memberId));
     const readOnlyExternal = !!(account && requestedHousehold && !isMemberOfRequested && !superAccess);
-    const allowedRequested = !account || superAccess || isMemberOfRequested || readOnlyExternal;
+    const allowedRequested = superAccess || isMemberOfRequested || isDeviceMemberOfRequested || (!account && !accountModelEnabled());
     // 账户登录后默认没有当前家庭；只有显式传入已加入家庭（或公开家庭）才进入家庭上下文。
     // 超级管理员也可以保持无家庭上下文，此时只看全局共享菜单和平台数据。
     const visibleHouseholdId = allowedRequested && requestedHousehold ? requestedHousehold.id : '';
@@ -4550,6 +4581,10 @@ async function handleAPI(req, res, url) {
   if (route[0] === 'join-requests') {
     const id = route[1];
     const body = method !== 'GET' ? await readBody(req) : {};
+
+    if (householdUsesAccounts(safeText(body.householdId, 40)) && !accountSessionOf(req)) {
+      return sendError(res, 401, '请先登录账户，再申请加入家庭');
+    }
 
     if (method === 'GET') {
       // 管理员看全部（超管，或者至少管着一个家的 owner）；
@@ -4880,6 +4915,7 @@ async function handleAPI(req, res, url) {
       const body = await readBody(req);
       const h = normHousehold({
         ...body,
+        createdByUserId: accountUserId(req),
         emoji: safeText(body.emoji, 4) || HOUSEHOLD_EMOJI[state.households.length % HOUSEHOLD_EMOJI.length],
       });
       if (!h) return sendError(res, 400, '家庭名称不能为空');

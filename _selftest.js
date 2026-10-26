@@ -146,7 +146,8 @@ async function stop(child) {
 async function waitReady(child) {
   for (let i = 0; i < 60; i++) {
     try {
-      const r = await fetch(BASE + '/api/state');
+      // 状态接口在账户模型启用后要求登录；版本接口保持公开，适合作为启动探针。
+      const r = await fetch(BASE + '/api/version');
       if (r.ok) return true;
     } catch (_) {
       /* 还没起来 */
@@ -1903,13 +1904,16 @@ async function main() {
   eq('公共菜一点没动', after.dishes.find((d) => d.id === ppDish.id).category, ppCat);
 
   // ---- 普通用户状态范围与做饭状态 ----
+  const applicantAccount = await registerAccount('申请人账户');
+  eq('普通申请账户注册成功', applicantAccount.status, 200);
   const joinReq = await post('/api/join-requests', {
     name: '申请人',
     householdId: hhB,
     note: '测试申请',
-  });
+  }, undefined, undefined, undefined, undefined, applicantAccount.token);
   eq('加入申请普通用户可以提交', joinReq.status, 200);
-  const scoped = (await get(`/api/state?householdId=${encodeURIComponent(hhA)}&memberName=申请人`)).body.data;
+  const scopedResponse = await get(`/api/state?householdId=${encodeURIComponent(hhA)}`, undefined, undefined, undefined, undefined, applicantAccount.token);
+  const scoped = scopedResponse.body?.data || {};
   ok('普通用户状态带 access', scoped.access && Array.isArray(scoped.access.requests), scoped.access);
   eq('普通用户看不到别家私菜', scoped.dishes.some((d) => d.id === bDishX.id), false);
   eq('普通用户看不到别家点餐', scoped.orders.some((o) => o.householdId === hhB), false);
@@ -2355,6 +2359,17 @@ async function main() {
     (await req('PUT', '/api/settings', { adminPin: 'external-test' }, undefined, undefined, undefined, undefined, accA.token)).status,
     200);
   const accB = await registerAccount('申请加入用户');
+  eq('已有账户后匿名不能读取家庭状态',
+    (await req('GET', `/api/state?householdId=${encodeURIComponent(created[0].id)}`, undefined, undefined, undefined, undefined, undefined, false)).status,
+    401);
+  ok('已有账户后匿名不能点餐',
+    [401, 403].includes((await req('POST', '/api/orders', { householdId: created[0].id, dishName: '匿名越权点菜' }, undefined, undefined, undefined, undefined, false)).status));
+  eq('已有账户后匿名不能申请加入',
+    (await req('POST', '/api/join-requests', { householdId: created[0].id, name: '匿名申请' }, undefined, undefined, undefined, undefined, false)).status,
+    401);
+  eq('已有账户后匿名仍可读取原料预设',
+    (await req('GET', '/api/ingredient-presets', undefined, undefined, undefined, undefined, undefined, false)).status,
+    200);
   const bBefore = await req('GET', `/api/state?householdId=${encodeURIComponent(created[0].id)}`, undefined, undefined, undefined, undefined, undefined, accB.token);
   eq('未加入账号看不到目标家庭私菜', bBefore.status, 200);
   ok('未加入账号状态不含目标私菜', !(bBefore.body.data.dishes || []).some((d) => d.name === '账户私菜'));
@@ -2383,14 +2398,16 @@ async function main() {
   eq('账户改名接口成功', profileChanged.status, 200);
   eq('账户响应返回新姓名', profileChanged.body?.data?.user?.displayName, '统一新姓名');
   const oneState = await req('GET', `/api/state?householdId=${encodeURIComponent(familyOne.body.data.id)}`, undefined, undefined, undefined, undefined, undefined, globalToken);
-  const twoState = await req('GET', `/api/state?householdId=${encodeURIComponent(familyTwo.body.data.id)}`, undefined, undefined, undefined, undefined, undefined, undefined, globalToken);
+  const twoState = await req('GET', `/api/state?householdId=${encodeURIComponent(familyTwo.body.data.id)}`, undefined, undefined, undefined, undefined, undefined, globalToken);
   const oneMe = oneState.body?.data?.households?.find((h) => h.id === familyOne.body.data.id)?.members?.[0];
   const twoMe = twoState.body?.data?.households?.find((h) => h.id === familyTwo.body.data.id)?.members?.[0];
+  ok('两个家庭状态都可读取', oneState.status === 200 && twoState.status === 200, { one: oneState.status, two: twoState.status, oneError: oneState.body?.error, twoError: twoState.body?.error });
   eq('第一家庭成员姓名跟随全局账户', oneMe?.name, '统一新姓名');
   eq('第二家庭成员姓名跟随全局账户', twoMe?.name, '统一新姓名');
   const canonicalDish = await req('POST', `/api/my-dishes?householdId=${encodeURIComponent(familyOne.body.data.id)}`, { name: '全局作者菜', category: '家常菜' }, undefined, undefined, undefined, undefined, globalToken);
   eq('全局姓名账户新增私菜', canonicalDish.status, 200);
-  const dishAfterRename = (await req('GET', `/api/state?householdId=${encodeURIComponent(familyOne.body.data.id)}`, undefined, undefined, undefined, undefined, undefined, undefined, globalToken)).body.data.dishes.find((d) => d.name === '全局作者菜');
+  const renamedState = await req('GET', `/api/state?householdId=${encodeURIComponent(familyOne.body.data.id)}`, undefined, undefined, undefined, undefined, undefined, globalToken);
+  const dishAfterRename = renamedState.body?.data?.dishes?.find((d) => d.name === '全局作者菜');
   eq('菜单菜品作者姓名跟随全局账户', dishAfterRename?.authorName, '统一新姓名');
   const forgedJoin = await req('POST', '/api/join-requests', { householdId: familyOne.body.data.id, name: '伪造姓名' }, undefined, undefined, undefined, undefined, accB.token);
   eq('申请接口忽略客户端伪造姓名', forgedJoin.body?.data?.name, accB.user?.displayName || accB.user?.loginId);
