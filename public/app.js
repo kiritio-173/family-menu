@@ -3023,7 +3023,6 @@ function openOrderForm(dish) {
   // 弹层里的多选：点一下勾上，提交时一次下好几道
   S.orderPickSel = new Set(d ? [d.id] : []);
   S.orderMethodSel = {};
-  if (d && d.methods && d.methods.length === 1) S.orderMethodSel[d.id] = d.methods[0].id;
 
   const picker = scopeDishes()
     .map((x) => {
@@ -3107,8 +3106,7 @@ function syncOrderPickBtn() {
   holder.innerHTML = ids.map((id) => {
     const d = dishById(id);
     if (!d || !Array.isArray(d.methods) || !d.methods.length) return `<div class="section-sub">${esc(d ? d.name : '')}：没有单独做法，按通用材料计算</div>`;
-    const selected = S.orderMethodSel && S.orderMethodSel[id] || (d.methods.length === 1 ? d.methods[0].id : '');
-    if (S.orderMethodSel && selected) S.orderMethodSel[id] = selected;
+    const selected = S.orderMethodSel && S.orderMethodSel[id] || '';
     return `<label class="field-label" style="display:block;margin:8px 0 4px">${esc(d.name)}
       <select class="select" data-act="order-method" data-id="${esc(id)}">
         <option value="">请选择做法</option>
@@ -3352,8 +3350,7 @@ function syncPlanPickBtn() {
   holder.innerHTML = [...(S.planPickSel || new Set())].map((id) => {
     const d = dishById(id);
     if (!d || !d.methods || !d.methods.length) return `<div class="section-sub">${esc(d ? d.name : '')}：没有单独做法</div>`;
-    const selected = S.planMethodSel && S.planMethodSel[id] || (d.methods.length === 1 ? d.methods[0].id : '');
-    if (S.planMethodSel && selected) S.planMethodSel[id] = selected;
+    const selected = S.planMethodSel && S.planMethodSel[id] || '';
     return `<label class="field-label" style="display:block;margin:8px 0 4px">${esc(d.name)}
       <select class="select" data-act="plan-method" data-id="${esc(id)}">
         <option value="">请选择做法</option>
@@ -7301,7 +7298,7 @@ const ACTIONS = {
       render();
       toast(`已从${planWeekTitle(week)}拿掉`);
     } else {
-      if (dish.methods && dish.methods.length > 1) {
+      if (dish.methods && dish.methods.length) {
         openPlanPicker(week);
         S.planPickSel = new Set([dish.id]);
         syncPlanPickBtn();
