@@ -1787,7 +1787,9 @@ async function stockOneUnlocked(name, parts, options) {
     await api('POST', '/api/pantry', {
       householdId,
       name,
-      category,
+      ...(item && item.ingredientId ? { ingredientId: item.ingredientId } : {}),
+      category: item && item.category || category,
+      trackingMode: item && item.trackingMode || 'quantity',
       quantity,
       unit,
       expireAt: '',

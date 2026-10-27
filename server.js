@@ -41,10 +41,20 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.31.10';
+const APP_VERSION = '1.31.11';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.31.11',
+    date: '2026-10-27',
+    title: '修复菜单计划库存联动',
+    items: [
+      '编辑菜谱或家庭原料后清除受影响计划的旧入库确认，按最新材料重新计算采购缺口',
+      '原料从调味干货改回普通分类时恢复数量追踪，并移除无法换算余量的旧有无库存',
+      '点餐页采购入库保留家庭原料 ID、分类和追踪方式，菜单、计划和库存使用同一原料引用',
+    ],
+  },
   {
     version: '1.31.10',
     date: '2026-10-26',
@@ -1260,7 +1270,11 @@ function normIngredient(input, base) {
   const categoryRoot = pantryCategoryLabel(householdId, categoryId).split(' > ')[0];
   const mode = input.defaultTrackingMode ?? (base && base.defaultTrackingMode);
   const categoryChanged = !base || (input.categoryId !== undefined && input.categoryId !== base.categoryId);
-  const trackingMode = categoryRoot === '调味干货' && categoryChanged ? 'presence' : mode === 'presence' ? 'presence' : 'quantity';
+  // 分类切换时重新决定默认追踪方式：进入调味干货是有无，离开调味干货默认回到数量。
+  // 只有调用方明确传入 presence 时，普通分类才保留有无模式。
+  const trackingMode = categoryChanged
+    ? (categoryRoot === '调味干货' ? 'presence' : (input.defaultTrackingMode === 'presence' ? 'presence' : 'quantity'))
+    : mode === 'presence' ? 'presence' : 'quantity';
   return {
     id: safeText((base && base.id) || input.id, 80) || uid('ing_'),
     householdId,
@@ -1948,6 +1962,41 @@ function findPlan(householdId, weekOf, create) {
     state.plans.push(plan);
   }
   return plan || null;
+}
+
+/** 菜谱或原料定义变化后，旧的计划入库确认不能继续代表当前需求。 */
+function invalidatePlanReceipts(filter) {
+  let changed = false;
+  for (const plan of state.plans) {
+    if (filter && !filter(plan)) continue;
+    if (!Object.keys(plan.received || {}).length && !Object.keys(plan.receiveRequests || {}).length) continue;
+    plan.received = {};
+    plan.receiveRequests = {};
+    plan.updatedAt = nowISO();
+    changed = true;
+  }
+  if (changed) scheduleSave('plans');
+  return changed;
+}
+
+function invalidatePlansForDish(dishId, householdId) {
+  return invalidatePlanReceipts((plan) =>
+    (!householdId || plan.householdId === householdId) &&
+    (plan.items || []).some((item) => item.status !== 'done' && item.dishId === dishId)
+  );
+}
+
+function invalidatePlansForIngredient(ingredientId, householdId) {
+  if (!ingredientId) return false;
+  const affectedDishIds = new Set();
+  state.dishes.forEach((dish) => {
+    const rows = [...(dish.seasonings || []), ...(dish.methods || []).flatMap((method) => method.seasonings || [])];
+    if (rows.some((row) => row && row.ingredientId === ingredientId)) affectedDishIds.add(dish.id);
+  });
+  return invalidatePlanReceipts((plan) =>
+    (!householdId || plan.householdId === householdId) &&
+    (plan.items || []).some((item) => item.status !== 'done' && affectedDishIds.has(item.dishId))
+  );
 }
 
 function loadState() {
@@ -4413,6 +4462,7 @@ async function handleAPI(req, res, url) {
       if (method === 'PUT') {
         const body = await readBody(req);
         if (body.householdId && body.householdId !== existing.householdId) return sendError(res, 400, '不能更改原料所属家庭');
+        const previousTrackingMode = existing.defaultTrackingMode;
         const ingredient = normIngredient({ ...existing, ...body, householdId: existing.householdId }, existing);
         if (!ingredient || !ingredient.categoryId || !pantryCategoryExists(existing.householdId, ingredient.categoryId)) return sendError(res, 400, '请选择本家庭有效分类');
         const categoryLabel = pantryCategoryLabel(existing.householdId, ingredient.categoryId);
@@ -4422,6 +4472,15 @@ async function handleAPI(req, res, url) {
         }
         state.ingredients[index] = ingredient;
         scheduleSave('ingredients');
+        let pantryChanged = false;
+        if (previousTrackingMode === 'presence' && ingredient.defaultTrackingMode !== 'presence') {
+          const before = state.pantry.length;
+          // 有无库存没有可转换成数量的单位和余量，不能猜一个数量；改回普通分类后要求重新入库。
+          state.pantry = state.pantry.filter((pantry) =>
+            !(pantry.householdId === existing.householdId && pantry.ingredientId === id && pantry.trackingMode === 'presence')
+          );
+          pantryChanged = state.pantry.length !== before;
+        }
         state.pantry.forEach((pantry) => {
           if (pantry.householdId !== existing.householdId || pantry.ingredientId !== id) return;
           pantry.name = ingredient.name;
@@ -4434,8 +4493,10 @@ async function handleAPI(req, res, url) {
             pantry.unit = '';
           }
           pantry.updatedAt = nowISO();
+          pantryChanged = true;
         });
-        scheduleSave('pantry');
+        if (pantryChanged) scheduleSave('pantry');
+        invalidatePlansForIngredient(id, existing.householdId);
         return sendJSON(res, 200, { ok: true, data: ingredient });
       }
       const referencedByDish = state.dishes.some((dish) =>
@@ -4805,6 +4866,7 @@ async function handleAPI(req, res, url) {
         if (bad) return sendError(res, 400, bad);
         state.dishes[idx] = dish;
         scheduleSave('dishes');
+        invalidatePlansForDish(dish.id, dish.householdId || '');
         return sendJSON(res, 200, { ok: true, data: publicDish(dish) });
       }
       if (method === 'DELETE') {
@@ -5307,10 +5369,26 @@ async function handleAPI(req, res, url) {
       if (linkedIngredient && requestedCategory && requestedCategory !== pantryCategoryLabel(existing.householdId, linkedIngredient.categoryId)) {
         const categoryId = pantryCategoryIdByLabel(existing.householdId, requestedCategory);
         if (categoryId) {
+          const previousTrackingMode = linkedIngredient.defaultTrackingMode;
           linkedIngredient.categoryId = categoryId;
           const categoryRoot = pantryCategoryLabel(existing.householdId, categoryId).split(' > ')[0];
-          if (categoryRoot === '调味干货') linkedIngredient.defaultTrackingMode = 'presence';
+          linkedIngredient.defaultTrackingMode = categoryRoot === '调味干货'
+            ? 'presence'
+            : (body.trackingMode === 'presence' ? 'presence' : 'quantity');
+          linkedIngredient.defaultUnit = linkedIngredient.defaultTrackingMode === 'presence'
+            ? ''
+            : safeText(body.unit || linkedIngredient.defaultUnit, 20).trim();
           linkedIngredient.updatedAt = nowISO();
+          if (previousTrackingMode === 'presence' && linkedIngredient.defaultTrackingMode !== 'presence') {
+            const before = state.pantry.length;
+            state.pantry = state.pantry.filter((pantry) =>
+              !(pantry.householdId === existing.householdId && pantry.ingredientId === linkedIngredient.id && pantry.trackingMode === 'presence')
+            );
+            scheduleSave('ingredients');
+            if (state.pantry.length !== before) scheduleSave('pantry');
+            invalidatePlansForIngredient(linkedIngredient.id, existing.householdId);
+            return sendJSON(res, 200, { ok: true, data: { deleted: true, id, reason: '改回数量分类后需要重新录入余量' } });
+          }
           state.pantry.filter((pantry) => pantry.householdId === existing.householdId && pantry.ingredientId === linkedIngredient.id)
             .forEach((pantry) => {
               pantry.category = pantryCategoryLabel(existing.householdId, categoryId);
@@ -5325,6 +5403,7 @@ async function handleAPI(req, res, url) {
             });
           scheduleSave('ingredients');
           scheduleSave('pantry');
+          invalidatePlansForIngredient(linkedIngredient.id, existing.householdId);
         }
       }
       const item = normPantryItem(body, state.pantry[idx]);
@@ -5682,6 +5761,7 @@ async function handleAPI(req, res, url) {
       if (bad) return sendError(res, 400, bad);
       state.dishes[idx] = dish;
       scheduleSave('dishes');
+      invalidatePlansForDish(dish.id, dish.householdId || '');
       return sendJSON(res, 200, { ok: true, data: publicDish(dish) });
     }
     if (method === 'POST' && route[2] === 'duplicate' && id) {

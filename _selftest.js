@@ -2718,6 +2718,56 @@ async function main() {
   eq('库存不能引用同家庭之外的原料 ID', (await req('POST', '/api/pantry', {
     householdId: 'h_legacy-ingredients', name: '外部牛排', ingredientId: migrationForeignIngredient.id, quantity: 1, unit: '份',
   }, undefined, undefined, undefined, undefined, migrationLogin.token)).status, 400);
+
+  /* ---------- 菜单、计划、库存联动边界 ---------- */
+  console.log('\n[31] 菜单、计划、库存联动边界');
+  const linkageDish = (await req('POST', '/api/my-dishes?householdId=h_legacy-ingredients', {
+    name: '联动重算测试菜', category: '家常菜',
+    seasonings: [{ name: '牛里脊', amount: '100 g', ingredientId: tenderloinRef }],
+    methods: [{ name: '煎制', steps: ['煎熟'], seasonings: [] }],
+  }, undefined, undefined, undefined, undefined, migrationLogin.token)).body.data;
+  const linkageMethodId = linkageDish.methods[0].id;
+  const linkagePlan = await req('POST', '/api/plans/items', {
+    householdId: 'h_legacy-ingredients', weekOf: monday, dishId: linkageDish.id, methodId: linkageMethodId,
+  }, undefined, undefined, undefined, undefined, migrationLogin.token);
+  const linkageReceipt = await req('POST', '/api/plans/receive', {
+    householdId: 'h_legacy-ingredients', weekOf: monday, name: '牛里脊', ingredientId: tenderloinRef,
+    quantity: 100, unit: 'g', requestId: 'linkage-receipt-before-edit',
+  }, undefined, undefined, undefined, undefined, migrationLogin.token);
+  eq('菜单联动测试计划入库成功', linkageReceipt.status, 200);
+  const editedLinkageDish = await req('PUT', `/api/my-dishes/${linkageDish.id}?householdId=h_legacy-ingredients`, {
+    name: linkageDish.name, category: linkageDish.category,
+    seasonings: [{ name: '牛里脊', amount: '300 g', ingredientId: tenderloinRef }],
+    methods: linkageDish.methods,
+  }, undefined, undefined, undefined, undefined, migrationLogin.token);
+  eq('菜单编辑成功', editedLinkageDish.status, 200);
+  const afterRecipeEditPlan = (await req('GET', `/api/plans?householdId=h_legacy-ingredients&weekOf=${encodeURIComponent(monday)}`, undefined, undefined, undefined, undefined, undefined, migrationLogin.token)).body.data;
+  eq('菜单编辑后清除计划入库确认', afterRecipeEditPlan.received, {});
+
+  const roundTripIngredient = await req('POST', '/api/ingredients?householdId=h_legacy-ingredients', {
+    name: '分类往返测试原料', aliases: [], categoryId: 'pantry-root-1', defaultTrackingMode: 'quantity', defaultUnit: 'g',
+  }, undefined, undefined, undefined, undefined, migrationLogin.token);
+  const roundTripPantry = await req('POST', '/api/pantry', {
+    householdId: 'h_legacy-ingredients', name: '分类往返测试原料', ingredientId: roundTripIngredient.body.data.id,
+    category: '肉类', trackingMode: 'quantity', quantity: 500, unit: 'g',
+  }, undefined, undefined, undefined, undefined, migrationLogin.token);
+  const seasoningMode = await req('PUT', `/api/ingredients/${roundTripIngredient.body.data.id}?householdId=h_legacy-ingredients`, {
+    categoryId: 'pantry-root-11', defaultTrackingMode: 'quantity', defaultUnit: '瓶',
+  }, undefined, undefined, undefined, undefined, migrationLogin.token);
+  eq('原料改为调味干货后为有无模式', seasoningMode.body.data.defaultTrackingMode, 'presence');
+  const backToQuantity = await req('PUT', `/api/ingredients/${roundTripIngredient.body.data.id}?householdId=h_legacy-ingredients`, {
+    categoryId: 'pantry-root-1', defaultTrackingMode: 'quantity', defaultUnit: 'g',
+  }, undefined, undefined, undefined, undefined, migrationLogin.token);
+  eq('原料改回普通分类后恢复数量模式', backToQuantity.body.data.defaultTrackingMode, 'quantity');
+  const afterCategoryRoundTrip = (await req('GET', '/api/state?householdId=h_legacy-ingredients', undefined, undefined, undefined, undefined, undefined, migrationLogin.token)).body.data;
+  ok('分类往返不留下调料有无库存', !afterCategoryRoundTrip.pantry.some((row) => row.ingredientId === roundTripIngredient.body.data.id && row.trackingMode === 'presence'));
+
+  const linkageAppSource = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
+  const orderStockBlock = linkageAppSource.slice(Math.max(0, linkageAppSource.indexOf("note: '从买菜清单入库'") - 500), linkageAppSource.indexOf("note: '从买菜清单入库'") + 20);
+  ok('点餐采购入库保留家庭原料 ID', /ingredientId/.test(orderStockBlock) && /trackingMode/.test(orderStockBlock));
+
+  const beforeAiState = await req('GET', '/api/state?householdId=h_legacy-ingredients', undefined, undefined, undefined, undefined, undefined, migrationLogin.token);
+  const beforeAiPantry = beforeAiState.body.data.pantry.find((row) => row.ingredientId === tenderloinRef);
   const mappedSteak = await req('POST', '/api/ingredients/apply-proposals', {
     householdId: 'h_legacy-ingredients',
     proposals: [{ inputName: '牛排', name: '牛排', aliases: ['西冷牛排'], categoryId: 'pantry-root-1', trackingMode: 'quantity' }],
@@ -2725,7 +2775,8 @@ async function main() {
   eq('确认 AI 建议保存原料映射', mappedSteak.status, 200);
   const mappedState = await req('GET', '/api/state?householdId=h_legacy-ingredients', undefined, undefined, undefined, undefined, undefined, migrationLogin.token);
   eq('AI 确认更新做法级菜谱原料 ID', mappedState.body.data.dishes.find((dish) => dish.id === 'd_legacy-ingredients')?.methods[0]?.seasonings[0]?.ingredientId, steakRef);
-  eq('AI 确认不修改库存余量', [mappedState.body.data.pantry[0]?.quantity, mappedState.body.data.pantry[0]?.unit], [500, 'g']);
+  const afterAiPantry = mappedState.body.data.pantry.find((row) => row.ingredientId === tenderloinRef);
+  eq('AI 确认不修改库存余量', [afterAiPantry?.quantity, afterAiPantry?.unit], [beforeAiPantry?.quantity, beforeAiPantry?.unit]);
   const beforeInvalidBatch = await req('GET', '/api/ingredients?householdId=h_legacy-ingredients', undefined, undefined, undefined, undefined, undefined, migrationLogin.token);
   const invalidBatch = await req('POST', '/api/ingredients/apply-proposals', {
     householdId: 'h_legacy-ingredients',
