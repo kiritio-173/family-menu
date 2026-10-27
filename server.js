@@ -41,10 +41,20 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.31.11';
+const APP_VERSION = '1.31.12';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.31.12',
+    date: '2026-10-27',
+    title: '修复计划完成扣库存匹配',
+    items: [
+      '共享菜或旧菜谱缺少原料 ID 时，完成计划会按当前家庭原料名称、别名和明确同义名匹配库存',
+      '支持牛里脊/牛瘦肉等复合材料在唯一候选时匹配；多个候选不猜测、不误扣并保留提醒',
+      '同一材料的带 ID 库存与旧的无 ID 同名库存都能正确处理，数量型库存按完成用量扣减并在归零后移除',
+    ],
+  },
   {
     version: '1.31.11',
     date: '2026-10-27',
@@ -1342,6 +1352,40 @@ function findHouseholdIngredient(householdId, name) {
     (ingredient.name.toLocaleLowerCase() === key || ingredient.aliases.some((alias) => alias.toLocaleLowerCase() === key))) || null;
 }
 
+/**
+ * 完成共享菜或旧菜谱时，将没有 ingredientId 的材料解析到当前家庭原料。
+ * 只接受明确的名称、别名或内置同义名；复合名称只有在唯一一项能匹配时才解析，
+ * 避免把牛里脊和牛排这类不同原料仅因同属肉类而错误合并。
+ */
+function resolveRecipeIngredient(householdId, row) {
+  if (!householdId || !row) return null;
+  const requestedId = safeText(row.ingredientId, 80).trim();
+  if (requestedId) {
+    const byId = state.ingredients.find((ingredient) =>
+      ingredient.id === requestedId && ingredient.householdId === householdId);
+    if (byId) return byId;
+  }
+  const name = safeText(row.name, 80).trim();
+  if (!name) return null;
+  const direct = findHouseholdIngredient(householdId, name);
+  if (direct) return direct;
+
+  // 采购/共享菜中偶尔会写成“牛里脊/牛瘦肉”。仅当拆分后恰好只有一个
+  // 家庭原料能对应时才使用，多个命中则保守地交给用户确认。
+  const parts = name
+    .split(/[\/／、,，;；]|\s+(?:或|或者)\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length < 2) return null;
+  const matches = [];
+  parts.forEach((part) => {
+    const match = findHouseholdIngredient(householdId, part) || state.ingredients.find((ingredient) =>
+      ingredient.householdId === householdId && pantryIngredientKey(ingredient.name) === pantryIngredientKey(part));
+    if (match && !matches.some((item) => item.id === match.id)) matches.push(match);
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
 function ensureHouseholdIngredient(householdId, row, pantryCategory) {
   const name = safeText(row && row.name, 80).trim();
   if (!name || !householdId) return null;
@@ -1827,11 +1871,12 @@ function consumeDishPantry(householdId, dish, methodId) {
   const totals = new Map();
   const warnings = [];
   dishRecipeIngredients(dish, methodId).forEach((s) => {
-    const ingredient = s.ingredientId
-      ? state.ingredients.find((row) => row.id === s.ingredientId && row.householdId === householdId)
-      : null;
+    const ingredient = resolveRecipeIngredient(householdId, s);
     const matchesPantryIngredient = (row) => row.householdId === householdId &&
-      (ingredient ? row.ingredientId === ingredient.id : pantryIngredientKey(row.name) === pantryIngredientKey(s.name));
+      (ingredient
+        ? row.ingredientId === ingredient.id ||
+          (!row.ingredientId && pantryIngredientKey(row.name) === pantryIngredientKey(s.name))
+        : pantryIngredientKey(row.name) === pantryIngredientKey(s.name));
     const presenceTracked = (ingredient && ingredient.defaultTrackingMode === 'presence') ||
       (!ingredient && isKnownSeasoning(s.name)) || state.pantry.some((row) =>
         matchesPantryIngredient(row) && row.trackingMode === 'presence');
@@ -1849,7 +1894,7 @@ function consumeDishPantry(householdId, dish, methodId) {
     }
     const ingredientKey = ingredient ? `id:${ingredient.id}` : `name:${pantryIngredientKey(s.name)}`;
     const key = `${ingredientKey}|${pantryUnitKey(amount.unit)}`;
-    const current = totals.get(key) || { name: ingredient ? ingredient.name : s.name, ingredientId: ingredient?.id || '', unit: amount.unit, quantity: 0 };
+    const current = totals.get(key) || { name: s.name, ingredientId: ingredient?.id || '', unit: amount.unit, quantity: 0 };
     current.quantity += amount.quantity;
     totals.set(key, current);
   });
@@ -1859,7 +1904,8 @@ function consumeDishPantry(householdId, dish, methodId) {
     const rows = state.pantry
       .filter((p) => p.householdId === householdId &&
         (need.ingredientId
-          ? p.ingredientId === need.ingredientId
+          ? p.ingredientId === need.ingredientId ||
+            (!p.ingredientId && pantryIngredientKey(p.name) === pantryIngredientKey(need.name))
           : !p.ingredientId && pantryIngredientKey(p.name) === pantryIngredientKey(need.name)) &&
         pantryUnitKey(p.unit) === pantryUnitKey(need.unit))
       .sort((a, b) => String(a.expireAt || '9999-12-31').localeCompare(String(b.expireAt || '9999-12-31')));

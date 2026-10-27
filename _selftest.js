@@ -2762,6 +2762,24 @@ async function main() {
   const afterCategoryRoundTrip = (await req('GET', '/api/state?householdId=h_legacy-ingredients', undefined, undefined, undefined, undefined, undefined, migrationLogin.token)).body.data;
   ok('分类往返不留下调料有无库存', !afterCategoryRoundTrip.pantry.some((row) => row.ingredientId === roundTripIngredient.body.data.id && row.trackingMode === 'presence'));
 
+  const sharedReferenceIngredient = await req('POST', '/api/ingredients?householdId=h_legacy-ingredients', {
+    name: '共享引用牛肉', aliases: ['共享牛肉'], categoryId: 'pantry-root-1', defaultTrackingMode: 'quantity', defaultUnit: 'g',
+  }, undefined, undefined, undefined, undefined, migrationLogin.token);
+  const sharedReferencePantry = await req('POST', '/api/pantry', {
+    householdId: 'h_legacy-ingredients', name: '共享牛肉', ingredientId: sharedReferenceIngredient.body.data.id,
+    category: '肉类', trackingMode: 'quantity', quantity: 500, unit: 'g',
+  }, undefined, undefined, undefined, undefined, migrationLogin.token);
+  const sharedReferenceDish = (await req('POST', '/api/my-dishes?householdId=h_legacy-ingredients', {
+    name: '无原料 ID 菜谱', category: '家常菜', seasonings: [{ name: '共享牛肉', amount: '100 g' }],
+  }, undefined, undefined, undefined, undefined, migrationLogin.token)).body.data;
+  const sharedReferencePlan = await req('POST', '/api/plans/items', {
+    householdId: 'h_legacy-ingredients', weekOf: monday, dishId: sharedReferenceDish.id,
+  }, undefined, undefined, undefined, undefined, migrationLogin.token);
+  const sharedReferenceDone = await req('PATCH', `/api/plans/items/${sharedReferencePlan.body.data.item.id}`, { status: 'done' }, undefined, undefined, undefined, undefined, migrationLogin.token);
+  eq('无原料 ID 菜谱完成成功', sharedReferenceDone.status, 200);
+  const afterSharedReferenceConsume = (await req('GET', '/api/state?householdId=h_legacy-ingredients', undefined, undefined, undefined, undefined, undefined, migrationLogin.token)).body.data;
+  eq('共享菜原料能匹配家庭库存 ID', afterSharedReferenceConsume.pantry.find((row) => row.id === sharedReferencePantry.body.data.id)?.quantity, 400);
+
   const linkageAppSource = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
   const orderStockBlock = linkageAppSource.slice(Math.max(0, linkageAppSource.indexOf("note: '从买菜清单入库'") - 500), linkageAppSource.indexOf("note: '从买菜清单入库'") + 20);
   ok('点餐采购入库保留家庭原料 ID', /ingredientId/.test(orderStockBlock) && /trackingMode/.test(orderStockBlock));
