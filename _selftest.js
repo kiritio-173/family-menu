@@ -290,6 +290,7 @@ async function main() {
   eq('指定家庭就记到那个家', o2.householdId, h301.id);
   eq('点餐默认一份', o2.people, 1);
   eq('点餐默认晚餐', o2.mealSlot, 'dinner');
+  eq('单一做法未传 methodId 自动补齐', o2.methodId, DISH.methods[0].id);
   const o3 = (await post('/api/orders', { dishId: DISH.id, dishName: DISH.name, householdId: '幽灵家庭' })).body.data;
   ok('未知 householdId 不会丢数据', !!o3.householdId, o3.householdId);
 
@@ -297,6 +298,14 @@ async function main() {
   eq('三条点餐分散到不同家庭', st.orders.length, 3);
   eq('默认家庭 2 条', st.orders.filter((o) => o.householdId === st.households[0].id).length, 2);
   eq('302 室 1 条', st.orders.filter((o) => o.householdId === h301.id).length, 1);
+
+  const crossHouseBatch = await req('PATCH', '/api/orders', {
+    ids: [o1.id, o2.id],
+    status: 'cooking',
+  });
+  eq('批量点餐混入其他家庭时整批拒绝', crossHouseBatch.status, 400);
+  eq('批量拒绝不改变家庭 A 订单', (await get('/api/state')).body.data.orders.find((o) => o.id === o1.id).status, 'pending');
+  eq('批量拒绝不改变家庭 B 订单', (await get('/api/state')).body.data.orders.find((o) => o.id === o2.id).status, 'pending');
 
   // 清空已完成只影响指定家庭
   await req('PATCH', `/api/orders/${o1.id}`, { status: 'done' });
@@ -414,6 +423,47 @@ async function main() {
   await del(`/api/dishes/${throwaway.id}`);
   eq('删菜品时计划里的引用也清掉',
     (await get(`/api/plans?householdId=${h301.id}&weekOf=${monday}`)).body.data.items.filter((i) => i.dishId === throwaway.id).length, 0);
+
+  // 多做法菜必须显式选做法；单一做法由上面的点餐回归覆盖自动补齐。
+  const multiDish = (await post('/api/dishes', {
+    name: '回归多做法菜',
+    householdId: h301.id,
+    methods: [
+      { id: 'regression-method-a', name: '做法甲', steps: ['甲'] },
+      { id: 'regression-method-b', name: '做法乙', steps: ['乙'] },
+    ],
+  })).body.data;
+  const multiOrderMissing = await post('/api/orders', {
+    householdId: h301.id,
+    dishId: multiDish.id,
+    dishName: multiDish.name,
+  });
+  eq('多做法点餐未选做法被拒', multiOrderMissing.status, 400);
+  const multiOrderChosen = await post('/api/orders', {
+    householdId: h301.id,
+    dishId: multiDish.id,
+    dishName: multiDish.name,
+    methodId: 'regression-method-b',
+  });
+  eq('多做法点餐选择做法成功', multiOrderChosen.status, 200);
+  const multiPlanMissing = await post('/api/plans/items', {
+    householdId: h301.id,
+    weekOf: '2099-01-04',
+    dishId: multiDish.id,
+    name: multiDish.name,
+  });
+  eq('多做法计划未选做法被拒', multiPlanMissing.status, 400);
+  const multiPlanChosen = await post('/api/plans/items', {
+    householdId: h301.id,
+    weekOf: '2099-01-04',
+    dishId: multiDish.id,
+    name: multiDish.name,
+    methodId: 'regression-method-b',
+  });
+  eq('多做法计划选择做法成功', multiPlanChosen.status, 200);
+  if (multiOrderChosen.body.data && multiOrderChosen.body.data.id) await del(`/api/orders/${multiOrderChosen.body.data.id}`);
+  if (multiPlanChosen.body.data && multiPlanChosen.body.data.item && multiPlanChosen.body.data.item.id) await del(`/api/plans/items/${multiPlanChosen.body.data.item.id}`);
+  await del(`/api/dishes/${multiDish.id}`);
 
   /* ---------- 库存 ---------- */
   console.log('\n[5] 库存');

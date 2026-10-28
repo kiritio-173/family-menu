@@ -41,10 +41,19 @@ const AUTO_OPEN = process.argv.includes('--open') || process.env.AUTO_OPEN === '
  * 网页上就会出现一个空白的更新日志，比没有还糟。
  * ------------------------------------------------------------------ */
 
-const APP_VERSION = '1.31.12';
+const APP_VERSION = '1.31.13';
 
 // 新的排在前面；date 只写发布年月日，不用精确到时分
 const RELEASES = [
+  {
+    version: '1.31.13',
+    date: '2026-10-28',
+    title: '收紧做法选择与点餐批量边界',
+    items: [
+      '单一做法的菜在点餐和加入计划时自动补齐；多做法的菜必须明确选择做法',
+      '批量更新点餐状态前校验所有记录属于同一家庭，混入其他家庭时整批拒绝且不改数据',
+    ],
+  },
   {
     version: '1.31.12',
     date: '2026-10-27',
@@ -5256,10 +5265,12 @@ async function handleAPI(req, res, url) {
       if (!requireAccountHousehold(req, res, resolveHouseholdId(body.householdId))) return;
       const dish = body.dishId ? state.dishes.find((d) => d.id === body.dishId) : null;
       if (body.dishId && !dish) return sendError(res, 400, '菜谱不存在，请刷新后重试');
+      const methods = dish && Array.isArray(dish.methods) ? dish.methods.filter(Boolean) : [];
       const selectedMethod = dish && body.methodId
-        ? (dish.methods || []).find((candidate) => candidate.id === safeText(body.methodId, 80))
-        : null;
+        ? methods.find((candidate) => candidate.id === safeText(body.methodId, 80))
+        : (methods.length === 1 ? methods[0] : null);
       if (body.methodId && !selectedMethod) return sendError(res, 400, '所选做法不属于这道菜，请重新选择');
+      if (dish && methods.length > 1 && !selectedMethod) return sendError(res, 400, '这道菜有多个做法，请先选择做法');
       const selectedMethodId = selectedMethod ? selectedMethod.id : '';
       const selectedMethodName = selectedMethod ? selectedMethod.name : '';
       const item = normPlanItem({
@@ -5948,9 +5959,11 @@ async function handleAPI(req, res, url) {
         const methods = Array.isArray(dish.methods) ? dish.methods : [];
         if (methods.length) {
           const selected = methods.find((candidate) => candidate.id === order.methodId);
-          // 旧客户端没有做法字段时兼容选择第一种；新客户端必须显式带上选择。
           if (!selected && body.methodId) return sendError(res, 400, '请重新选择这道菜的做法');
-          if (!selected) {
+          if (!selected && methods.length > 1) {
+            return sendError(res, 400, '这道菜有多个做法，请先选择做法');
+          }
+          if (!selected && methods.length === 1) {
             order.methodId = methods[0].id;
             order.methodName = methods[0].name;
           } else {
@@ -6003,9 +6016,16 @@ async function handleAPI(req, res, url) {
       const ids = Array.isArray(body.ids) ? body.ids.map((s) => safeText(s, 40)).filter(Boolean) : [];
       if (!ids.length) return sendError(res, 400, '没有选中任何一条');
       const set = new Set(ids);
+      const targets = state.orders.filter((o) => set.has(o.id));
+      if (targets.length !== set.size) return sendError(res, 404, '有点餐记录不存在，请刷新后重试');
+      const householdId = targets[0] && targets[0].householdId;
+      if (!householdId || targets.some((o) => o.householdId !== householdId)) {
+        return sendError(res, 400, '不能跨家庭批量更新点餐，请只选择当前家庭的记录');
+      }
+      if (!requireAccountHousehold(req, res, householdId)) return;
       let n = 0;
       const now = nowISO();
-      state.orders.forEach((o) => {
+      targets.forEach((o) => {
         if (!set.has(o.id)) return;
         o.status = status;
         o.updatedAt = now;
